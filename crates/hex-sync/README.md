@@ -11,8 +11,8 @@ Per file:
   replaces it while the sync works on it is left alone;
 - absent in the Archive: copy (to `.hex-sync-<n>.tmp`, fsync, exclusive rename), verify by
   SHA-256, remove the claim;
-- identical in the Archive (size, then hash), at the same path or at a `name (n).ext`: remove
-  the claim;
+- identical in the Archive (size, then hash), at the same path or at a `name (n).ext` up to
+  the first free `n`: remove the claim;
 - different in the Archive: copy as `name (n).ext` (lowest free `n`; `name (n)` without an
   extension), verify, remove the claim.
 
@@ -24,8 +24,10 @@ longer than 245 bytes can't be claimed, so they fail on every run and stay in th
 
 Reserved names: an Outbox file named `.hex-sync.<name>` is treated as a claim and restored to
 `<name>` before it is archived. In the Archive, `.hex-sync-<n>.tmp` names are used for temp
-files. A temp that is already there (left by a crash, or another run's) is logged as
-`stale-temp` when a copy into that folder meets it, and is never deleted: remove it by hand.
+files. A file already there under such a name (left by a crash, another run's temp, or a
+Document that happens to have that name) is logged as `stale-temp` when a copy into that
+folder meets it, and is never deleted. Check it is not a Document before removing it by
+hand.
 
 Skipped:
 
@@ -46,8 +48,9 @@ The run aborts before touching anything (exit `2`) in these cases:
   symlinks, firmlinks and bind mounts can't hide it;
 - the log lies inside either root, or is a symlink.
 
-The abort is logged, unless the log lies inside a root (even a missing one, such as an
-unmounted drive) or is a symlink. Then it goes to stderr only, so the abort creates nothing.
+An abort never creates a folder: it is appended to the log only if the log's folder already
+exists (and the log is neither inside a root nor a symlink), otherwise it goes to stderr only.
+So a log under a missing root, such as an unmounted drive, can't recreate that root.
 
 ## Config
 
@@ -71,12 +74,13 @@ hex-sync             # same as `hex-sync run`: sync once
 ```
 
 A dry run prints one line per planned action, including claims it would restore and the
-restored files' own plans, and appends `[failed: reason]` (or `[skipped]`/`[kept]`) to lines
-that aren't plans.
+restored files' own plans, and appends `[failed: reason]` or `[skipped]` to lines that aren't
+plans.
 
-Every action is appended to the log as one tab-separated line: timestamp, action, Outbox-relative
-path, target (relative to the Archive, or the Outbox for `restore-claim`; `-` if none),
-outcome. A tab or newline in a file name is written as is and breaks that line's format. Each
+Every action is appended to the log as one tab-separated line: timestamp, action, path
+(relative to the Outbox; to the Archive for `stale-temp`), target (relative to the Archive, or
+the Outbox for `restore-claim`; `-` if none), outcome. A tab or newline in a file name is
+written as is and breaks that line's format. Each
 line is also echoed to stdout; a closed stdout is ignored. If a log line can't be written, the
 line goes to stderr, the pass stops, and nothing more is moved.
 

@@ -134,12 +134,15 @@ impl Env {
     }
 
     /// Runs and asserts an abort: exit 2, "aborted" on stderr, and neither tree changed.
-    /// `logged`: whether the abort must be in the log, or the log must not exist.
+    /// `logged`: the log's folder exists beforehand (an abort never creates one) and the
+    /// abort must be in the log; otherwise the log must not exist afterwards.
     fn run_expecting_abort(&self, logged: bool) -> Output {
+        if logged {
+            fs::create_dir_all(self.log.parent().unwrap()).unwrap();
+        }
         let (outbox, archive) = (snapshot(&self.outbox), snapshot(&self.archive));
         let output = self.run(&[]);
-        assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(&output));
-        assert!(stderr(&output).contains("aborted"), "{}", stderr(&output));
+        assert_exit_2(&output, "aborted");
         assert_eq!(snapshot(&self.outbox), outbox);
         assert_eq!(snapshot(&self.archive), archive);
         if logged {
@@ -395,7 +398,7 @@ fn existing_file_with_temp_name_survives_and_is_reported() {
     assert_eq!(snapshot(&env.archive).len(), 2, "no temp left behind");
     assert!(
         env.log_text()
-            .contains("\tstale-temp\ta.pdf\t.hex-sync-0.tmp\tkept")
+            .contains("\tstale-temp\t.hex-sync-0.tmp\t-\tkept")
     );
 }
 
@@ -524,10 +527,10 @@ fn claim_that_cannot_be_restored_fails_the_run() {
         fs::read(env.outbox.join("d/.hex-sync.x.pdf")).unwrap(),
         b"claimed"
     );
-    assert!(
-        env.log_text()
-            .contains("\trestore-claim\td/.hex-sync.x.pdf\td/x.pdf\tfailed: ")
-    );
+    let log = env.log_text();
+    assert!(log.contains("\trestore-claim\td/.hex-sync.x.pdf\td/x.pdf\tfailed: "));
+    // A claim left in place is never claimed again.
+    assert!(!log.contains("\tclaim\t"), "{log}");
 }
 
 #[test]
@@ -691,6 +694,7 @@ fn aborts_when_root_is_unreadable() {
     let env = Env::new();
     write(&env.outbox.join("a.pdf"), b"stays");
     write(&env.archive.join("kept.pdf"), b"kept");
+    fs::create_dir_all(env.log.parent().unwrap()).unwrap();
     chmod(&env.outbox, 0o311);
 
     let output = env.run(&[]);
@@ -764,21 +768,21 @@ fn aborts_when_log_is_inside_a_root() {
 }
 
 #[test]
-fn aborts_without_creating_a_missing_archive_that_holds_the_log() {
-    let env = Env::new();
-    write(&env.outbox.join("a.pdf"), b"stays");
-    fs::remove_dir(&env.archive).unwrap();
-    env.set_paths(
-        &env.outbox,
-        &env.archive,
-        &env.archive.join(".logs/sync.log"),
-    );
+fn abort_never_creates_a_missing_root_that_holds_the_log() {
+    // Spelled plainly, and through `..`: no path comparison can catch every alias.
+    for log in ["archive/.logs/sync.log", "x/../archive/sync.log"] {
+        let env = Env::new();
+        fs::create_dir(env.root.join("x")).unwrap();
+        write(&env.outbox.join("a.pdf"), b"stays");
+        fs::remove_dir(&env.archive).unwrap();
+        env.set_paths(&env.outbox, &env.archive, &env.root.join(log));
 
-    let output = env.run(&[]);
+        let output = env.run(&[]);
 
-    assert_exit_2(&output, "not logged");
-    assert!(!env.archive.exists());
-    assert!(env.outbox.join("a.pdf").exists());
+        assert_exit_2(&output, "not logged");
+        assert!(!env.archive.exists(), "{log}");
+        assert!(env.outbox.join("a.pdf").exists());
+    }
 }
 
 #[test]
@@ -1045,4 +1049,82 @@ fn home_relative_paths_and_default_config_location() {
             .unwrap()
             .contains("\tcopy\ta.pdf\ta.pdf\tok")
     );
+}
+
+#[test]
+fn claim_that_is_a_second_link_is_dropped_not_duplicated() {
+    let env = Env::new();
+    write(&env.outbox.join("x.pdf"), b"one file");
+    fs::hard_link(env.outbox.join("x.pdf"), env.outbox.join(".hex-sync.x.pdf")).unwrap();
+
+    let dry = env.run(&["--dry-run"]);
+    let output = env.run(&[]);
+
+    assert_success(&dry);
+    assert_success(&output);
+    assert_eq!(
+        snapshot(&env.archive),
+        Snapshot::from([(PathBuf::from("x.pdf"), b"one file".to_vec())])
+    );
+    assert_eq!(outbox_entries(&env), 0);
+    // The dry run plans what the real run did: restore onto x.pdf, then one copy.
+    let planned = stdout(&dry);
+    let planned: Vec<&str> = planned.lines().collect();
+    assert_eq!(
+        planned,
+        [
+            "dry-run: restore-claim .hex-sync.x.pdf -> x.pdf",
+            "dry-run: copy x.pdf -> x.pdf",
+        ]
+    );
+    let log = env.log_text();
+    assert!(
+        log.contains("\trestore-claim\t.hex-sync.x.pdf\tx.pdf\tok"),
+        "{log}"
+    );
+    assert_eq!(log.matches("\tcopy\t").count(), 1, "{log}");
+}
+
+#[test]
+fn failed_temp_write_leaves_nothing_in_the_archive() {
+    let env = Env::new();
+    write(&env.outbox.join("big.pdf"), &[b'x'; 8192]);
+
+    let output = env.run_with_file_size_limit();
+
+    assert_partial_failure(&output);
+    assert_eq!(fs::read(env.outbox.join("big.pdf")).unwrap().len(), 8192);
+    assert!(
+        snapshot(&env.archive).is_empty(),
+        "{:?}",
+        snapshot(&env.archive).keys()
+    );
+}
+
+#[test]
+fn dry_run_keeps_the_folder_of_a_young_claim() {
+    let env = Env::with_config_tail("min_age_secs = 3600\n");
+    write(&env.outbox.join("d/.hex-sync.x.pdf"), b"young claim");
+
+    let dry = env.run(&["--dry-run"]);
+
+    assert_success(&dry);
+    assert!(!stdout(&dry).contains("rmdir d"), "{}", stdout(&dry));
+}
+
+#[test]
+fn dry_run_restores_two_claims_to_distinct_names() {
+    let env = Env::new();
+    write(&env.outbox.join("x.pdf"), b"x");
+    write(&env.outbox.join(".hex-sync.x.pdf"), b"claim x");
+    write(&env.outbox.join(".hex-sync.x (1).pdf"), b"claim x1");
+
+    let dry = stdout(&env.run(&["--dry-run"]));
+
+    let targets: BTreeSet<&str> = dry
+        .lines()
+        .filter(|l| l.starts_with("dry-run: restore-claim "))
+        .filter_map(|l| l.split_once(" -> ").map(|(_, t)| t))
+        .collect();
+    assert_eq!(targets.len(), 2, "{dry}");
 }

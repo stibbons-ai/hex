@@ -35,3 +35,19 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/hex-sync
+    steps:
+      - uses: actions/checkout@v4
+      # Keep in step with `rust-version` in Cargo.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/hex-sync
+      - run: cargo test --locked

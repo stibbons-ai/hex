@@ -20,12 +20,21 @@ pub fn file_id(meta: &fs::Metadata) -> FileId {
     (meta.dev(), meta.ino())
 }
 
-/// True when both paths name the same inode (symlinks not followed).
-pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
-    Ok(file_id(&fs::symlink_metadata(a)?) == file_id(&fs::symlink_metadata(b)?))
+/// True when both describe the same inode.
+pub fn is_same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    file_id(a) == file_id(b)
 }
 
-/// Identities of `path` and all its ancestors, `path` first (symlinks followed).
+/// True when both paths name the same inode (symlinks not followed).
+pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    Ok(is_same(
+        &fs::symlink_metadata(a)?,
+        &fs::symlink_metadata(b)?,
+    ))
+}
+
+/// Identities of `path` and all its ancestors, `path` first (symlinks followed). Pass a
+/// canonical path: `..` and symlinked components would make the ancestors lexical ones.
 pub fn lineage(path: &Path) -> io::Result<Vec<FileId>> {
     path.ancestors()
         .map(|p| fs::metadata(p).map(|m| file_id(&m)))

@@ -66,29 +66,33 @@ fn main() -> ExitCode {
 /// cannot be opened, is a symlink or lies inside a root, or a root check failed).
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
-    let aborted = |reason| format!("aborted, nothing touched: {reason}");
     let roots = match sync::check_roots(&config.outbox, &config.archive, &config.log) {
-        Err(abort) if !abort.loggable => return Err(aborted(abort.reason)),
-        roots => roots,
+        Ok(roots) => roots,
+        Err(abort) => {
+            let mut reason = abort.reason;
+            if abort.loggable && !args.dry_run {
+                // Never create a folder here: a missing root may be an unmounted drive the
+                // log lies under, however its path is spelled.
+                match Journal::open_existing(&config.log) {
+                    Ok(mut journal) => {
+                        let outcome = Outcome::Failed(reason.clone());
+                        journal.record(Action::Abort, Path::new("-"), None, outcome);
+                    }
+                    Err(e) => {
+                        let log = config.log.display();
+                        reason = format!("{reason} (not logged: cannot open log {log}: {e})");
+                    }
+                }
+            }
+            return Err(format!("aborted, nothing touched: {reason}"));
+        }
     };
     let mut journal = if args.dry_run {
         Journal::dry_run()
     } else {
-        Journal::open(&config.log).map_err(|e| {
-            let cannot_open = format!("cannot open log {}: {e}", config.log.display());
-            match &roots {
-                Err(abort) => aborted(format!("{}; {cannot_open}", abort.reason)),
-                Ok(_) => cannot_open,
-            }
-        })?
+        Journal::open(&config.log)
+            .map_err(|e| format!("cannot open log {}: {e}", config.log.display()))?
     };
-    let roots = roots.map_err(|abort| {
-        if !journal.is_dry_run() {
-            let outcome = Outcome::Failed(abort.reason.clone());
-            journal.record(Action::Abort, Path::new("-"), None, outcome);
-        }
-        aborted(abort.reason)
-    })?;
     let failures = sync::run(
         &roots,
         Duration::from_secs(config.min_age_secs),

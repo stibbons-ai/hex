@@ -4,26 +4,27 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
-/// What a log line is about.
+/// What a log line is about. The same action labels a success and a failure line; the
+/// outcome tells them apart.
 #[derive(Clone, Copy)]
 pub enum Action {
-    /// Copied to the same relative path in the Archive; source removed.
+    /// Copy to the same relative path in the Archive, then remove the source.
     Copy,
-    /// Copied beside a different Archive file as `name (n).ext`; source removed.
+    /// Copy beside a different Archive file as `name (n).ext`, then remove the source.
     CopyRenamed,
-    /// A byte-identical Archive file already existed; source removed.
+    /// A byte-identical Archive file already exists: remove the source.
     RemoveIdentical,
-    /// A claimed source was renamed back into place in the Outbox.
+    /// Rename a claim back into place in the Outbox (its name, or `name (n).ext`).
     RestoreClaim,
-    /// Renaming a source to its claim name.
+    /// Rename a source to its claim name.
     Claim,
     Rmdir,
     SkipSymlink,
     SkipSpecial,
     /// The mtime is in the future or unreadable, so the age cannot be judged.
     SkipBadMtime,
-    /// A `.hex-sync-<n>.tmp` already in the Archive (left by a crash, or another run's);
-    /// never deleted.
+    /// A `.hex-sync-<n>.tmp` already in the Archive (left by a crash, another run's, or a
+    /// Document with that name); never deleted. Its path is relative to the Archive.
     StaleTemp,
     ReadDir,
     Stat,
@@ -56,7 +57,7 @@ pub enum Outcome {
     Ok,
     Planned,
     Skipped,
-    /// Left in place for a later run.
+    /// Left in place.
     Kept,
     Failed(String),
 }
@@ -81,11 +82,16 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Opens the log in append mode, creating its parent directory if missing.
+    /// Opens the log in append mode, creating its parent folder if missing.
     pub fn open(path: &Path) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        Self::open_existing(path)
+    }
+
+    /// Opens the log in append mode without creating any folder.
+    pub fn open_existing(path: &Path) -> io::Result<Self> {
         let log = OpenOptions::new().append(true).create(true).open(path)?;
         Ok(Self {
             log: Some(log),
@@ -110,9 +116,10 @@ impl Journal {
         self.write_failed
     }
 
-    /// `path` is relative to the Outbox; `target`, if the action has one, to the Archive
-    /// (or to the Outbox for `RestoreClaim`). The log line is written before the stdout
-    /// echo, and echo errors (a closed pipe) are ignored, so no action goes unlogged.
+    /// `path` is relative to the Outbox (to the Archive for `StaleTemp`); `target`, if the
+    /// action has one, to the Archive (to the Outbox for `RestoreClaim`). The log line is
+    /// written before the stdout echo, and echo errors (a closed pipe) are ignored, so no
+    /// action goes unlogged.
     pub fn record(&mut self, action: Action, path: &Path, target: Option<&Path>, outcome: Outcome) {
         let action = action.as_str();
         let path = path.display();
