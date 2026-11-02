@@ -43,6 +43,9 @@
         "@mastra/hono": "catalog:",
         "hono": "catalog:",
       },
+      "devDependencies": {
+        "effect": "catalog:",
+      },
     },
   },
   "catalog": {

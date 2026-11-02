@@ -70,8 +70,8 @@ function keyName(key: string): string {
 /**
  * Split uninstalled lock entries into `missing` (this host should have them) and
  * `omitted` (foreign platform). An entry is omitted when its own os/cpu excludes
- * this host, or when it has dependents and every one of them is omitted, e.g.
- * sharp's WebAssembly fallback that only foreign-platform packages pull in.
+ * this host, or when it has dependents and every one of them is omitted (a fallback
+ * that only foreign-platform packages pull in).
  *
  * An entry's dependents are everything that depends, by any dependency kind
  * (including workspace devDependencies), on its real package name or on the name

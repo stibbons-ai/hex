@@ -14,8 +14,9 @@ bun install --frozen-lockfile
 
 `bunfig.toml` installs exact versions only and refuses packages published less than three days
 ago. Every external dependency version lives in the root `package.json` `catalog`; packages
-depend on externals with `catalog:` and on each other with `workspace:*` (ADR 0003). To add a
-dependency, add the catalog entry first, then reference it with `catalog:`.
+depend on externals with `catalog:` and on each other with `workspace:*`, and no manifest may use
+`overrides` or `resolutions` (ADR 0003). To add a dependency, add the catalog entry first, then
+reference it with `catalog:`.
 
 ## Run
 
@@ -24,8 +25,11 @@ bun run start
 ```
 
 The server binds to `127.0.0.1` only, on `HEX_PORT` (default `4111`; `0` picks a free port), and
-stores Mastra's state in a LibSQL file at `<data dir>/mastra.db`. The data directory is
-`HEX_DATA_DIR`, default `./.data` (git-ignored); it is created on start.
+answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (403
+otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
+`<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
+working directory (git-ignored at the repository root); it is created on start. Run it from the
+repository root.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -39,7 +43,7 @@ bun run check         # everything below, in this order; CI runs it on Ubuntu an
 bun run format:check  # oxfmt (bun run format writes)
 bun run lint          # oxlint --deny-warnings
 bun run typecheck     # tsc --noEmit
-bun run catalog       # ADR 0003 specifier policy, exact @mastra/* pins
+bun run manifests     # ADR 0003 catalog policy, exact @mastra/* pins, telemetry opt-out in scripts
 bun run licenses      # dependency licence policy
 bun run test          # bun test
 ```
@@ -48,20 +52,26 @@ bun run test          # bun test
 
 | Package             | Holds                                                                          |
 | ------------------- | ------------------------------------------------------------------------------ |
-| `@hex/domain`       | Pure domain: Effect only. Lint rejects Mastra, LibSQL, Hono, Node, Bun imports |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
 | `@hex/server`       | `Bun.serve` entrypoint mounting Mastra's routes via `@mastra/hono`             |
 | `@hex/eval-harness` | Empty until the evaluation slice                                               |
 
+The domain's import allow-list is enforced by `scripts/domain-imports.test.ts`, its dependency
+list by `bun run manifests`; oxlint also flags infrastructure imports there in the editor.
+
 Mastra does not validate step output, so every step decodes its own output with its Effect schema;
-`packages/adapters/test/schema.test.ts` pins that contract against real workflow runs.
+`packages/adapters/test/schema.test.ts` pins that contract against real workflow runs. Use
+schemas whose encoded and decoded types match: Mastra re-validates the decoded input at each step,
+so transforming schemas (such as `Schema.NumberFromString`) fail there.
 
 ## Telemetry and licences
 
-Every script that runs code sets `MASTRA_TELEMETRY_DISABLED=1` (read by `@mastra/core`'s usage
-telemetry) and `DO_NOT_TRACK=1` (Bun's crash reports; `bunfig.toml` also sets `telemetry =
-false`), and so does CI. When you run `bun` or Mastra directly instead of through a script, set
-both yourself.
+Every script that runs code starts with `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`
+(`bun run manifests` enforces it), and CI sets both. `MASTRA_TELEMETRY_DISABLED` is read by
+`@mastra/core`'s usage telemetry; `DO_NOT_TRACK` turns off Bun's telemetry and crash reports
+(`bunfig.toml` also sets `telemetry = false`). When you run `bun` or Mastra directly instead of
+through a script, set both yourself.
 
 `bun run licenses` audits every installed package's manifest plus the lockfile. Only MIT,
 Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, CC0-1.0, Unlicense and BlueOak-1.0.0 pass;
@@ -72,4 +82,5 @@ reason. Packages for other platforms, which are never installed locally, are aud
 version); a dependency update that adds or changes a platform package must update that file after
 reviewing each licence. Notable licences and attributions are in
 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Mastra's `ee/` directories are not Apache-2.0; lint
-rejects importing them.
+rejects importing them from our code, but `@mastra/server` (behind `@mastra/hono`) itself loads
+`@mastra/core/auth/ee`; see THIRD_PARTY_NOTICES.

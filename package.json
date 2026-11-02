@@ -15,9 +15,9 @@
     "format:check": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxfmt --check package.json tsconfig.json .oxfmtrc.json .oxlintrc.json packages scripts .github README.md",
     "lint": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint --deny-warnings .",
     "typecheck": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 tsc --noEmit",
-    "catalog": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-catalog.ts",
+    "manifests": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-manifests.ts",
     "licenses": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-licenses.ts",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run catalog && bun run licenses && bun run test"
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run manifests && bun run licenses && bun run test"
   },
   "catalog": {
     "@mastra/core": "1.80.0",

@@ -1,4 +1,4 @@
-# Bun crash reports (the only telemetry Bun sends today) stay off; same as DO_NOT_TRACK=1.
+# Bun telemetry and crash-report upload off; same as DO_NOT_TRACK=1.
 telemetry = false
 
 [run]

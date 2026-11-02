@@ -96,3 +96,36 @@ describe("Mastra workflow contract", () => {
     expect(result.error.message).toBe('Expected number\n  at ["length"]');
   });
 });
+
+test("a transforming schema (Encoded differs from Type) fails at the step boundary", async () => {
+  // Pins the limit noted in src/schema.ts: Mastra decodes the workflow input ("5" -> 5), then
+  // validates that decoded value against the step's input schema, which expects the encoded form.
+  const Numeric = toMastraSchema(Schema.Struct({ n: Schema.NumberFromString }));
+  let calls = 0;
+  const workflow = createWorkflow({ id: "numeric", inputSchema: Numeric, outputSchema: Numeric })
+    .then(
+      createStep({
+        id: "numeric",
+        inputSchema: Numeric,
+        outputSchema: Numeric,
+        execute: async ({ inputData }) => {
+          calls++;
+          return inputData;
+        },
+      }),
+    )
+    .commit();
+  const mastra = new Mastra({ workflows: { numeric: workflow }, logger: false });
+  try {
+    const run = await mastra.getWorkflow("numeric").createRun();
+    // The encoded form ("5") is what a caller would send; Mastra's types expect the decoded one.
+    const result = await run.start({ inputData: { n: "5" as unknown as number } });
+    expect(calls).toBe(0);
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") throw new Error(JSON.stringify(result));
+    expect(result.error.message).toContain("Step input validation failed");
+    expect(result.error.message).toContain("n: Expected string");
+  } finally {
+    await mastra.shutdown();
+  }
+});
