@@ -32,6 +32,9 @@ hand.
 Skipped:
 
 - `*.partial` files and files modified less than `min_age_secs` ago;
+- OS metadata: `.DS_Store`, `Thumbs.db` and AppleDouble `._*` files (only those that start
+  with the AppleDouble magic number, so a Document named `._x.pdf` still moves); skipped
+  silently and, like `*.partial` files, they keep their folder in the Outbox;
 - files with a future or unreadable mtime, whatever `min_age_secs` says (logged as
   `skip-bad-mtime`);
 - symlinks (never followed; logged as `skip-symlink`);

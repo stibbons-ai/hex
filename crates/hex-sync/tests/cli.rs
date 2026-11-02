@@ -595,6 +595,41 @@ fn partial_files_are_ignored_and_keep_their_folder() {
     assert!(snapshot(&env.archive).is_empty());
 }
 
+#[test]
+fn os_metadata_files_are_ignored_but_look_alike_documents_move() {
+    let env = Env::new();
+    let metadata: [(&str, &[u8]); 3] = [
+        ("2026-01/.DS_Store", b"Bud1"),
+        ("2026-01/._invoice.pdf", b"\x00\x05\x16\x07\x00\x02\x00\x00"),
+        ("2026-01/Thumbs.db", b"thumbnails"),
+    ];
+    for (rel, bytes) in metadata {
+        write(&env.outbox.join(rel), bytes);
+    }
+    let documents = [
+        "2026-01/invoice.pdf",
+        "2026-01/._Rechnung.pdf",
+        "2026-01/.DS_Store.pdf",
+        "2026-01/Thumbs.db.pdf",
+    ];
+    for rel in documents {
+        write(&env.outbox.join(rel), b"%PDF-1.7 document");
+    }
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    for (rel, bytes) in metadata {
+        assert_eq!(fs::read(env.outbox.join(rel)).unwrap(), bytes, "{rel}");
+    }
+    let mut expected: Vec<PathBuf> = documents.iter().map(PathBuf::from).collect();
+    expected.sort();
+    assert_eq!(
+        snapshot(&env.archive).into_keys().collect::<Vec<_>>(),
+        expected
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_partial_is_ignored() {

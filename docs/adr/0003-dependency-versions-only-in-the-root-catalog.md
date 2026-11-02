@@ -6,3 +6,4 @@ Every external dependency version is declared once, in the top-level `catalog` f
 
 - Adding a dependency means `bun add <pkg> --catalog` from the package, or adding the catalog entry first.
 - Named catalogs (`catalogs`) are not used until a real need for divergent versions appears.
+- Scope: Bun workspace packages only. The `hex-sync` Cargo crate pins its own versions in `crates/hex-sync/Cargo.toml` and `Cargo.lock`.
