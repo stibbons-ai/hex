@@ -81,7 +81,13 @@ describe("bun packages/server/src/main.ts", () => {
         child.kill();
       }
       const stderr = await new Response(child.stderr).text();
-      expect(stderr.match(/Failed to start server/g)).toHaveLength(1);
+      // The whole stderr is part of the received value, so a failure shows what was reported.
+      expect({
+        reports: stderr.match(/Failed to start server/g)?.length ?? 0,
+        stderr,
+      }).toMatchObject({
+        reports: 1,
+      });
     } finally {
       await taken.stop(true);
     }
