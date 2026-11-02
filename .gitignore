@@ -1,0 +1,17 @@
+node_modules/
+.data/
+coverage/
+dist/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.devenv*
+.direnv/
+
+# MemPalace per-project files
+mempalace.yaml
+entities.json

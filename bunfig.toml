@@ -1,0 +1,12 @@
+# Bun crash reports (the only telemetry Bun sends today) stay off; same as DO_NOT_TRACK=1.
+telemetry = false
+
+[run]
+bun = true
+
+[install]
+exact = true
+
+# hardening against supply chain attacks: let's not allow installing anything
+# younger than 3 days. we can add excludes, when necessary.
+minimumReleaseAge = 259200  # 3 days in seconds
