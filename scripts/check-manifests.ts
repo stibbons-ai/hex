@@ -44,33 +44,43 @@ const dependencyFields = [
 
 const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const telemetryOff = "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ";
-const chainedScript = /^bun run ([\w:-]+)$/;
-const shellOperators = /&&|\|\||;|\||\n/;
-const telemetryOverride = /\b(?:MASTRA_TELEMETRY_DISABLED|DO_NOT_TRACK)=/;
+/** One plain shell word: no operators, substitutions, quotes, redirections or globs. */
+const plainWord = String.raw`[\w./:@=+-]+`;
+const plainCommand = new RegExp(String.raw`^${plainWord}(?: ${plainWord})*$`);
+const chainedScript = new RegExp(String.raw`^bun run ([\w:-]+)(?: ${plainWord})*$`);
+const telemetryVariable = /\b(?:MASTRA_TELEMETRY_DISABLED|DO_NOT_TRACK)\b/;
 
 /**
- * Telemetry stays off in every script (issue #2). A script either only chains this manifest's own
- * scripts with `bun run <name> && …` (each of which is checked in turn), or is one command that
- * starts with the opt-out and neither chains further commands nor sets either variable again.
+ * Telemetry stays off in every script (issue #2). A script is either
+ * - a chain of this manifest's own scripts, `bun run <name> [args] && …`, each checked in turn, or
+ * - the opt-out prefix followed by exactly one command made of plain words (letters, digits and
+ *   `_ . / : @ = + -`, separated by single spaces): no `&`, `|`, `;`, `$( )`, backticks,
+ *   parentheses, quotes or redirections.
+ *
+ * Neither form may mention the telemetry variables again (`DO_NOT_TRACK=0`, `env -u DO_NOT_TRACK`).
  */
 export function scriptViolation(
   script: string,
   scriptNames: ReadonlySet<string>,
 ): string | undefined {
+  const reset = "must not set or unset the telemetry variables again";
+  if (script.startsWith(telemetryOff)) {
+    const command = script.slice(telemetryOff.length);
+    if (telemetryVariable.test(command)) return reset;
+    if (!plainCommand.test(command)) {
+      return "must be one command of plain words after the telemetry opt-out (no &, |, ;, $( ), backticks, parentheses, quotes or redirections)";
+    }
+    return undefined;
+  }
   const steps = script.split(" && ").map((step) => chainedScript.exec(step)?.[1]);
-  if (steps.every((name) => name !== undefined)) {
-    const unknown = steps.filter((name) => !scriptNames.has(name!));
-    return unknown.length > 0
-      ? `chains "bun run ${unknown.join('", "bun run ')}", which is not a script in this manifest`
-      : undefined;
+  if (steps.some((name) => name === undefined)) {
+    return `must start with "${telemetryOff.trim()}" or only chain this manifest's scripts with "bun run <name>"`;
   }
-  if (!script.startsWith(telemetryOff)) return `must start with "${telemetryOff.trim()}"`;
-  const command = script.slice(telemetryOff.length);
-  if (shellOperators.test(command)) {
-    return "must be one command after the telemetry opt-out (no &&, ||, ;, | or newline)";
-  }
-  if (telemetryOverride.test(command)) return "must not set the telemetry variables again";
-  return undefined;
+  if (telemetryVariable.test(script)) return reset;
+  const unknown = steps.filter((name) => !scriptNames.has(name!));
+  return unknown.length > 0
+    ? `chains "bun run ${unknown.join('", "bun run ')}", which is not a script in this manifest`
+    : undefined;
 }
 
 /**

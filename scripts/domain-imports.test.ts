@@ -44,7 +44,9 @@ describe("domain purity (allow-list)", () => {
     ['import type { Pool } from // line comment\n "pg";', '"pg" is not effect'],
     ['const os = await import(/* lazy */ "os");', '"os" is not effect'],
     ['const fs = await import ( "fs" );', '"fs" is not effect'],
-    ["const x = ;", "could not be parsed for imports"],
+    ['/// <reference types="bun" />\nexport const v = Bun.version;', "triple-slash reference"],
+    ['  ///<reference lib="dom" />', "triple-slash reference"],
+    ["const m = await import(`fs`);", "computed import() or require()"],
   ])("rejects %s", (source, message) => {
     const failures = check(source);
     expect(failures).toHaveLength(1);
@@ -64,6 +66,7 @@ describe("domain purity (allow-list)", () => {
       const sources = await readDomainSources(directory);
       expect(sources.map((file) => file.path)).toEqual([".hidden/probe.ts"]);
       expect(domainImportViolations(directory, sources)).toEqual([
+        ".hidden/probe.ts: dot directories and files are not type-checked; move it",
         '.hidden/probe.ts: "fs" is not effect; the domain imports Effect only',
       ]);
     } finally {

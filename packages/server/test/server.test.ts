@@ -189,7 +189,11 @@ describe("stop()", () => {
       await server.stop();
       expect(performance.now() - started).toBeLessThan(3000);
       await shutdown.promise; // Mastra's shutdown ran after the forced close
-      reader.releaseLock();
+      // The forced close ended the client's stream: reads finish or fail instead of waiting.
+      for (;;) {
+        const chunk = await reader.read().catch(() => ({ done: true }));
+        if (chunk.done) break;
+      }
     } finally {
       // The step outlives shutdown and then fails against the closed store; keep that out of the
       // test output.
@@ -200,6 +204,46 @@ describe("stop()", () => {
       await Bun.sleep(100);
       for (const spy of quiet) spy.mockRestore();
     }
+  });
+
+  test("lets an in-flight request finish within the grace period", async () => {
+    const stepStarted = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const slow = createWorkflow({ id: "slow", inputSchema: Message, outputSchema: Message })
+      .then(
+        createStep({
+          id: "slow",
+          inputSchema: Message,
+          outputSchema: Message,
+          execute: async ({ inputData }) => {
+            stepStarted.resolve();
+            await release.promise;
+            return inputData;
+          },
+        }),
+      )
+      .commit();
+    const server = await startServer({
+      databasePath: join(directory, "in-flight", "mastra.db"),
+      port: 0,
+      logger: false,
+      workflows: { slow },
+    });
+    const response = fetch(new URL("/api/workflows/slow/start-async", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ inputData: { message: "finish me" } }),
+    });
+    await stepStarted.promise;
+    const stopping = server.stop();
+    release.resolve();
+    const finished = await response;
+    expect(finished.status).toBe(200);
+    expect(await finished.json()).toMatchObject({
+      status: "success",
+      result: { message: "finish me" },
+    });
+    await stopping;
   });
 
   test("rejects with a failing Mastra shutdown and still closes the store", async () => {

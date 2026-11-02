@@ -134,14 +134,16 @@ describe("manifest policy", () => {
   test("requires the telemetry opt-out on every script that runs code", () => {
     const scripts = {
       start: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun src/main.ts",
-      lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint .",
+      lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint --deny-warnings .",
       check: "bun run lint && bun run start",
+      fix: "bun run lint -- --fix",
       bare: "bun src/main.ts",
       half: "DO_NOT_TRACK=1 bun src/main.ts",
       swapped: "DO_NOT_TRACK=1 MASTRA_TELEMETRY_DISABLED=1 bun src/main.ts",
       chained: "bun run lint && bun src/main.ts",
     };
-    const message = 'must start with "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1"';
+    const message =
+      'must start with "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1" or only chain this manifest\'s scripts with "bun run <name>"';
     expect(manifestViolations(root({ scripts }), [pkg("server", { scripts })])).toEqual(
       ["package.json", "packages/server/package.json"].flatMap((path) =>
         ["bare", "half", "swapped", "chained"].map((name) => `${path}: scripts.${name} ${message}`),
@@ -170,21 +172,31 @@ describe("manifest policy", () => {
     "bun a.ts; bun b.ts",
     "echo x | bun b.ts",
     "bun a.ts\nbun b.ts",
-  ])("rejects a prefixed script that runs further commands: %j", (command) => {
+    "bun a.ts & bun b.ts",
+    "bun $(echo a.ts)",
+    "bun `echo a.ts`",
+    "(bun a.ts)",
+    "bun a.ts > out.log",
+    "cat <(bun a.ts)",
+    'bun "a.ts"',
+    "bun  a.ts",
+  ])("rejects a prefixed script that isn't one command of plain words: %j", (command) => {
     const scripts = { run: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
     expect(manifestViolations(root({ scripts }), [])).toEqual([
-      "package.json: scripts.run must be one command after the telemetry opt-out (no &&, ||, ;, | or newline)",
+      "package.json: scripts.run must be one command of plain words after the telemetry opt-out (no &, |, ;, $( ), backticks, parentheses, quotes or redirections)",
     ]);
   });
 
   test.each([
-    "MASTRA_TELEMETRY_DISABLED=0 bun a.ts",
-    "DO_NOT_TRACK=0 bun a.ts",
-    "env DO_NOT_TRACK= bun a.ts",
-  ])("rejects a prefixed script that sets telemetry again: %j", (command) => {
-    const scripts = { run: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
+    "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 MASTRA_TELEMETRY_DISABLED=0 bun a.ts",
+    "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 DO_NOT_TRACK=0 bun a.ts",
+    "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 env DO_NOT_TRACK= bun a.ts",
+    "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 env -u DO_NOT_TRACK bun a.ts",
+    "bun run lint -- DO_NOT_TRACK=0",
+  ])("rejects a script that sets or unsets telemetry again: %j", (script) => {
+    const scripts = { lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint .", run: script };
     expect(manifestViolations(root({ scripts }), [])).toEqual([
-      "package.json: scripts.run must not set the telemetry variables again",
+      "package.json: scripts.run must not set or unset the telemetry variables again",
     ]);
   });
 

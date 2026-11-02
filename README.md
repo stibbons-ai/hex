@@ -25,8 +25,8 @@ bun run start
 ```
 
 The server binds to `127.0.0.1` only, on `HEX_PORT` (default `4111`; `0` picks a free port), and
-answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (403
-otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
+answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (on port
+80 also `127.0.0.1` and `localhost` without the port; 403 otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
 `<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
@@ -44,7 +44,7 @@ curl http://127.0.0.1:4111/api/workflows # Mastra's routes, mounted through @mas
 bun run check         # everything below, in this order; CI runs it on Ubuntu and macOS
 bun run format:check  # oxfmt (bun run format writes)
 bun run lint          # oxlint --deny-warnings
-bun run typecheck     # tsc --noEmit
+bun run typecheck     # tsc --noEmit for the root, then tsc --noEmit -p packages/domain
 bun run manifests     # ADR 0003 catalog policy, exact @mastra/* pins, telemetry opt-out in scripts
 bun run licenses      # dependency licence policy
 bun run test          # bun test

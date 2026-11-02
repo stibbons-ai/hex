@@ -18,7 +18,8 @@ const starting = startServer({
   databasePath: resolve(process.env.HEX_DATA_DIR || ".data", "mastra.db"),
   port: parsePort(process.env.HEX_PORT),
 });
-// Registered before startup finishes, so an early signal still shuts down cleanly.
+// Registered before startup finishes, so a signal during startup still shuts down cleanly. A
+// signal that arrives while the modules are still loading gets the default (kill).
 const shutdown = shutdownOnce(starting, {
   exit: (code) => process.exit(code),
   error: (message, cause) => console.error(message, cause),

@@ -2,8 +2,19 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2022"],
-    "types": []
+    "types": [],
+    "allowJs": true,
+    "checkJs": true,
+    "jsx": "preserve"
   },
-  "include": ["src/**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.mts",
+    "src/**/*.cts",
+    "src/**/*.js",
+    "src/**/*.mjs",
+    "src/**/*.cjs"
+  ],
   "exclude": []
 }

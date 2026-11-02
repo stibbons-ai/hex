@@ -54,14 +54,13 @@ describe("shutdownOnce", () => {
     expect(run.exits).toEqual([1]);
   });
 
-  test("a failed startup is logged and exits 1", async () => {
-    const failure = new Error("port in use");
+  test("leaves a failed startup to the caller: no second report, no exit", async () => {
     const run = effects();
-    const starting = Promise.reject(failure);
-    starting.catch(() => {}); // main.ts also awaits it; this test only exercises the handler
+    const starting = Promise.reject(new Error("port in use"));
+    starting.catch(() => {}); // main.ts awaits it and reports the failure itself
     shutdownOnce(starting, run.effects)();
-    await run.exited;
-    expect(run.errors).toEqual([failure]);
-    expect(run.exits).toEqual([1]);
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+    expect(run.errors).toEqual([]);
+    expect(run.exits).toEqual([]);
   });
 });
