@@ -22,8 +22,8 @@ export interface ServerOptions {
   /** TCP port; 0 picks a free one. */
   port: number;
   /**
-   * Mastra's logger, which also logs failed oRPC calls; omitted keeps Mastra's default. `false`
-   * silences it (tests only).
+   * Mastra's logger, which also logs server faults in requests (not caller errors); omitted keeps
+   * Mastra's default. `false` silences it (tests only).
    */
   logger?: IMastraLogger | false;
   /** Workflows to register with Mastra. */
@@ -49,8 +49,8 @@ export interface RunningServer {
 }
 
 /**
- * Our own Bun.serve entrypoint: `GET /health` plus the oRPC API under /rpc (ADR 0004), both behind
- * the Host allow-list.
+ * Our own Bun.serve entrypoint: `GET`/`HEAD /health` plus the oRPC API under /rpc (ADR 0004), both
+ * behind the Host allow-list.
  */
 export async function startServer({
   databasePath,
@@ -68,7 +68,9 @@ export async function startServer({
       ...(workflows ? { workflows } : {}),
     });
     const handler = new RPCHandler(router, {
-      interceptors: [
+      // Procedure level, so it sees validation and handler errors but not a caller's malformed
+      // body; Bun.serve's error handler below catches what fails outside it.
+      clientInterceptors: [
         // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
         onError((error) => {
           if (error instanceof ORPCError && error.status < 500) return;
@@ -86,11 +88,18 @@ export async function startServer({
         if (!hosts.has(request.headers.get("host") ?? "")) {
           return new Response("Forbidden host", { status: 403 });
         }
-        if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+        const isGetOrHead = request.method === "GET" || request.method === "HEAD";
+        if (isGetOrHead && new URL(request.url).pathname === "/health") {
           return Response.json({ status: "ok" });
         }
         const { matched, response } = await handler.handle(request, rpcOptions);
         return matched ? response : new Response("Not found", { status: 404 });
+      },
+      // Anything thrown outside oRPC's own error handling, e.g. a response that fails to encode:
+      // logged, and answered without Bun's debug page.
+      error(error) {
+        mastra.getLogger().error("hex: request failed", error);
+        return new Response("Internal server error", { status: 500 });
       },
     });
     hosts = allowedHosts(server.port ?? port);

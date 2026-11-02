@@ -37,9 +37,9 @@ function oneStep(
 const echo = oneStep("echo", async (input) => input);
 
 /** The typed oRPC client a caller of the API uses. */
-function client(server: RunningServer, headers: Record<string, string> = {}) {
+function client(server: RunningServer) {
   return createORPCClient<ContractRouterClient<typeof contract>>(
-    new RPCLink({ url: new URL("/rpc", server.url), headers }),
+    new RPCLink({ url: new URL("/rpc", server.url) }),
   );
 }
 
@@ -88,13 +88,13 @@ describe("hex server", () => {
     expect(Number(server.url.port)).toBeGreaterThan(0);
   });
 
-  test("answers the health route", async () => {
-    const response = await fetch(new URL("/health", server.url));
+  test.each(["GET", "HEAD"])("answers %s /health", async (method) => {
+    const response = await fetch(new URL("/health", server.url), { method });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "ok" });
+    expect(await response.text()).toBe(method === "GET" ? '{"status":"ok"}' : "");
   });
 
-  test("serves the oRPC API under /rpc, and nothing else but GET /health", async () => {
+  test("serves the oRPC API under /rpc, and nothing else but GET/HEAD /health", async () => {
     const api = client(server);
     expect(await api.health()).toEqual({ status: "ok" });
     expect(await api.workflows.list()).toEqual(["echo"]);
@@ -141,6 +141,19 @@ describe("hex server", () => {
     });
   });
 
+  test("rejects a call the contract's own input schema rejects as BAD_REQUEST", async () => {
+    const { error } = await safe(
+      // Deliberately off the static contract, as a hand-written caller could send.
+      client(server).workflows.start({ workflowId: 42 as unknown as string }),
+    );
+    expect(error).toMatchObject({
+      code: "BAD_REQUEST",
+      status: 400,
+      message: "Input validation failed",
+      data: { issues: [{ path: ["workflowId"] }] },
+    });
+  });
+
   test.each([
     ["/health", "GET"],
     ["/rpc/health", "POST"],
@@ -175,18 +188,22 @@ describe("hex server", () => {
 
 test("persists workflow runs through Mastra into the LibSQL file", async () => {
   const databasePath = join(directory, "persist", "mastra.db");
-  const first = await start({ databasePath });
+  const other = oneStep("other", async (input) => input);
+  const workflows = { echo, other };
+  const first = await start({ databasePath, workflows });
   const started = await client(first).workflows.start({
     workflowId: "echo",
     inputData: { message: "hello" },
   });
+  await client(first).workflows.start({ workflowId: "other", inputData: { message: "else" } });
   expect(started).toMatchObject({ status: "success", result: { message: "hello" } });
   await first.stop();
   servers.splice(servers.indexOf(first), 1);
 
   // A fresh server on the same file sees the run, so it went through the store, not memory.
-  const second = await start({ databasePath });
+  const second = await start({ databasePath, workflows });
   const { total, runs } = await client(second).workflows.runs({ workflowId: "echo" });
+  // Only echo's run: the other workflow's run in the same file is not listed.
   expect(total).toBe(1);
   expect(runs).toEqual([
     {
@@ -196,6 +213,50 @@ test("persists workflow runs through Mastra into the LibSQL file", async () => {
       updatedAt: expect.any(Date),
     },
   ]);
+});
+
+test("follows the workflow's own input options: no input, and no validation", async () => {
+  const noInput = createWorkflow({
+    id: "noInput",
+    inputSchema: toMastraSchema(Schema.Unknown),
+    outputSchema: Message,
+  })
+    .then(
+      createStep({
+        id: "noInput",
+        inputSchema: toMastraSchema(Schema.Unknown),
+        outputSchema: Message,
+        execute: async ({ inputData }) => ({ message: String(inputData) }),
+      }),
+    )
+    .commit();
+  const unchecked = createWorkflow({
+    id: "unchecked",
+    inputSchema: Message,
+    outputSchema: Message,
+    options: { validateInputs: false },
+  })
+    .then(
+      createStep({
+        id: "unchecked",
+        inputSchema: Message,
+        outputSchema: Message,
+        execute: async ({ inputData }) => inputData,
+      }),
+    )
+    .commit();
+  const server = await start({
+    databasePath: join(directory, "input-options", "mastra.db"),
+    workflows: { noInput, unchecked },
+  });
+  const api = client(server);
+  expect(await api.workflows.start({ workflowId: "noInput" })).toMatchObject({
+    status: "success",
+    result: { message: "undefined" },
+  });
+  expect(
+    await api.workflows.start({ workflowId: "unchecked", inputData: { message: 42 } }),
+  ).toMatchObject({ status: "success", result: { message: 42 } });
 });
 
 test("reports a failed run, and logs server faults but not caller errors", async () => {
@@ -214,6 +275,12 @@ test("reports a failed run, and logs server faults but not caller errors", async
   const logged = spyOn(server.mastra.getLogger(), "error");
   try {
     await safe(api.workflows.runs({ workflowId: "missing" }));
+    const malformed = await fetch(new URL("/rpc/workflows/list", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    expect(malformed.status).toBe(400);
     expect(logged).not.toHaveBeenCalled();
 
     const failure = new Error("registry broke");
@@ -223,6 +290,35 @@ test("reports a failed run, and logs server faults but not caller errors", async
     const { error } = await safe(api.workflows.list());
     expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
     expect(logged).toHaveBeenCalledWith("hex: oRPC call failed", failure);
+  } finally {
+    logged.mockRestore();
+  }
+});
+
+test("answers a response that fails to encode with a plain, logged 500", async () => {
+  class Box {
+    constructor(readonly value: bigint) {}
+  }
+  // Mastra doesn't check step output, so the BigInt inside a class instance reaches the encoder,
+  // which oRPC's serializer doesn't walk into.
+  const unencodable = oneStep(
+    "unencodable",
+    async () => ({ box: new Box(1n) }) as unknown as typeof Message.Type,
+  );
+  const server = await start({
+    databasePath: join(directory, "unencodable", "mastra.db"),
+    workflows: { unencodable },
+  });
+  const logged = spyOn(server.mastra.getLogger(), "error");
+  try {
+    const response = await fetch(new URL("/rpc/workflows/start", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ json: { workflowId: "unencodable", inputData: { message: "x" } } }),
+    });
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal server error");
+    expect(logged).toHaveBeenCalledWith("hex: request failed", expect.any(TypeError));
   } finally {
     logged.mockRestore();
   }

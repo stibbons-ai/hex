@@ -6,7 +6,7 @@ const notFound = { NOT_FOUND: { message: "No workflow is registered under this i
 
 /**
  * The oRPC API served under /rpc (ADR 0004). Schemas are Effect Schemas handed over as Standard
- * Schema; like Mastra's, they must have the same Encoded and Type.
+ * Schema. A workflow's own schemas, which Mastra checks, must have the same Encoded and Type.
  */
 export const contract = {
   health: oc.output(toMastraSchema(Schema.Struct({ status: Schema.Literal("ok") }))),
@@ -14,19 +14,31 @@ export const contract = {
     /** Ids the workflows are registered under. */
     list: oc.output(toMastraSchema(Schema.Array(Schema.String))),
     /**
-     * Runs a workflow to its end and returns how it ended. Input the workflow rejects is a
-     * BAD_REQUEST carrying the schema's issues.
+     * Runs a workflow until it finishes or suspends and returns its status. Input the workflow
+     * rejects is a BAD_REQUEST carrying the schema's issues.
      */
     start: oc
       .errors(notFound)
       .input(
-        toMastraSchema(Schema.Struct({ workflowId: Schema.String, inputData: Schema.Unknown })),
+        toMastraSchema(
+          Schema.Struct({
+            workflowId: Schema.String,
+            inputData: Schema.optionalKey(Schema.Unknown),
+          }),
+        ),
       )
       .output(
         toMastraSchema(
           Schema.Struct({
             runId: Schema.String,
-            status: Schema.Literals(["success", "failed", "tripwire", "suspended", "paused"]),
+            status: Schema.Literals([
+              "success",
+              "failed",
+              "tripwire",
+              "suspended",
+              "paused",
+              "canceled",
+            ]),
             result: Schema.optionalKey(Schema.Unknown),
             error: Schema.optionalKey(Schema.String),
           }),

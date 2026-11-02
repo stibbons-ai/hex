@@ -38,7 +38,7 @@ curl http://127.0.0.1:4111/health        # {"status":"ok"}
 curl -X POST http://127.0.0.1:4111/rpc/workflows/list # {"json":[]}: the oRPC API
 ```
 
-Everything except `GET /health` is the oRPC API under `/rpc` (ADR 0004), defined in
+Everything except `GET`/`HEAD /health` is the oRPC API under `/rpc` (ADR 0004), defined in
 `packages/server/src/contract.ts`: `health`, `workflows.list`, `workflows.start` (runs a workflow
 and returns its status and result) and `workflows.runs` (the runs persisted in LibSQL). An unknown
 workflow is a `NOT_FOUND` error, input the workflow rejects a `BAD_REQUEST`. Call it with the
@@ -56,7 +56,8 @@ const hex = createORPCClient<ContractRouterClient<typeof contract>>(
 await hex.workflows.list();
 ```
 
-Mastra's own REST routes (`/api/...`), and so `mastra dev` and Mastra Studio, are not served.
+Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
+routes don't work against this entrypoint.
 
 ## Check
 
@@ -108,4 +109,5 @@ reviewing each licence. Notable licences and attributions are in
 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Mastra's `ee/` directories are not Apache-2.0; lint
 rejects importing them from our code, and `@mastra/server` and `@mastra/hono` too, because
 `@mastra/server` imports `@mastra/core/auth/ee` (ADR 0004). `@mastra/core` itself still loads its
-compiled ee auth code, which stays unused without auth; see ADR 0004 and THIRD_PARTY_NOTICES.
+compiled ee auth code, which runs only with an FGA provider configured; see ADR 0004 and
+THIRD_PARTY_NOTICES.

@@ -16,14 +16,17 @@ export const router = api.router({
     start: api.workflows.start.handler(async ({ context, input, errors }) => {
       const workflow = registeredWorkflow(context.mastra, input.workflowId);
       if (!workflow) throw errors.NOT_FOUND();
-      // Checked here so a bad input is the caller's error, shaped like oRPC's own input check,
-      // instead of Mastra's throw surfacing as a 500.
-      const checked = await workflow.inputSchema["~standard"].validate(input.inputData);
-      if (checked.issues) {
-        throw new ORPCError("BAD_REQUEST", {
-          message: "Workflow input validation failed",
-          data: { issues: checked.issues },
-        });
+      // Checked here, under the same conditions as Mastra's own check, so a bad input is the
+      // caller's error, shaped like oRPC's own input check, instead of Mastra's throw as a 500.
+      const { inputSchema } = workflow;
+      if (workflow.options.validateInputs && inputSchema) {
+        const checked = await inputSchema["~standard"].validate(input.inputData);
+        if (checked.issues) {
+          throw new ORPCError("BAD_REQUEST", {
+            message: "Workflow input validation failed",
+            data: { issues: checked.issues },
+          });
+        }
       }
       const run = await workflow.createRun();
       const result = await run.start({ inputData: input.inputData });

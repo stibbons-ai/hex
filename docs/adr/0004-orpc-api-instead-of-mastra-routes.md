@@ -5,6 +5,7 @@ hex no longer mounts Mastra's REST routes through `@mastra/hono`. Our `Bun.serve
 ## Consequences
 
 - `@mastra/server` and `@mastra/hono` are not dependencies; lint rejects importing them, and a test fails if either reappears in the lockfile.
-- `mastra dev`, Mastra Studio and any client of Mastra's REST routes (`/api/...`) do not work against our entrypoint. Every operation a caller needs becomes an oRPC procedure here.
+- Mastra Studio and any other client of Mastra's REST routes (`/api/...`) do not work against our entrypoint. Every operation a caller needs becomes an oRPC procedure here.
+- The `mastra` CLI (`mastra dev`) brings `@mastra/server` back: `mastra` 1.36.0 depends on `@mastra/deployer` ^1.80.0, and `@mastra/deployer` 1.80.0 and 1.81.0 each pin `@mastra/server` exactly (npm registry, checked 2026-11-02). Using it means installing the ee-importing server, so it is not a hex dependency.
 - Residual: `@mastra/core` 1.80.0 still ships its ee code, and its agent and tool modules statically import the compiled auth ee chunk (`dist/ee-*.js`; `dist/auth/ee/fga-check.js` re-exports it), so Bun loads that chunk at startup. Loading only defines its functions and permission-name constants. Every call into it is gated on an FGA provider (`if (fgaProvider)` around the call or inside `requireFGA`, sometimes behind an `await import()`), and hex configures no auth, so apart from reading those constants the ee code does not run. Re-check on every Mastra upgrade.
 - `hono` stays in the lockfile as a dependency of `@mastra/core` itself, not of ours.
