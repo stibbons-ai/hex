@@ -1,12 +1,10 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import { createLocalStore } from "@hex/adapters";
 import { Mastra } from "@mastra/core/mastra";
 import { type HonoBindings, type HonoVariables, MastraServer } from "@mastra/hono";
 import { Hono } from "hono";
 
 /** Only local clients reach the server; exposing it is a deployment decision, not a default. */
-export const HOSTNAME = "127.0.0.1";
+const HOSTNAME = "127.0.0.1";
 
 export interface ServerOptions {
   /** LibSQL database file; its directory is created if missing. */
@@ -23,8 +21,7 @@ export interface RunningServer {
 
 /** Our own Bun.serve entrypoint with Mastra's routes mounted through the Hono adapter (ADR 0002). */
 export async function startServer({ databasePath, port }: ServerOptions): Promise<RunningServer> {
-  await mkdir(dirname(databasePath), { recursive: true });
-  const storage = createLocalStore(databasePath);
+  const storage = await createLocalStore(databasePath);
   try {
     await storage.init();
     const mastra = new Mastra({ storage, logger: false });

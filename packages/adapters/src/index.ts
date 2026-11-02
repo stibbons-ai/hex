@@ -1,2 +1,2 @@
 export { toMastraSchema } from "./schema";
-export { createLocalStore, mastraDatabasePath, resolveDataDirectory } from "./storage";
+export { createLocalStore } from "./storage";

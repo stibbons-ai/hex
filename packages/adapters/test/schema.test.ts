@@ -54,8 +54,8 @@ describe("Mastra workflow contract", () => {
     })
       .then(step)
       .commit();
-    mastra = new Mastra({ workflows: { echo: workflow }, logger: false });
-    const instance = mastra;
+    const instance = new Mastra({ workflows: { echo: workflow }, logger: false });
+    mastra = instance;
     return {
       calls: () => calls,
       async start(inputData: unknown) {

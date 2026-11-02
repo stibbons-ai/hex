@@ -64,13 +64,17 @@ describe("catalog policy (ADR 0003)", () => {
     },
   );
 
-  test("rejects catalog: for a name the catalog lacks", () => {
-    expect(
-      catalogViolations(root(), [pkg("domain", { dependencies: { hono: "catalog:" } })]),
-    ).toEqual([
-      'packages/domain/package.json: dependencies.hono uses "catalog:" but the root catalog has no hono',
-    ]);
-  });
+  // Inherited object keys such as `constructor` are not catalog entries either.
+  test.each(["hono", "constructor", "toString"])(
+    "rejects catalog: for %s, which the catalog lacks",
+    (name) => {
+      expect(
+        catalogViolations(root(), [pkg("domain", { dependencies: { [name]: "catalog:" } })]),
+      ).toEqual([
+        `packages/domain/package.json: dependencies.${name} uses "catalog:" but the root catalog has no ${name}`,
+      ]);
+    },
+  );
 
   test("requires the catalog at the top level, not nested under workspaces or named", () => {
     const { catalog: _, ...withoutCatalog } = root().manifest;

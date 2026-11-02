@@ -1,7 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 
 const Dependencies = Schema.optionalKey(Schema.Record(Schema.String, Schema.String));
 
@@ -27,6 +26,7 @@ const Manifest = Schema.Struct({
 });
 type Manifest = typeof Manifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(Manifest);
+const decodeManifestResult = Schema.decodeUnknownResult(Manifest);
 
 /** A package.json as read from disk, before its shape is trusted. */
 export interface ManifestFile {
@@ -51,19 +51,18 @@ const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
  */
 export function catalogViolations(root: ManifestFile, packages: readonly ManifestFile[]): string[] {
   const failures: string[] = [];
-  const decoded: { path: string; manifest: Manifest }[] = [];
-  for (const { path, manifest } of [root, ...packages]) {
-    try {
-      decoded.push({ path, manifest: decodeManifest(manifest, { errors: "all" }) });
-    } catch (error) {
-      failures.push(`${path}: invalid manifest: ${(error as Error).message}`);
-    }
-  }
-  const rootManifest = decoded.find((entry) => entry.path === root.path)?.manifest;
-  if (!rootManifest) return failures;
+  const decode = ({ path, manifest }: ManifestFile) => {
+    const result = decodeManifestResult(manifest, { errors: "all" });
+    if (Result.isSuccess(result)) return [{ path, manifest: result.success }];
+    failures.push(`${path}: invalid manifest: ${result.failure.message}`);
+    return [];
+  };
+  const [decodedRoot] = decode(root);
+  const workspaceManifests = packages.flatMap(decode);
+  if (!decodedRoot) return failures;
 
-  const { catalog, catalogs, workspaces } = rootManifest;
-  if (!catalog) failures.push(`${root.path}: missing top-level "catalog"`);
+  const { catalog = {}, catalogs, workspaces } = decodedRoot.manifest;
+  if (!decodedRoot.manifest.catalog) failures.push(`${root.path}: missing top-level "catalog"`);
   if (catalogs !== undefined) failures.push(`${root.path}: named "catalogs" are not used`);
   if (
     workspaces &&
@@ -72,20 +71,19 @@ export function catalogViolations(root: ManifestFile, packages: readonly Manifes
   ) {
     failures.push(`${root.path}: catalog must be top-level, not nested under "workspaces"`);
   }
-  for (const [name, version] of Object.entries(catalog ?? {})) {
+  for (const [name, version] of Object.entries(catalog)) {
     if (name.startsWith("@mastra/") && !exactVersion.test(version)) {
       failures.push(`${root.path}: catalog.${name} must be an exact version, not ${version}`);
     }
   }
 
   const workspaceNames = new Set<string>();
-  for (const { path, manifest } of decoded) {
-    if (path === root.path) continue;
+  for (const { path, manifest } of workspaceManifests) {
     if (manifest.name === undefined) failures.push(`${path}: workspace package needs a "name"`);
     else workspaceNames.add(manifest.name);
   }
 
-  for (const { path, manifest } of decoded) {
+  for (const { path, manifest } of [decodedRoot, ...workspaceManifests]) {
     for (const field of dependencyFields) {
       for (const [name, specifier] of Object.entries(manifest[field] ?? {})) {
         const where = `${path}: ${field}.${name}`;
@@ -95,7 +93,7 @@ export function catalogViolations(root: ManifestFile, packages: readonly Manifes
           }
         } else if (specifier !== "catalog:") {
           failures.push(`${where} must use "catalog:", not "${specifier}"`);
-        } else if (!catalog || !(name in catalog)) {
+        } else if (!Object.hasOwn(catalog, name)) {
           failures.push(`${where} uses "catalog:" but the root catalog has no ${name}`);
         }
       }
@@ -110,7 +108,7 @@ export async function readManifests(
 ): Promise<{ root: ManifestFile; packages: ManifestFile[] }> {
   const read = async (path: string): Promise<ManifestFile> => ({
     path,
-    manifest: JSON.parse(await readFile(join(rootDirectory, path), "utf8")),
+    manifest: await Bun.file(join(rootDirectory, path)).json(),
   });
   const root = await read("package.json");
   const { workspaces = [] } = decodeManifest(root.manifest);
