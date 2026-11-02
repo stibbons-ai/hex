@@ -10,7 +10,7 @@ function registeredWorkflow(mastra: Mastra, workflowId: string) {
 }
 
 export const router = api.router({
-  health: api.health.handler(() => ({ status: "ok" as const })),
+  health: api.health.handler(() => ({ status: "ok" })),
   workflows: {
     list: api.workflows.list.handler(({ context }) => Object.keys(context.mastra.listWorkflows())),
     start: api.workflows.start.handler(async ({ context, input, errors }) => {
