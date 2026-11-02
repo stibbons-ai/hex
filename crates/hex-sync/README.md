@@ -64,7 +64,7 @@ outbox = "/srv/hex/outbox"                   # required
 archive = "~/Proton Drive/Buchhaltung"       # required
 log = "~/Library/Logs/hex/sync.log"          # required, appended to; outside both roots, no symlink
 min_age_secs = 60                            # optional, default 60
-interval_secs = 900                          # optional, default 900, > 0 (used by the scheduler)
+interval_secs = 900                          # optional, default 900, > 0 (seconds between scheduled runs)
 ```
 
 Paths must be absolute or start with `~/`.
@@ -91,13 +91,48 @@ Exit codes:
 
 - `0`: done;
 - `1`: some files failed, or a line could not be written (the log; on a dry run, stdout);
-- `2`: nothing done (config error, the log can't be opened, lies inside a root or is a symlink,
-  or a root check failed).
+- `2`: nothing done (config error, the log or the lock file can't be opened, the log lies
+  inside a root or is a symlink, or a root check failed);
+- `3`: nothing done because another run is in progress (see below).
+
+### One run at a time
+
+A run takes an exclusive `flock` on `<log>.lock` (for `sync.log`, `sync.log.lock`) right after
+the root checks, which only read, and before it writes anything, the log included; it holds the
+lock for the whole pass. If another run holds it, the run touches nothing, logs nothing, prints
+`hex-sync: another run is in progress (lock <path>)` to stderr and exits `3`. The lock is
+released when the process exits, however it exits, so a lock file left behind is harmless and
+never needs deleting. A run that aborts takes no lock (it may not create the log's folder) and
+only appends its abort line. A dry run takes no lock and doesn't create the lock file.
+
+### Scheduling (macOS)
+
+```sh
+hex-sync install     # run every interval_secs as the launchd agent ai.stibbons.hex-sync
+hex-sync uninstall   # unload the agent and remove its plist
+```
+
+`install [--config <path>] [--launch-agents-dir <dir>]` loads the config (failing on an invalid
+one), then writes `<dir>/ai.stibbons.hex-sync.plist` (default dir `~/Library/LaunchAgents`,
+created if missing). The agent runs `<this binary> run --config <absolute config path>` every
+`interval_secs`, the first time one interval after loading. Its stdout goes to `/dev/null` (it
+only echoes the log); its stderr, where config errors, aborts and refused runs show up, goes
+to `hex-sync.stderr.log` in the log's folder. Install then reloads the agent (`launchctl
+bootout`, then `bootstrap gui/<uid>`), so running it again after editing the config or moving
+the binary applies the change. The plist pins the binary's resolved path: reinstall after
+moving it.
+
+`uninstall [--launch-agents-dir <dir>]` unloads the agent and removes the plist; either being
+gone already is fine. Both commands say what they did and exit `0`, or `1` with the failing
+step (a failed `launchctl` call is named with its stderr; a failed `bootstrap` leaves the plist
+in place).
+
+Status: `launchctl print gui/$(id -u)/ai.stibbons.hex-sync` (run interval, runs, last exit
+code). `HEX_SYNC_LAUNCHCTL` overrides the `launchctl` program (default `/bin/launchctl`); the
+tests point it at a fake.
 
 ## Limits
 
-- Concurrent runs aren't locked against each other. A second run restores the first run's
-  claims, so the first run then fails on those files; nothing is lost.
 - These paths are covered by code review only; triggering them through the CLI would need a
   fault hook:
   - a failed verification of an Archive copy;

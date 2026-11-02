@@ -13,9 +13,8 @@ pub struct Config {
     /// Files whose mtime is younger than this are left for a later run.
     #[serde(default = "default_min_age_secs")]
     pub min_age_secs: u64,
-    /// Seconds between runs once scheduled; validated here, used by the scheduler.
+    /// Seconds between scheduled runs: the launchd agent's `StartInterval` (`install`).
     #[serde(default = "default_interval_secs")]
-    #[allow(dead_code)]
     pub interval_secs: NonZeroU64,
     pub log: PathBuf,
 }

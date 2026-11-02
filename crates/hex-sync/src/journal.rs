@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
@@ -82,16 +82,8 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Opens the log in append mode, creating its parent folder if missing.
-    pub fn open(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        Self::open_existing(path)
-    }
-
     /// Opens the log in append mode without creating any folder.
-    pub fn open_existing(path: &Path) -> io::Result<Self> {
+    pub fn open(path: &Path) -> io::Result<Self> {
         let log = OpenOptions::new().append(true).create(true).open(path)?;
         Ok(Self {
             log: Some(log),
