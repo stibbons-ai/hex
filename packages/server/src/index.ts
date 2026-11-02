@@ -2,10 +2,13 @@ import { createLocalStore } from "@hex/adapters";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
-import { type HonoBindings, type HonoVariables, MastraServer } from "@mastra/hono";
-import { Hono } from "hono";
+import { ORPCError, onError } from "@orpc/server";
+import { RPCHandler } from "@orpc/server/fetch";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
+import { router } from "./router";
+
+export { contract } from "./contract";
 
 /**
  * Loopback only: other machines can't connect. Local browsers still can, so requests are also
@@ -18,7 +21,10 @@ export interface ServerOptions {
   databasePath: string;
   /** TCP port; 0 picks a free one. */
   port: number;
-  /** Mastra's logger; omitted keeps Mastra's default. `false` silences it (tests only). */
+  /**
+   * Mastra's logger, which also logs failed oRPC calls; omitted keeps Mastra's default. `false`
+   * silences it (tests only).
+   */
   logger?: IMastraLogger | false;
   /** Workflows to register with Mastra. */
   workflows?: Record<string, AnyWorkflow>;
@@ -42,7 +48,10 @@ export interface RunningServer {
   stop(): Promise<void>;
 }
 
-/** Our own Bun.serve entrypoint with Mastra's routes mounted through the Hono adapter (ADR 0002). */
+/**
+ * Our own Bun.serve entrypoint: `GET /health` plus the oRPC API under /rpc (ADR 0004), both behind
+ * the Host allow-list.
+ */
 export async function startServer({
   databasePath,
   port,
@@ -58,17 +67,34 @@ export async function startServer({
       ...(logger === undefined ? {} : { logger }),
       ...(workflows ? { workflows } : {}),
     });
-    const app = new Hono<{ Bindings: HonoBindings; Variables: HonoVariables }>();
+    const handler = new RPCHandler(router, {
+      interceptors: [
+        // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
+        onError((error) => {
+          if (error instanceof ORPCError && error.status < 500) return;
+          mastra.getLogger().error("hex: oRPC call failed", error);
+        }),
+      ],
+    });
     // The bound port is known only after Bun.serve, so the check reads the set per request.
     let hosts = new Set<string>();
-    app.use("*", async (c, next) => {
-      if (!hosts.has(c.req.header("host") ?? "")) return c.text("Forbidden host", 403);
-      await next();
+    const server = Bun.serve({
+      hostname: HOSTNAME,
+      port,
+      async fetch(request) {
+        if (!hosts.has(request.headers.get("host") ?? "")) {
+          return new Response("Forbidden host", { status: 403 });
+        }
+        if (request.method === "GET" && new URL(request.url).pathname === "/health") {
+          return Response.json({ status: "ok" });
+        }
+        const { matched, response } = await handler.handle(request, {
+          prefix: "/rpc",
+          context: { mastra },
+        });
+        return matched ? response : new Response("Not found", { status: 404 });
+      },
     });
-    app.get("/health", (c) => c.json({ status: "ok" }));
-    await new MastraServer({ app, mastra }).init();
-
-    const server = Bun.serve({ hostname: HOSTNAME, port, fetch: app.fetch });
     hosts = allowedHosts(server.port ?? port);
     return {
       url: server.url,

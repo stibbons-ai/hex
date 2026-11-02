@@ -7,11 +7,12 @@
   "dependencies": {
     "@hex/adapters": "workspace:*",
     "@mastra/core": "catalog:",
-    "@mastra/hono": "catalog:",
-    "hono": "catalog:"
+    "@orpc/contract": "catalog:",
+    "@orpc/server": "catalog:",
+    "effect": "catalog:"
   },
   "devDependencies": {
     "@mastra/libsql": "catalog:",
-    "effect": "catalog:"
+    "@orpc/client": "catalog:"
   }
 }

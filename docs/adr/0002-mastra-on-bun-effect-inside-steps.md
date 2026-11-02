@@ -2,6 +2,8 @@
 
 hex adopts the decisions proven in `stibbons-ai/iconograph` instead of re-running the spike: Bun is the runtime, with our own `Bun.serve` entrypoint mounting Mastra's routes via `@mastra/hono` (`mastra dev` for development only), shipped as a Bun JS bundle with native addons external (iconograph ADR-0007, ADR-0009). Mastra owns workflow durability; Effect runs inside steps through one shared `ManagedRuntime`, schemas are Effect Schemas handed to Mastra through a helper that applies both `Schema.toStandardSchemaV1` and `Schema.toStandardJSONSchemaV1`, and every step decodes its own output because Mastra does not validate step output (iconograph ADR-0006).
 
+Superseded in part: mounting Mastra's routes via `@mastra/hono` is replaced by our own oRPC API ([ADR 0004](0004-orpc-api-instead-of-mastra-routes.md)).
+
 ## Consequences
 
 - Mastra versions are pinned exactly; a Mastra upgrade re-checks the bundle's model-capability metadata and the schema helper.

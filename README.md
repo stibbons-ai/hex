@@ -1,8 +1,8 @@
 # hex
 
 Daniel's personal agentic assistant (see [GLOSSARY.md](GLOSSARY.md) and [docs/adr](docs/adr)).
-This workspace is the skeleton: a Bun server tracer with Mastra mounted, and the tooling every
-later slice builds on.
+This workspace is the skeleton: a Bun server tracer running Mastra behind a small oRPC API, and the
+tooling every later slice builds on.
 
 ## Install
 
@@ -35,8 +35,28 @@ they are closed, then Mastra shuts down. A second signal of the same kind kills 
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
-curl http://127.0.0.1:4111/api/workflows # Mastra's routes, mounted through @mastra/hono
+curl -X POST http://127.0.0.1:4111/rpc/workflows/list # {"json":[]}: the oRPC API
 ```
+
+Everything except `GET /health` is the oRPC API under `/rpc` (ADR 0004), defined in
+`packages/server/src/contract.ts`: `health`, `workflows.list`, `workflows.start` (runs a workflow
+and returns its status and result) and `workflows.runs` (the runs persisted in LibSQL). An unknown
+workflow is a `NOT_FOUND` error, input the workflow rejects a `BAD_REQUEST`. Call it with the
+typed client:
+
+```ts
+import { createORPCClient } from "@orpc/client";
+import { RPCLink } from "@orpc/client/fetch";
+import type { ContractRouterClient } from "@orpc/contract";
+import type { contract } from "@hex/server";
+
+const hex = createORPCClient<ContractRouterClient<typeof contract>>(
+  new RPCLink({ url: "http://127.0.0.1:4111/rpc" }),
+);
+await hex.workflows.list();
+```
+
+Mastra's own REST routes (`/api/...`), and so `mastra dev` and Mastra Studio, are not served.
 
 ## Check
 
@@ -56,7 +76,7 @@ bun run test          # bun test
 | ------------------- | ------------------------------------------------------------------------------ |
 | `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
-| `@hex/server`       | `Bun.serve` entrypoint mounting Mastra's routes via `@mastra/hono`             |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health` and the oRPC API (`contract`) over Mastra    |
 | `@hex/eval-harness` | Empty until the evaluation slice                                               |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
@@ -86,5 +106,6 @@ reason. Packages for other platforms, which are never installed locally, are aud
 version); a dependency update that adds or changes a platform package must update that file after
 reviewing each licence. Notable licences and attributions are in
 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES). Mastra's `ee/` directories are not Apache-2.0; lint
-rejects importing them from our code, but `@mastra/server` (behind `@mastra/hono`) itself loads
-`@mastra/core/auth/ee`; see THIRD_PARTY_NOTICES.
+rejects importing them from our code, and `@mastra/server` and `@mastra/hono` too, because
+`@mastra/server` imports `@mastra/core/auth/ee` (ADR 0004). `@mastra/core` itself still loads its
+compiled ee auth code, which stays unused without auth; see ADR 0004 and THIRD_PARTY_NOTICES.
