@@ -1581,8 +1581,8 @@ fn install_and_uninstall_default_to_paths_under_home() {
     assert!(!launchd.plist.exists());
 }
 
-/// Runs `command` with umask 0, so only the mode the binary asks for limits the files it
-/// creates.
+/// Makes `command` run with umask 0, so only the mode the binary asks for limits the files
+/// it creates.
 fn with_umask_0(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     // SAFETY: umask is async-signal-safe and touches no memory.
@@ -1655,6 +1655,45 @@ fn install_fails_without_home_before_writing_anything() {
     assert_exit(&output, 1, "HOME is not set or not absolute");
     assert!(!launchd.dir.exists());
     assert!(launchd.calls().is_empty());
+}
+
+#[test]
+fn uninstall_fails_without_home_before_unloading() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    assert_success(&launchd.install(&env.config, BOOTOUT_NOT_LOADED, OK));
+    let calls = launchd.calls();
+    let mut command = launchd.command(&[OsStr::new("uninstall")], OK, OK);
+    command.env_remove("HOME").current_dir(&env.root);
+
+    let output = output(command);
+
+    assert_exit(&output, 1, "HOME is not set or not absolute");
+    assert_eq!(launchd.calls(), calls);
+    assert!(launchd.plist.exists());
+}
+
+#[test]
+fn install_resolves_a_relative_launch_agents_dir() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let args = [
+        OsStr::new("install"),
+        OsStr::new("--config"),
+        env.config.as_os_str(),
+        OsStr::new("--launch-agents-dir"),
+        OsStr::new("agents/new"),
+    ];
+    let mut command = launchd.command(&args, BOOTOUT_NOT_LOADED, OK);
+    command.current_dir(&env.root);
+
+    let output = output(command);
+
+    assert_success(&output);
+    let plist = env.root.join(format!("agents/new/{LABEL}.plist"));
+    assert!(plist.exists());
+    let bootstrap = format!("bootstrap {} {}", gui_domain(), plist.display());
+    assert_eq!(launchd.calls().last(), Some(&bootstrap));
 }
 
 #[test]
@@ -1752,7 +1791,7 @@ fn a_run_holds_the_lock_for_its_whole_pass() {
 }
 
 #[test]
-fn run_aborts_when_the_log_folder_cannot_be_created() {
+fn run_fails_when_the_log_folder_cannot_be_created() {
     let env = Env::new();
     write(&env.outbox.join("a.pdf"), b"stays");
     let read_only = env.root.join("read-only");

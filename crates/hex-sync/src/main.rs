@@ -77,8 +77,18 @@ struct LaunchAgentsArg {
 }
 
 impl LaunchAgentsArg {
-    fn dir(&self) -> PathBuf {
-        config::expand_home(&self.launch_agents_dir)
+    /// The folder as an absolute path. A `~` that HOME can't turn into an absolute path is
+    /// an error: resolved against the working folder instead, uninstall would miss the real
+    /// plist and still report success.
+    fn dir(&self) -> Result<PathBuf, String> {
+        let dir = config::expand_home(&self.launch_agents_dir);
+        if self.launch_agents_dir.starts_with("~") && !dir.is_absolute() {
+            return Err(format!(
+                "cannot expand {}: HOME is not set or not absolute",
+                self.launch_agents_dir.display()
+            ));
+        }
+        std::path::absolute(&dir).map_err(|e| format!("cannot resolve {}: {e}", dir.display()))
     }
 }
 
@@ -89,10 +99,15 @@ fn main() -> ExitCode {
         None => cli.run,
         Some(Command::Install(args)) => {
             let config = config::expand_home(&args.config);
-            return report(launchd::install(&config, &args.launch_agents.dir()));
+            let result = args.launch_agents.dir();
+            return report(result.and_then(|dir| launchd::install(&config, &dir)));
         }
         Some(Command::Uninstall(args)) => {
-            return report(launchd::uninstall(&args.launch_agents.dir()));
+            return report(
+                args.launch_agents
+                    .dir()
+                    .and_then(|dir| launchd::uninstall(&dir)),
+            );
         }
     };
     match run(&args) {
@@ -117,9 +132,9 @@ fn report(result: Result<(), String>) -> ExitCode {
 
 /// Exit codes: 0 all done; 1 some files failed, or a log line (on a dry run, a plan line)
 /// could not be written, which stops the pass; 2 nothing done (`Err`: config error, the log's
-/// folder cannot be created, the log or the lock file cannot be opened or locked, the log
-/// is a symlink or lies inside a root, or a root check failed); 3 nothing done because
-/// another run holds the lock.
+/// folder cannot be created, the log cannot be opened, the lock file cannot be opened or
+/// locked, the log is a symlink or lies inside a root, or a root check failed); 3 nothing
+/// done because another run holds the lock.
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
     let roots = match sync::check_roots(&config.outbox, &config.archive, &config.log) {
@@ -143,9 +158,10 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
             return Err(format!("aborted, nothing touched: {reason}"));
         }
     };
-    // The lock comes after the root checks, which only read, and before anything is written,
-    // the log included: a refused run leaves no trace but the lock file. An aborting run
-    // takes no lock (it may not create the log's folder) and only appends its abort line.
+    // The lock comes after the root checks, which only read, and before the run writes
+    // anything but the log's folder and the lock file: a refused run leaves no other trace.
+    // An aborting run takes no lock (it may not create the log's folder) and only appends
+    // its abort line.
     let _lock = if args.dry_run {
         None
     } else {

@@ -91,17 +91,18 @@ Exit codes:
 
 - `0`: done;
 - `1`: some files failed, or a line could not be written (the log; on a dry run, stdout);
-- `2`: nothing done (config error, the log's folder can't be created, the log or the lock file
-  can't be opened or locked, the log lies inside a root or is a symlink, or a root check
-  failed);
+- `2`: nothing done (config error, the log's folder can't be created, the log can't be opened,
+  the lock file can't be opened or locked, the log lies inside a root or is a symlink, or a root
+  check failed);
 - `3`: nothing done because another run is in progress (see below).
 
 ### One run at a time
 
 A run takes an exclusive `flock` on `<log>.lock` (for `sync.log`, `sync.log.lock`) right after
-the root checks, which only read, and before it writes anything, the log included; it holds the
-lock for the whole pass. If another run holds it, the run touches nothing, logs nothing, prints
-`hex-sync: another run is in progress (lock <path>)` to stderr and exits `3`. The lock is
+the root checks, which only read, and before it writes anything but the log's folder and the
+lock file; it holds the lock for the whole pass. If another run holds it, the run touches
+nothing, logs nothing, prints `hex-sync: another run is in progress (lock <path>)` to stderr
+and exits `3`. The lock is
 released when the process exits, however it exits, so a lock file left behind is harmless and
 never needs deleting. A run that aborts takes no lock (it may not create the log's folder) and
 only appends its abort line. A dry run takes no lock and doesn't create the lock file; run
@@ -115,11 +116,12 @@ hex-sync uninstall   # unload the agent and remove its plist
 ```
 
 `install [--config <path>] [--launch-agents-dir <dir>]` loads the config (failing on an invalid
-one, or on a log that is a symlink or lies inside an existing Outbox or Archive; a missing root
-is fine, it may be an unmounted drive), then writes `<dir>/ai.stibbons.hex-sync.plist`
-(default dir `~/Library/LaunchAgents`, created if missing; the plist's mode is at most `0644`:
-the umask can only narrow it, so it is never world-writable, which launchd rejects). The agent
-runs `<this binary> run --config <absolute config path>` every `interval_secs`, the first time
+one, or on a log that is a symlink or lies inside an Outbox or Archive that can be resolved;
+one that can't, e.g. missing on an unmounted drive, is fine), then writes
+`<dir>/ai.stibbons.hex-sync.plist` (default dir `~/Library/LaunchAgents`, created if missing;
+the plist's mode is at most `0644`: the umask can only narrow it, so it is never
+world-writable, which launchd rejects). The agent runs `<this binary> run --config <absolute
+config path>` every `interval_secs`, the first time
 one interval after loading. Its stdout goes to `/dev/null` (it only echoes the log); its
 stderr, where config errors, aborts and refused runs show up, goes to
 `~/Library/Logs/hex-sync.stderr.log`. That folder always exists, so launchd never creates a

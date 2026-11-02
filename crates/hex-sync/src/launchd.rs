@@ -170,8 +170,9 @@ fn xml_escape(text: &str) -> String {
 
 /// Writes `.<name>.tmp` beside `path`, then renames it over `path`. The mode is at most 0644:
 /// the umask can only narrow it, so the plist is never world-writable (launchd rejects that).
-/// The temp name is fixed, so a temp left by a crashed install is found and replaced; two
-/// installs at once may then fail one of them, but the plist that lands is always complete.
+/// The temp name is fixed, so a temp left by a crashed install is found and replaced. Two
+/// installs at once may fail, either or both; rerun install. The plist on disk ends up
+/// complete.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut temp_name = OsString::from(".");
@@ -179,7 +180,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     temp_name.push(".tmp");
     let temp = dir.join(temp_name);
     let write = || -> io::Result<()> {
-        // A temp left by a crash would keep its old mode.
+        // A temp left by a crashed install would make `create_new` fail.
         match fs::remove_file(&temp) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
