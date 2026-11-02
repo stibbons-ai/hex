@@ -151,6 +151,16 @@ describe("manifest policy", () => {
     );
   });
 
+  test.each(["bun run lint -- $(bun x.ts)", "bun run lint -- `bun x.ts`", "bun run lint -- 'x'"])(
+    "rejects a chain whose arguments aren't plain words: %s",
+    (script) => {
+      const scripts = { lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint .", run: script };
+      expect(manifestViolations(root({ scripts }), [])).toEqual([
+        `package.json: scripts.run must start with "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1" or only chain this manifest's scripts with "bun run <name>"`,
+      ]);
+    },
+  );
+
   test.each(["oxlint", "check:all", "lint && bun run oxlint"])(
     "rejects chaining bun run %s when it is not a script in the same manifest",
     (chain) => {

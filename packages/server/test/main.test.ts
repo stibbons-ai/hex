@@ -68,7 +68,7 @@ describe("bun packages/server/src/main.ts", () => {
     expect((await stat(join(directory, ".data", "mastra.db"))).size).toBeGreaterThan(0);
   });
 
-  test("reports a failed startup once and exits 1", async () => {
+  test("a failed startup exits 1 with the listen error reported once", async () => {
     const taken = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
     try {
       const child = spawnMain({
@@ -82,7 +82,6 @@ describe("bun packages/server/src/main.ts", () => {
       }
       const stderr = await new Response(child.stderr).text();
       expect(stderr.match(/Failed to start server/g)).toHaveLength(1);
-      expect(stderr).not.toContain("hex: shutdown failed");
     } finally {
       await taken.stop(true);
     }

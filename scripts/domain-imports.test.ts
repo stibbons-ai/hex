@@ -46,6 +46,7 @@ describe("domain purity (allow-list)", () => {
     ['const fs = await import ( "fs" );', '"fs" is not effect'],
     ['/// <reference types="bun" />\nexport const v = Bun.version;', "triple-slash reference"],
     ['  ///<reference lib="dom" />', "triple-slash reference"],
+    ['export const a = 1;\n\n/// <reference types="bun" />', "triple-slash reference"],
     ["const m = await import(`fs`);", "computed import() or require()"],
   ])("rejects %s", (source, message) => {
     const failures = check(source);
@@ -63,11 +64,15 @@ describe("domain purity (allow-list)", () => {
     try {
       await mkdir(join(directory, ".hidden"), { recursive: true });
       await writeFile(join(directory, ".hidden", "probe.ts"), 'import "fs";\n');
+      await mkdir(join(directory, "sub", ".hidden"), { recursive: true });
+      await writeFile(join(directory, "sub", ".hidden", "x.ts"), 'import "os";\n');
       const sources = await readDomainSources(directory);
-      expect(sources.map((file) => file.path)).toEqual([".hidden/probe.ts"]);
+      expect(sources.map((file) => file.path)).toEqual([".hidden/probe.ts", "sub/.hidden/x.ts"]);
       expect(domainImportViolations(directory, sources)).toEqual([
         ".hidden/probe.ts: dot directories and files are not type-checked; move it",
         '.hidden/probe.ts: "fs" is not effect; the domain imports Effect only',
+        "sub/.hidden/x.ts: dot directories and files are not type-checked; move it",
+        'sub/.hidden/x.ts: "os" is not effect; the domain imports Effect only',
       ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
