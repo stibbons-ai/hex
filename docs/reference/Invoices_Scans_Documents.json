@@ -1,0 +1,233 @@
+{
+  "name": "Invoices/Scans/Documents",
+  "nodes": [
+    {
+      "parameters": {
+        "downloadAttachments": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -448,
+        288
+      ],
+      "id": "4755c9a9-c553-4103-a1bd-21d8bf35c568",
+      "name": "Email Trigger (IMAP)",
+      "credentials": {
+        "imap": {
+          "id": "UQpWkY937Obexi3h",
+          "name": "IMAP n8n@ravens.dev"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "sevdesk@ravens.at",
+        "toEmail": "\"autobox at sevdesk.email\" <autobox_at_sevdesk_email_qzusaqf@simplelogin.co>",
+        "options": {
+          "attachments": "={{ Object.keys($binary).join(', ') }}"
+        }
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "179eca36-bfc0-4e46-8612-e15be0fb4f3b",
+      "name": "Send to SevDesk",
+      "webhookId": "c9e227f0-20d5-46c3-88b7-cde1631c27e6",
+      "credentials": {
+        "smtp": {
+          "id": "A7fafCnpTNYCaa3S",
+          "name": "SMTP sevdesk@ravens.at"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "sevdesk@ravens.at",
+        "toEmail": "bill@ravens.dev",
+        "options": {
+          "attachments": "={{ Object.keys($binary).join(', ') }}"
+        }
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        192
+      ],
+      "id": "0cac6ffc-5b9b-4a08-9705-a81a41719bf3",
+      "name": "Send to bill@ravens.dev (paperless ngx)",
+      "webhookId": "79b27a0b-7059-45d5-976c-a95d9801387c",
+      "credentials": {
+        "smtp": {
+          "id": "A7fafCnpTNYCaa3S",
+          "name": "SMTP sevdesk@ravens.at"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/files/Buchhaltung/{{ $json.output[0].content[0].text.year || $now.format('yyyy') }}-{{ $json.output[0].content[0].text.month || $now.format('MM') }}/ER/{{ $('split up attachments').item.json.fileName }}",
+        "options": {
+          "append": false
+        }
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        384
+      ],
+      "id": "d30f8615-e9cf-4371-b2c9-55a54cd5f83a",
+      "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fs = require('fs');\nconst year = $json.output[0].content[0].text.year || $now.toFormat('yyyy');\nconst month = $json.output[0].content[0].text.month || $now.toFormat('MM');\n\nconst path = `/files/Buchhaltung/${year}-${month}/ER/`;\nfs.mkdirSync(path, { recursive: true });\n\nreturn {\n  json: $json,\n  binary: $('split up attachments').item.binary\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        384
+      ],
+      "id": "8822bd6b-4a8b-473a-8dbf-a897af39e7e4",
+      "name": "create folder, if necessary"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = [];\nfor (const item of $input.all()) {\n  for (const key of Object.keys(item.binary)) {\n    items.push({\n      json: { fileName: item.binary[key].fileName },\n      binary: { data: item.binary[key] }\n    });\n  }\n}\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        384
+      ],
+      "id": "f4791687-e617-43be-9280-5a31e44f58c7",
+      "name": "split up attachments"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5.1-codex-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5.1-CODEX-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "please give me the document date of the attached file. respond with a JSON object with 3 fields:\n- year: the year of the document date (f.e. \"2026\")\n- month: the month of the document date, but always 2 digits (so f.e. \"01\", \"03\", \"12\", etc.)\n- day: the day of the document date, but always 2 digits (so f.e. \"01\", \"07\", \"31\", etc.)"
+            },
+            {
+              "type": "file",
+              "fileType": "base64",
+              "fileName": "={{ $json.fileName }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "textFormat": {
+            "textOptions": {
+              "type": "json_schema",
+              "schema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"year\": {\n      \"type\": \"string\"\n    },\n    \"month\": {\n      \"type\": \"string\"\n    },\n    \"day\": {\n      \"type\": \"string\"\n    }\n  },\n  \"additionalProperties\": false,\n  \"required\": [\"year\", \"month\", \"day\"]\n}",
+              "strict": true
+            }
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        384
+      ],
+      "id": "d303ac70-5590-4105-b928-559c64036503",
+      "name": "Message a model",
+      "credentials": {
+        "openAiApi": {
+          "id": "wZEXkzbniZilWXH8",
+          "name": "OpenAi account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Send to bill@ravens.dev (paperless ngx)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send to SevDesk",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "split up attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create folder, if necessary": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "split up attachments": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "create folder, if necessary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "0a58e6b1-84ca-44c1-a88a-5a94aea0ee43",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "355c7e9e743ddd4eaa927493957fabfe546e933bb9c4b7d1327be63a3c2b4661"
+  },
+  "id": "7SmLnqA6DNWZL4cJjgsY4",
+  "tags": []
+}
