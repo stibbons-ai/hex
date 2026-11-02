@@ -109,8 +109,8 @@ export async function startServer({
         });
         return matched ? response : new Response("Not found", { status: 404 });
       },
-      // Anything thrown outside oRPC's own error handling, e.g. Bun failing to serialize the
-      // encoded body: logged, and answered without Bun's debug page.
+      // Anything thrown outside oRPC's own error handling, e.g. oRPC's fetch adapter failing to
+      // stringify the encoded body: logged, and answered without Bun's debug page.
       error(error) {
         mastra.getLogger().error("hex: request failed", error);
         return new Response("Internal server error", { status: 500 });
