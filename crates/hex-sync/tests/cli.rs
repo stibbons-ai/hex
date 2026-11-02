@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime};
 
 use filetime::FileTime;
@@ -18,8 +18,12 @@ struct Env {
     config: PathBuf,
 }
 
-/// Every regular file under `dir` with its bytes, keyed by relative path.
+/// Every regular file under a folder with its bytes, keyed by relative path.
 type Snapshot = BTreeMap<PathBuf, Vec<u8>>;
+
+/// Every regular Archive file with its bytes, inode and mtime: an overwrite in place or a
+/// replacement shows up even when the bytes match.
+type ArchiveState = BTreeMap<PathBuf, (Vec<u8>, u64, i64)>;
 
 impl Env {
     /// Outbox and Archive exist; `min_age_secs = 0` so freshly written files are eligible.
@@ -51,23 +55,47 @@ impl Env {
     /// Runs the binary with `--config` and `args`, asserting the Archive never loses
     /// or changes a file.
     fn run(&self, args: &[&str]) -> Output {
-        let before = snapshot(&self.archive);
-        let output = Command::new(env!("CARGO_BIN_EXE_hex-sync"))
-            .args(args)
-            .arg("--config")
-            .arg(&self.config)
-            .output()
-            .unwrap();
-        let after = snapshot(&self.archive);
-        for (path, bytes) in &before {
+        let before = self.archive_state();
+        let output = self.command(args).output().unwrap();
+        self.assert_archive_kept(&before);
+        output
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hex-sync"));
+        command.args(args).arg("--config").arg(&self.config);
+        command
+    }
+
+    /// Backdates every Archive file to a fixed mtime, then records it.
+    fn archive_state(&self) -> ArchiveState {
+        let fixed = FileTime::from_unix_time(1_000_000_000, 0);
+        for rel in snapshot(&self.archive).keys() {
+            filetime::set_file_mtime(self.archive.join(rel), fixed).unwrap();
+        }
+        self.current_archive_state()
+    }
+
+    fn current_archive_state(&self) -> ArchiveState {
+        snapshot(&self.archive)
+            .into_iter()
+            .map(|(rel, bytes)| {
+                let meta = fs::symlink_metadata(self.archive.join(&rel)).unwrap();
+                (rel, (bytes, meta.ino(), meta.mtime()))
+            })
+            .collect()
+    }
+
+    fn assert_archive_kept(&self, before: &ArchiveState) {
+        let after = self.current_archive_state();
+        for (path, state) in before {
             assert_eq!(
                 after.get(path),
-                Some(bytes),
-                "Archive file {} was removed or changed",
+                Some(state),
+                "Archive file {} was removed, replaced or changed",
                 path.display()
             );
         }
-        output
     }
 
     fn log_text(&self) -> String {
@@ -299,10 +327,10 @@ fn failed_copy_keeps_source_continues_and_exits_non_zero() {
     );
     assert_eq!(fs::read(env.archive.join("open/b.pdf")).unwrap(), b"lands");
     assert!(!env.outbox.join("open").exists());
-    assert!(
-        env.log_text()
-            .contains("\tcopy\tlocked/a.pdf\tlocked/a.pdf\tfailed: ")
-    );
+    let log = env.log_text();
+    assert!(log.contains("\tcopy\tlocked/a.pdf\tlocked/a.pdf\tfailed: "));
+    assert!(log.contains("\trestore-claim\tlocked/.hex-sync.a.pdf\tlocked/a.pdf\tok"));
+    assert!(!env.outbox.join("locked/.hex-sync.a.pdf").exists());
 }
 
 fn assert_aborted_untouched(env: &Env, output: &Output) {
@@ -395,6 +423,10 @@ fn dry_run_prints_plans_and_changes_nothing() {
     write(&env.outbox.join("2026-01/clash.pdf"), b"clash-in");
     write(&env.archive.join("2026-01/clash.pdf"), b"clash-old");
     fs::create_dir_all(env.outbox.join("empty")).unwrap();
+    write(
+        &env.outbox.join("2026-02/.hex-sync.claimed.pdf"),
+        b"left by a crash",
+    );
     let outbox_before = snapshot(&env.outbox);
     let archive_before = snapshot(&env.archive);
 
@@ -413,6 +445,10 @@ fn dry_run_prints_plans_and_changes_nothing() {
     );
     assert!(out.contains("rmdir empty"), "{out}");
     assert!(out.contains("rmdir 2026-01"), "{out}");
+    assert!(
+        out.contains("restore-claim 2026-02/.hex-sync.claimed.pdf -> 2026-02/claimed.pdf"),
+        "{out}"
+    );
     assert_eq!(snapshot(&env.outbox), outbox_before);
     assert!(env.outbox.join("empty").is_dir());
     assert_eq!(snapshot(&env.archive), archive_before);
@@ -465,6 +501,8 @@ fn unknown_key_is_a_config_error() {
 fn min_age_defaults_to_sixty_seconds() {
     let env = Env::with_config_tail("");
     write(&env.outbox.join("fresh.pdf"), b"fresh");
+    write(&env.outbox.join("half-minute.pdf"), b"half");
+    set_age(&env.outbox.join("half-minute.pdf"), Duration::from_secs(30));
     write(&env.outbox.join("settled.pdf"), b"settled");
     set_age(&env.outbox.join("settled.pdf"), Duration::from_secs(61));
 
@@ -472,6 +510,362 @@ fn min_age_defaults_to_sixty_seconds() {
 
     assert_success(&output);
     assert!(env.outbox.join("fresh.pdf").exists());
+    assert!(env.outbox.join("half-minute.pdf").exists());
     assert!(!env.outbox.join("settled.pdf").exists());
     assert!(env.archive.join("settled.pdf").exists());
+}
+
+#[test]
+fn aborts_when_outbox_is_inside_archive() {
+    let env = Env::new();
+    let nested_outbox = env.archive.join("outbox");
+    write(&nested_outbox.join("a.pdf"), b"in the archive");
+    env.write_config(&config_text(
+        &nested_outbox,
+        &env.archive,
+        &env.log,
+        "min_age_secs = 0\n",
+    ));
+
+    let output = env.run(&[]);
+
+    assert_aborted_untouched(&env, &output);
+    assert_eq!(
+        fs::read(nested_outbox.join("a.pdf")).unwrap(),
+        b"in the archive"
+    );
+}
+
+#[test]
+fn aborts_when_roots_are_one_folder_reached_through_a_symlinked_parent() {
+    let env = Env::new();
+    let root = env.outbox.parent().unwrap();
+    std::os::unix::fs::symlink(root, root.join("alias")).unwrap();
+    write(&env.outbox.join("a.pdf"), b"only copy");
+    env.write_config(&config_text(
+        &env.outbox,
+        &root.join("alias/outbox"),
+        &env.log,
+        "min_age_secs = 0\n",
+    ));
+
+    let output = env.run(&[]);
+
+    assert_aborted_untouched(&env, &output);
+    assert_eq!(fs::read(env.outbox.join("a.pdf")).unwrap(), b"only copy");
+}
+
+/// macOS firmlinks reach the same folder under a second path that `canonicalize` keeps.
+#[cfg(target_os = "macos")]
+#[test]
+fn aborts_when_archive_is_the_outbox_through_a_firmlink() {
+    let env = Env::new();
+    let alias = Path::new("/System/Volumes/Data").join(env.outbox.strip_prefix("/").unwrap());
+    if !alias.is_dir() {
+        return; // Not on the data volume; nothing to alias.
+    }
+    write(&env.outbox.join("a.pdf"), b"only copy");
+    env.write_config(&config_text(
+        &env.outbox,
+        &alias,
+        &env.log,
+        "min_age_secs = 0\n",
+    ));
+
+    let output = env.run(&[]);
+
+    assert_aborted_untouched(&env, &output);
+    assert_eq!(fs::read(env.outbox.join("a.pdf")).unwrap(), b"only copy");
+}
+
+#[test]
+fn archive_folder_symlinked_into_outbox_keeps_source() {
+    let env = Env::new();
+    write(&env.outbox.join("sub/x.pdf"), b"only copy");
+    std::os::unix::fs::symlink(env.outbox.join("sub"), env.archive.join("sub")).unwrap();
+
+    let output = env.run(&[]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert_eq!(
+        fs::read(env.outbox.join("sub/x.pdf")).unwrap(),
+        b"only copy"
+    );
+    assert!(
+        env.log_text()
+            .contains("\tplan\tsub/x.pdf\t-\tfailed: Archive folder ")
+    );
+}
+
+#[test]
+fn crash_left_claim_is_restored_then_archived() {
+    let env = Env::with_config_tail("");
+    let claim = env.outbox.join("2026-01/.hex-sync.x.pdf");
+    write(&claim, b"claimed before a crash");
+    set_age(&claim, Duration::from_secs(120));
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert_eq!(
+        fs::read(env.archive.join("2026-01/x.pdf")).unwrap(),
+        b"claimed before a crash"
+    );
+    assert_eq!(fs::read_dir(&env.outbox).unwrap().count(), 0);
+    let log = env.log_text();
+    assert!(log.contains("\trestore-claim\t2026-01/.hex-sync.x.pdf\t2026-01/x.pdf\tok"));
+    assert!(log.contains("\tcopy\t2026-01/x.pdf\t2026-01/x.pdf\tok"));
+}
+
+#[test]
+fn claim_whose_name_was_taken_is_restored_beside_it() {
+    let env = Env::new();
+    write(&env.outbox.join(".hex-sync.x.pdf"), b"older, claimed");
+    write(&env.outbox.join("x.pdf"), b"newer");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert!(
+        env.log_text()
+            .contains("\trestore-claim\t.hex-sync.x.pdf\tx (1).pdf\tok")
+    );
+    let archived: Vec<Vec<u8>> = snapshot(&env.archive).into_values().collect();
+    assert!(archived.contains(&b"older, claimed".to_vec()));
+    assert!(archived.contains(&b"newer".to_vec()));
+    assert_eq!(fs::read_dir(&env.outbox).unwrap().count(), 0);
+}
+
+#[test]
+fn existing_file_with_temp_name_survives() {
+    let env = Env::new();
+    write(&env.archive.join(".hex-sync-0.tmp"), b"not ours");
+    write(&env.outbox.join("a.pdf"), b"incoming");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert_eq!(
+        fs::read(env.archive.join(".hex-sync-0.tmp")).unwrap(),
+        b"not ours"
+    );
+    assert_eq!(fs::read(env.archive.join("a.pdf")).unwrap(), b"incoming");
+    assert_eq!(snapshot(&env.archive).len(), 2, "no temp left behind");
+}
+
+#[test]
+fn closed_stdout_neither_panics_nor_loses_log_lines() {
+    let env = Env::new();
+    for n in 1..=5 {
+        write(
+            &env.outbox.join(format!("f{n}.pdf")),
+            format!("{n}").as_bytes(),
+        );
+    }
+    let before = env.archive_state();
+
+    let mut child = env
+        .command(&[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    env.assert_archive_kept(&before);
+
+    assert_success(&output);
+    assert_eq!(fs::read_dir(&env.outbox).unwrap().count(), 0);
+    let log = env.log_text();
+    assert_eq!(log.matches("\tcopy\t").count(), 5, "{log}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn log_write_failure_stops_the_pass() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"a");
+    write(&env.outbox.join("b.pdf"), b"b");
+    env.write_config(&config_text(
+        &env.outbox,
+        &env.archive,
+        Path::new("/dev/full"),
+        "min_age_secs = 0\n",
+    ));
+
+    let output = env.run(&[]);
+
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("cannot write log"));
+    // The first move happens before its log line fails; nothing after it.
+    assert_eq!(fs::read_dir(&env.outbox).unwrap().count(), 1);
+}
+
+#[test]
+fn identical_numbered_copy_counts_as_archived() {
+    let env = Env::new();
+    write(&env.archive.join("x.pdf"), b"different");
+    write(&env.archive.join("x (1).pdf"), b"incoming");
+    write(&env.outbox.join("x.pdf"), b"incoming");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert!(!env.outbox.join("x.pdf").exists());
+    assert!(!env.archive.join("x (2).pdf").exists());
+    assert!(
+        env.log_text()
+            .contains("\tremove-identical\tx.pdf\tx (1).pdf\tok")
+    );
+}
+
+#[test]
+fn future_mtime_counts_as_young_and_is_logged() {
+    let env = Env::with_config_tail("");
+    let future = env.outbox.join("future.pdf");
+    write(&future, b"from the future");
+    let mtime = FileTime::from_system_time(SystemTime::now() + Duration::from_secs(3600));
+    filetime::set_file_mtime(&future, mtime).unwrap();
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert!(future.exists());
+    assert!(snapshot(&env.archive).is_empty());
+    assert!(
+        env.log_text()
+            .contains("\tskip-future-mtime\tfuture.pdf\t-\tskipped")
+    );
+}
+
+#[test]
+fn zero_interval_is_a_config_error() {
+    let env = Env::with_config_tail("interval_secs = 0\n");
+
+    let output = env.run(&[]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("interval_secs"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn relative_path_is_a_config_error() {
+    let env = Env::new();
+    env.write_config(&config_text(
+        Path::new("outbox"),
+        &env.archive,
+        &env.log,
+        "",
+    ));
+
+    let output = env.run(&[]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("absolute"), "{}", stderr(&output));
+}
+
+#[test]
+fn archive_symlink_at_target_is_never_identical() {
+    let env = Env::new();
+    let elsewhere = env.outbox.parent().unwrap().join("elsewhere/a.pdf");
+    write(&elsewhere, b"same bytes");
+    std::os::unix::fs::symlink(&elsewhere, env.archive.join("a.pdf")).unwrap();
+    write(&env.outbox.join("a.pdf"), b"same bytes");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert_eq!(
+        fs::read(env.archive.join("a (1).pdf")).unwrap(),
+        b"same bytes"
+    );
+    assert!(
+        fs::symlink_metadata(env.archive.join("a.pdf"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn long_file_name_is_archived() {
+    let env = Env::new();
+    let name = format!("{}.pdf", "n".repeat(240));
+    write(&env.outbox.join(&name), b"long");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert_eq!(fs::read(env.archive.join(&name)).unwrap(), b"long");
+}
+
+#[test]
+fn aborts_when_log_is_inside_a_root() {
+    for inside in ["outbox", "archive"] {
+        let env = Env::new();
+        write(&env.outbox.join("a.pdf"), b"stays");
+        let log = env
+            .outbox
+            .parent()
+            .unwrap()
+            .join(inside)
+            .join("logs/sync.log");
+        env.write_config(&config_text(
+            &env.outbox,
+            &env.archive,
+            &log,
+            "min_age_secs = 0\n",
+        ));
+
+        let output = env.run(&[]);
+
+        assert_eq!(output.status.code(), Some(2), "{inside}");
+        assert!(stderr(&output).contains("inside"), "{}", stderr(&output));
+        assert!(!log.parent().unwrap().exists(), "{inside}");
+        assert!(env.outbox.join("a.pdf").exists());
+    }
+}
+
+#[test]
+fn dry_run_plans_match_the_real_run() {
+    let env = Env::new();
+    write(&env.archive.join("a.pdf"), b"archived");
+    write(&env.outbox.join("a.pdf"), b"incoming one");
+    write(&env.outbox.join("a (1).pdf"), b"incoming two");
+
+    let dry = env.run(&["--dry-run"]);
+    let real = env.run(&[]);
+
+    assert_success(&dry);
+    assert_success(&real);
+    let planned: std::collections::BTreeSet<String> = stdout(&dry)
+        .lines()
+        .filter_map(|line| line.split_once(" -> ").map(|(_, t)| t.to_string()))
+        .collect();
+    let done: std::collections::BTreeSet<String> = env
+        .log_text()
+        .lines()
+        .filter_map(|line| line.split('\t').nth(3).map(str::to_string))
+        .collect();
+    assert_eq!(planned.len(), 2, "{planned:?}");
+    assert_eq!(planned, done);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_partial_is_ignored() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = Env::new();
+    let name = std::ffi::OsStr::from_bytes(b"scan-\xff.pdf.partial");
+    write(&env.outbox.join(name), b"half");
+
+    let output = env.run(&[]);
+
+    assert_success(&output);
+    assert!(env.outbox.join(name).exists());
+    assert!(snapshot(&env.archive).is_empty());
 }

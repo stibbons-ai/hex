@@ -1,7 +1,73 @@
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
+
+/// What a log line is about.
+#[derive(Clone, Copy)]
+pub enum Action {
+    /// Copied to the same relative path in the Archive; source removed.
+    Copy,
+    /// Copied beside a different Archive file as `name (n).ext`; source removed.
+    CopyRenamed,
+    /// A byte-identical Archive file already existed; source removed.
+    RemoveIdentical,
+    /// A claimed source was renamed back into place in the Outbox.
+    RestoreClaim,
+    /// Renaming a source to its claim name.
+    Claim,
+    Rmdir,
+    SkipSymlink,
+    SkipSpecial,
+    /// The mtime is in the future or unreadable, so the age cannot be judged.
+    SkipFutureMtime,
+    ReadDir,
+    Stat,
+    Plan,
+    Abort,
+}
+
+impl Action {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::CopyRenamed => "copy-renamed",
+            Self::RemoveIdentical => "remove-identical",
+            Self::RestoreClaim => "restore-claim",
+            Self::Claim => "claim",
+            Self::Rmdir => "rmdir",
+            Self::SkipSymlink => "skip-symlink",
+            Self::SkipSpecial => "skip-special",
+            Self::SkipFutureMtime => "skip-future-mtime",
+            Self::ReadDir => "read-dir",
+            Self::Stat => "stat",
+            Self::Plan => "plan",
+            Self::Abort => "abort",
+        }
+    }
+}
+
+pub enum Outcome {
+    Ok,
+    Planned,
+    Skipped,
+    /// Left in place for a later run.
+    Kept,
+    Failed(String),
+}
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => f.write_str("ok"),
+            Self::Planned => f.write_str("planned"),
+            Self::Skipped => f.write_str("skipped"),
+            Self::Kept => f.write_str("kept"),
+            Self::Failed(reason) => write!(f, "failed: {reason}"),
+        }
+    }
+}
 
 /// Records every action: appended to the log file and echoed to stdout on a real run,
 /// printed as a plan (and nothing written) on a dry run.
@@ -34,28 +100,36 @@ impl Journal {
         self.log.is_none()
     }
 
-    /// True once a log line could not be written; the run must then exit non-zero.
+    /// True once a log line could not be written; the pass must then stop and exit non-zero.
     pub fn write_failed(&self) -> bool {
         self.write_failed
     }
 
-    /// `target` is the Archive path relative to the Archive root, if the action has one.
-    pub fn record(&mut self, action: &str, path: &Path, target: Option<&Path>, outcome: &str) {
+    /// `path` is relative to the Outbox; `target`, if the action has one, to the Archive
+    /// (or to the Outbox for `RestoreClaim`). The log line is written before the stdout
+    /// echo, and echo errors (a closed pipe) are ignored, so no action goes unlogged.
+    pub fn record(&mut self, action: Action, path: &Path, target: Option<&Path>, outcome: Outcome) {
+        let action = action.as_str();
         let path = path.display();
         let Some(log) = self.log.as_mut() else {
-            match target {
-                Some(target) => println!("dry-run: {action} {path} -> {}", target.display()),
-                None => println!("dry-run: {action} {path}"),
-            }
+            let _ = match target {
+                Some(target) => writeln!(
+                    io::stdout(),
+                    "dry-run: {action} {path} -> {}",
+                    target.display()
+                ),
+                None => writeln!(io::stdout(), "dry-run: {action} {path}"),
+            };
             return;
         };
         let timestamp = humantime::format_rfc3339_seconds(SystemTime::now());
         let target = target.unwrap_or(Path::new("-")).display();
-        let line = format!("{timestamp}\t{action}\t{path}\t{target}\t{outcome}");
-        println!("{line}");
-        if let Err(e) = writeln!(log, "{line}") {
-            eprintln!("hex-sync: cannot write log: {e}");
+        let line = format!("{timestamp}\t{action}\t{path}\t{target}\t{outcome}\n");
+        // One write per line, so an append never interleaves half lines.
+        if let Err(e) = log.write_all(line.as_bytes()) {
+            let _ = writeln!(io::stderr(), "hex-sync: cannot write log: {e}");
             self.write_failed = true;
         }
+        let _ = io::stdout().write_all(line.as_bytes());
     }
 }

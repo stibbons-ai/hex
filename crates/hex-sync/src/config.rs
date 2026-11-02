@@ -1,4 +1,5 @@
 use std::fs;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -15,7 +16,7 @@ pub struct Config {
     /// Seconds between runs once scheduled; validated here, used by the scheduler.
     #[serde(default = "default_interval_secs")]
     #[allow(dead_code)]
-    pub interval_secs: u64,
+    pub interval_secs: NonZeroU64,
     pub log: PathBuf,
 }
 
@@ -23,8 +24,8 @@ fn default_min_age_secs() -> u64 {
     60
 }
 
-fn default_interval_secs() -> u64 {
-    900
+fn default_interval_secs() -> NonZeroU64 {
+    NonZeroU64::new(900).expect("non-zero literal")
 }
 
 impl Config {
@@ -36,9 +37,6 @@ impl Config {
 
     fn parse(text: &str) -> Result<Self, String> {
         let mut config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
-        if config.interval_secs == 0 {
-            return Err("interval_secs must be greater than 0".into());
-        }
         for (key, value) in [
             ("outbox", &mut config.outbox),
             ("archive", &mut config.archive),

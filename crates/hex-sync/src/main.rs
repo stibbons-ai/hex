@@ -1,6 +1,7 @@
 //! `hex-sync`: moves filed Documents from the Outbox into the Archive (ADR 0001).
 
 mod config;
+mod fsio;
 mod journal;
 mod sync;
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::Config;
-use crate::journal::Journal;
+use crate::journal::{Action, Journal, Outcome};
 
 const DEFAULT_CONFIG: &str = "~/.config/hex/sync.toml";
 
@@ -60,24 +61,42 @@ fn main() -> ExitCode {
     }
 }
 
-/// Exit codes: 0 all done, 1 some files failed, 2 nothing done (`Err`: config error or abort).
+/// Exit codes: 0 all done; 1 some files failed or the log could not be written (the pass
+/// stops at the first log failure); 2 nothing done (`Err`: config error, log cannot be
+/// opened or lies inside a root, or a root check failed).
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
+    let aborted = |reason| format!("aborted, nothing touched: {reason}");
+    let roots = match sync::check_roots(&config.outbox, &config.archive, &config.log) {
+        Err(abort) if !abort.loggable => return Err(aborted(abort.reason)),
+        roots => roots,
+    };
     let mut journal = if args.dry_run {
         Journal::dry_run()
     } else {
         Journal::open(&config.log)
             .map_err(|e| format!("cannot open log {}: {e}", config.log.display()))?
     };
-    let min_age = Duration::from_secs(config.min_age_secs);
-    let failures =
-        sync::run(&config.outbox, &config.archive, min_age, &mut journal).map_err(|reason| {
-            if !journal.is_dry_run() {
-                journal.record("abort", Path::new("-"), None, &reason);
-            }
-            format!("aborted, nothing touched: {reason}")
-        })?;
-    if failures > 0 || journal.write_failed() {
+    let roots = roots.map_err(|abort| {
+        if !journal.is_dry_run() {
+            let outcome = Outcome::Failed(abort.reason.clone());
+            journal.record(Action::Abort, Path::new("-"), None, outcome);
+        }
+        aborted(abort.reason)
+    })?;
+    let failures = sync::run(
+        &roots,
+        Duration::from_secs(config.min_age_secs),
+        &mut journal,
+    );
+    if journal.write_failed() {
+        eprintln!(
+            "hex-sync: stopped early: cannot write log {}",
+            config.log.display()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    if failures > 0 {
         eprintln!("hex-sync: finished with {failures} failure(s)");
         return Ok(ExitCode::FAILURE);
     }
