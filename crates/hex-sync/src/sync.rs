@@ -248,7 +248,7 @@ impl Pass<'_> {
     /// the restored file like the scan would.
     fn plan_recovery(&mut self, claim_rel: &Path, original_rel: &Path) {
         let claim = self.outbox.join(claim_rel);
-        let target = fs::symlink_metadata(&claim).and_then(|claim_meta| {
+        let found = fs::symlink_metadata(&claim).and_then(|claim_meta| {
             restore_target(
                 self.outbox,
                 &claim_meta,
@@ -256,7 +256,7 @@ impl Pass<'_> {
                 &self.planned_restores,
             )
         });
-        let (target, redundant) = match target {
+        let (target, redundant) = match found {
             Ok(found) => found,
             Err(e) => {
                 self.fail(Action::RestoreClaim, claim_rel, None, e);
@@ -704,12 +704,11 @@ fn restore_target(
 /// See [`Pass::restore_claim`]; returns the name the file got back.
 fn put_back(outbox: &Path, claim_rel: &Path, original_rel: &Path) -> Result<PathBuf, String> {
     let claim = outbox.join(claim_rel);
+    let claim_meta = fs::symlink_metadata(&claim).map_err(|e| e.to_string())?;
     loop {
-        let (target, redundant) = fs::symlink_metadata(&claim)
-            .and_then(|claim_meta| {
-                restore_target(outbox, &claim_meta, original_rel, &HashSet::new())
-            })
-            .map_err(|e| e.to_string())?;
+        let (target, redundant) =
+            restore_target(outbox, &claim_meta, original_rel, &HashSet::new())
+                .map_err(|e| e.to_string())?;
         if !redundant {
             match rename_noreplace(&claim, &outbox.join(&target)) {
                 Ok(()) => return Ok(target),
