@@ -91,7 +91,8 @@ describe("hex server", () => {
   test.each(["GET", "HEAD"])("answers %s /health", async (method) => {
     const response = await fetch(new URL("/health", server.url), { method });
     expect(response.status).toBe(200);
-    expect(await response.text()).toBe(method === "GET" ? '{"status":"ok"}' : "");
+    expect(response.headers.get("content-type")).toStartWith("application/json");
+    if (method === "GET") expect(await response.json()).toEqual({ status: "ok" });
   });
 
   test("serves the oRPC API under /rpc, and nothing else but GET/HEAD /health", async () => {
@@ -215,7 +216,7 @@ test("persists workflow runs through Mastra into the LibSQL file", async () => {
   ]);
 });
 
-test("follows the workflow's own input options: no input, and no validation", async () => {
+test("follows the workflow's own input options: no input, no validation, no schema", async () => {
   const noInput = createWorkflow({
     id: "noInput",
     inputSchema: toMastraSchema(Schema.Unknown),
@@ -245,9 +246,25 @@ test("follows the workflow's own input options: no input, and no validation", as
       }),
     )
     .commit();
+  const schemaless = createWorkflow({
+    id: "schemaless",
+    inputSchema: toMastraSchema(Schema.Unknown),
+    outputSchema: Message,
+  })
+    .then(
+      createStep({
+        id: "schemaless",
+        inputSchema: toMastraSchema(Schema.Unknown),
+        outputSchema: Message,
+        execute: async ({ inputData }) => ({ message: typeof inputData }),
+      }),
+    )
+    .commit();
+  // The types require an input schema; a workflow built without one has none at runtime.
+  Reflect.set(schemaless, "inputSchema", undefined);
   const server = await start({
     databasePath: join(directory, "input-options", "mastra.db"),
-    workflows: { noInput, unchecked },
+    workflows: { noInput, unchecked, schemaless },
   });
   const api = client(server);
   expect(await api.workflows.start({ workflowId: "noInput" })).toMatchObject({
@@ -257,6 +274,10 @@ test("follows the workflow's own input options: no input, and no validation", as
   expect(
     await api.workflows.start({ workflowId: "unchecked", inputData: { message: 42 } }),
   ).toMatchObject({ status: "success", result: { message: 42 } });
+  expect(await api.workflows.start({ workflowId: "schemaless", inputData: 7 })).toMatchObject({
+    status: "success",
+    result: { message: "number" },
+  });
 });
 
 test("reports a failed run, and logs server faults but not caller errors", async () => {
@@ -319,6 +340,28 @@ test("answers a response that fails to encode with a plain, logged 500", async (
     expect(response.status).toBe(500);
     expect(await response.text()).toBe("Internal server error");
     expect(logged).toHaveBeenCalledWith("hex: request failed", expect.any(TypeError));
+  } finally {
+    logged.mockRestore();
+  }
+});
+
+test("logs an output oRPC's encoder rejects, once", async () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  // Mastra doesn't check step output, so the circular value reaches oRPC's encoder.
+  const loop = oneStep("loop", async () => circular as unknown as typeof Message.Type);
+  const server = await start({
+    databasePath: join(directory, "circular", "mastra.db"),
+    workflows: { loop },
+  });
+  const logged = spyOn(server.mastra.getLogger(), "error");
+  try {
+    const { error } = await safe(
+      client(server).workflows.start({ workflowId: "loop", inputData: { message: "x" } }),
+    );
+    expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith("hex: oRPC call failed", expect.any(Error));
   } finally {
     logged.mockRestore();
   }

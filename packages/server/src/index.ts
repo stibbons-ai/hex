@@ -2,7 +2,7 @@ import { createLocalStore } from "@hex/adapters";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
-import { ORPCError, onError } from "@orpc/server";
+import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
@@ -67,18 +67,28 @@ export async function startServer({
       ...(logger === undefined ? {} : { logger }),
       ...(workflows ? { workflows } : {}),
     });
+    // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
+    const logFault = (error: unknown) => {
+      if (error instanceof ORPCError && error.status < 500) return;
+      mastra.getLogger().error("hex: oRPC call failed", error);
+    };
+    // Per-request contexts whose procedure returned. The handler-level interceptor also sees a
+    // caller's malformed body failing to decode, before the procedure; after it, a failure is in
+    // encoding our output, so ours.
+    const procedureReturned = new WeakSet<object>();
     const handler = new RPCHandler(router, {
-      // Procedure level, so it sees validation and handler errors but not a caller's malformed
-      // body; Bun.serve's error handler below catches what fails outside it.
       clientInterceptors: [
-        // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
-        onError((error) => {
-          if (error instanceof ORPCError && error.status < 500) return;
-          mastra.getLogger().error("hex: oRPC call failed", error);
+        onError(logFault),
+        onSuccess((_output, { context }) => {
+          procedureReturned.add(context);
+        }),
+      ],
+      interceptors: [
+        onError((error, { context }) => {
+          if (procedureReturned.has(context)) logFault(error);
         }),
       ],
     });
-    const rpcOptions = { prefix: "/rpc", context: { mastra } } as const;
     // The bound port is known only after Bun.serve, so the check reads the set per request.
     let hosts = new Set<string>();
     const server = Bun.serve({
@@ -92,11 +102,15 @@ export async function startServer({
         if (isGetOrHead && new URL(request.url).pathname === "/health") {
           return Response.json({ status: "ok" });
         }
-        const { matched, response } = await handler.handle(request, rpcOptions);
+        // A fresh context per request: procedureReturned is keyed by it.
+        const { matched, response } = await handler.handle(request, {
+          prefix: "/rpc",
+          context: { mastra },
+        });
         return matched ? response : new Response("Not found", { status: 404 });
       },
-      // Anything thrown outside oRPC's own error handling, e.g. a response that fails to encode:
-      // logged, and answered without Bun's debug page.
+      // Anything thrown outside oRPC's own error handling, e.g. Bun failing to serialize the
+      // encoded body: logged, and answered without Bun's debug page.
       error(error) {
         mastra.getLogger().error("hex: request failed", error);
         return new Response("Internal server error", { status: 500 });
