@@ -31,13 +31,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path)
             .map_err(|e| format!("cannot read config {}: {e}", path.display()))?;
-        let mut config: Config =
-            toml::from_str(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("invalid config {}: {e}", path.display()))
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
         if config.interval_secs == 0 {
-            return Err(format!(
-                "invalid config {}: interval_secs must be greater than 0",
-                path.display()
-            ));
+            return Err("interval_secs must be greater than 0".into());
         }
         for (key, value) in [
             ("outbox", &mut config.outbox),
@@ -47,8 +47,7 @@ impl Config {
             *value = expand_home(value);
             if !value.is_absolute() {
                 return Err(format!(
-                    "invalid config {}: {key} must be an absolute path (or start with ~/), got {}",
-                    path.display(),
+                    "{key} must be an absolute path (or start with ~/), got {}",
                     value.display()
                 ));
             }

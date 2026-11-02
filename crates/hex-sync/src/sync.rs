@@ -6,6 +6,7 @@
 //!   re-hashing the source right before removal.
 
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,16 +17,18 @@ use sha2::{Digest, Sha256};
 use crate::journal::Journal;
 
 const PARTIAL_SUFFIX: &str = ".partial";
+const BUFFER_SIZE: usize = 64 * 1024;
 
-/// Number of files or directories that could not be handled.
-pub type Failures = usize;
+type Digest256 = sha2::digest::Output<Sha256>;
 
+/// Runs one pass; returns the number of files or directories that could not be handled,
+/// or the reason it aborted before touching anything.
 pub fn run(
     outbox: &Path,
     archive: &Path,
     min_age: Duration,
     journal: &mut Journal,
-) -> Result<Failures, String> {
+) -> Result<usize, String> {
     let outbox = check_root(outbox, "Outbox")?;
     let archive = check_root(archive, "Archive")?;
     if outbox.starts_with(&archive) || archive.starts_with(&outbox) {
@@ -49,14 +52,13 @@ pub fn run(
 
 /// Resolves a root, failing if it is missing, not a directory, or unreadable.
 fn check_root(path: &Path, label: &str) -> Result<PathBuf, String> {
-    let meta = fs::metadata(path)
-        .map_err(|e| format!("{label} {} is not accessible: {e}", path.display()))?;
+    let root = format!("{label} {}", path.display());
+    let meta = fs::metadata(path).map_err(|e| format!("{root} is not accessible: {e}"))?;
     if !meta.is_dir() {
-        return Err(format!("{label} {} is not a directory", path.display()));
+        return Err(format!("{root} is not a directory"));
     }
-    fs::read_dir(path).map_err(|e| format!("{label} {} is not readable: {e}", path.display()))?;
-    fs::canonicalize(path)
-        .map_err(|e| format!("{label} {} cannot be resolved: {e}", path.display()))
+    fs::read_dir(path).map_err(|e| format!("{root} is not readable: {e}"))?;
+    fs::canonicalize(path).map_err(|e| format!("{root} cannot be resolved: {e}"))
 }
 
 struct Pass<'a> {
@@ -65,7 +67,7 @@ struct Pass<'a> {
     min_age: Duration,
     now: SystemTime,
     journal: &'a mut Journal,
-    failures: Failures,
+    failures: usize,
 }
 
 /// Where a source file goes in the Archive.
@@ -78,15 +80,13 @@ enum Plan {
     CopyRenamed(PathBuf),
 }
 
-type Digest256 = sha2::digest::Output<Sha256>;
-
 impl Pass<'_> {
     /// Processes a directory (relative to the Outbox); returns true when it ends up empty.
     fn visit_dir(&mut self, rel: &Path) -> bool {
         let entries = match fs::read_dir(self.outbox.join(rel)) {
             Ok(entries) => entries,
             Err(e) => {
-                self.fail("read-dir", rel, "-", &e.to_string());
+                self.fail("read-dir", rel, None, e);
                 return false;
             }
         };
@@ -95,7 +95,7 @@ impl Pass<'_> {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    self.fail("read-dir", rel, "-", &e.to_string());
+                    self.fail("read-dir", rel, None, e);
                     empty = false;
                     continue;
                 }
@@ -103,17 +103,17 @@ impl Pass<'_> {
             let child = rel.join(entry.file_name());
             let removed = match entry.file_type() {
                 Ok(t) if t.is_symlink() => {
-                    self.journal.record("skip-symlink", &child, "-", "skipped");
+                    self.journal.record("skip-symlink", &child, None, "skipped");
                     false
                 }
                 Ok(t) if t.is_dir() => self.visit_dir(&child) && self.remove_empty_dir(&child),
                 Ok(t) if t.is_file() => self.visit_file(&child),
                 Ok(_) => {
-                    self.journal.record("skip-special", &child, "-", "skipped");
+                    self.journal.record("skip-special", &child, None, "skipped");
                     false
                 }
                 Err(e) => {
-                    self.fail("stat", &child, "-", &e.to_string());
+                    self.fail("stat", &child, None, e);
                     false
                 }
             };
@@ -125,18 +125,18 @@ impl Pass<'_> {
     /// Removes an empty Outbox subdirectory; returns true when it is gone (or would be).
     fn remove_empty_dir(&mut self, rel: &Path) -> bool {
         if self.journal.is_dry_run() {
-            self.journal.record("rmdir", rel, "-", "planned");
+            self.journal.record("rmdir", rel, None, "planned");
             return true;
         }
         match fs::remove_dir(self.outbox.join(rel)) {
             Ok(()) => {
-                self.journal.record("rmdir", rel, "-", "ok");
+                self.journal.record("rmdir", rel, None, "ok");
                 true
             }
             // A file arrived since it was scanned; it is picked up next run.
             Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => false,
             Err(e) => {
-                self.fail("rmdir", rel, "-", &e.to_string());
+                self.fail("rmdir", rel, None, e);
                 false
             }
         }
@@ -144,14 +144,14 @@ impl Pass<'_> {
 
     /// Processes one regular file; returns true when the source is removed (or would be).
     fn visit_file(&mut self, rel: &Path) -> bool {
-        let source = self.outbox.join(rel);
         if is_partial(rel) {
             return false;
         }
+        let source = self.outbox.join(rel);
         let meta = match fs::symlink_metadata(&source) {
             Ok(meta) => meta,
             Err(e) => {
-                self.fail("stat", rel, "-", &e.to_string());
+                self.fail("stat", rel, None, e);
                 return false;
             }
         };
@@ -161,22 +161,21 @@ impl Pass<'_> {
         let plan = match self.plan(rel, &source, meta.len()) {
             Ok(plan) => plan,
             Err(e) => {
-                self.fail("plan", rel, "-", &e.to_string());
+                self.fail("plan", rel, None, e);
                 return false;
             }
         };
-        let (action, target_rel) = match &plan {
+        let (action, target) = match &plan {
             Plan::Copy(target) => ("copy", target.as_path()),
             Plan::Identical { .. } => ("remove-identical", rel),
             Plan::CopyRenamed(target) => ("copy-renamed", target.as_path()),
         };
-        let target_name = target_rel.display().to_string();
         if self.journal.is_dry_run() {
-            self.journal.record(action, rel, &target_name, "planned");
+            self.journal.record(action, rel, Some(target), "planned");
             return true;
         }
         let result = match &plan {
-            Plan::Copy(target) | Plan::CopyRenamed(target) => {
+            Plan::Copy(_) | Plan::CopyRenamed(_) => {
                 copy_verified(&source, &self.archive.join(target))
             }
             Plan::Identical { digest } => Ok(*digest),
@@ -184,11 +183,11 @@ impl Pass<'_> {
         .and_then(|digest| remove_source(&source, &digest));
         match result {
             Ok(()) => {
-                self.journal.record(action, rel, &target_name, "ok");
+                self.journal.record(action, rel, Some(target), "ok");
                 true
             }
             Err(e) => {
-                self.fail(action, rel, &target_name, &e);
+                self.fail(action, rel, Some(target), e);
                 false
             }
         }
@@ -242,7 +241,7 @@ impl Pass<'_> {
         unreachable!("u32 range exhausted looking for a free name")
     }
 
-    fn fail(&mut self, action: &str, rel: &Path, target: &str, error: &str) {
+    fn fail(&mut self, action: &str, rel: &Path, target: Option<&Path>, error: impl Display) {
         self.failures += 1;
         self.journal
             .record(action, rel, target, &format!("failed: {error}"));
@@ -266,13 +265,16 @@ fn copy_verified(source: &Path, target: &Path) -> Result<Digest256, String> {
     temp_name.push(format!(".hex-sync-{}.tmp", std::process::id()));
     let temp = dir.join(temp_name);
 
-    let placed = write_temp(source, &temp).and_then(|()| rename_noreplace(&temp, target));
-    if let Err(e) = placed {
-        // The temp file is this run's own scratch file, never an Archive Document.
-        let _ = fs::remove_file(&temp);
-        return Err(format!("copy failed: {e}"));
-    }
-    let source_digest = hash_file(source).map_err(|e| format!("cannot re-read source: {e}"))?;
+    let placed = write_temp(source, &temp)
+        .and_then(|digest| rename_noreplace(&temp, target).map(|()| digest));
+    let source_digest = match placed {
+        Ok(digest) => digest,
+        Err(e) => {
+            // The temp file is this run's own scratch file, never an Archive Document.
+            let _ = fs::remove_file(&temp);
+            return Err(format!("copy failed: {e}"));
+        }
+    };
     let target_digest =
         hash_file(target).map_err(|e| format!("cannot re-read Archive copy: {e}"))?;
     if source_digest != target_digest {
@@ -281,12 +283,13 @@ fn copy_verified(source: &Path, target: &Path) -> Result<Digest256, String> {
     Ok(target_digest)
 }
 
-fn write_temp(source: &Path, temp: &Path) -> io::Result<()> {
+/// Copies `source` into a new file `temp`, synced to disk; returns the digest of the bytes read.
+fn write_temp(source: &Path, temp: &Path) -> io::Result<Digest256> {
     let mut input = File::open(source)?;
     let mut output = OpenOptions::new().write(true).create_new(true).open(temp)?;
-    io::copy(&mut input, &mut output)?;
-    output.flush()?;
-    output.sync_all()
+    let digest = hash_stream(&mut input, |chunk| output.write_all(chunk))?;
+    output.sync_all()?;
+    Ok(digest)
 }
 
 /// Removes the source only if it still hashes to `expected` (the Archive copy's digest).
@@ -299,15 +302,26 @@ fn remove_source(source: &Path, expected: &Digest256) -> Result<(), String> {
 }
 
 fn hash_file(path: &Path) -> io::Result<Digest256> {
-    let mut file = File::open(path)?;
+    hash_stream(&mut File::open(path)?, |_| Ok(()))
+}
+
+/// Reads `input` to the end, handing each chunk to `sink`; returns the SHA-256 of all bytes.
+fn hash_stream(
+    input: &mut File,
+    mut sink: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<Digest256> {
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 64 * 1024];
+    let mut buffer = [0; BUFFER_SIZE];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = match input.read(&mut buffer) {
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            other => other?,
+        };
         if read == 0 {
             return Ok(hasher.finalize());
         }
         hasher.update(&buffer[..read]);
+        sink(&buffer[..read])?;
     }
 }
 
@@ -332,19 +346,14 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
 fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (c_path(from)?, c_path(to)?);
     // SAFETY: both pointers are valid NUL-terminated strings for the duration of the call.
-    let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    check_rc(unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) })
 }
 
 #[cfg(target_os = "linux")]
 fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (c_path(from)?, c_path(to)?);
     // SAFETY: both pointers are valid NUL-terminated strings for the duration of the call.
-    let rc = unsafe {
+    check_rc(unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
             from.as_ptr(),
@@ -352,12 +361,7 @@ fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
             to.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -369,4 +373,13 @@ fn rename_exclusive(_from: &Path, _to: &Path) -> io::Result<()> {
 fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     Ok(std::ffi::CString::new(path.as_os_str().as_bytes())?)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn check_rc(rc: libc::c_int) -> io::Result<()> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }

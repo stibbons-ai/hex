@@ -47,45 +47,39 @@ struct RunArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Some(Command::Run(args)) => run(&args),
-        None => run(&cli.run),
+    let args = match cli.command {
+        Some(Command::Run(args)) => args,
+        None => cli.run,
+    };
+    match run(&args) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("hex-sync: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
-/// Exit codes: 0 all done, 1 some files failed, 2 nothing done (config error or abort).
-fn run(args: &RunArgs) -> ExitCode {
-    let config = match Config::load(&config::expand_home(&args.config)) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("hex-sync: {e}");
-            return ExitCode::from(2);
-        }
-    };
+/// Exit codes: 0 all done, 1 some files failed, 2 nothing done (`Err`: config error or abort).
+fn run(args: &RunArgs) -> Result<ExitCode, String> {
+    let config = Config::load(&config::expand_home(&args.config))?;
     let mut journal = if args.dry_run {
         Journal::dry_run()
     } else {
-        match Journal::open(&config.log) {
-            Ok(journal) => journal,
-            Err(e) => {
-                eprintln!("hex-sync: cannot open log {}: {e}", config.log.display());
-                return ExitCode::from(2);
-            }
-        }
+        Journal::open(&config.log)
+            .map_err(|e| format!("cannot open log {}: {e}", config.log.display()))?
     };
     let min_age = Duration::from_secs(config.min_age_secs);
-    match sync::run(&config.outbox, &config.archive, min_age, &mut journal) {
-        Err(reason) => {
-            eprintln!("hex-sync: aborted, nothing touched: {reason}");
+    let failures =
+        sync::run(&config.outbox, &config.archive, min_age, &mut journal).map_err(|reason| {
             if !journal.is_dry_run() {
-                journal.record("abort", Path::new("-"), "-", &reason);
+                journal.record("abort", Path::new("-"), None, &reason);
             }
-            ExitCode::from(2)
-        }
-        Ok(failures) if failures > 0 || journal.write_failed() => {
-            eprintln!("hex-sync: finished with {failures} failure(s)");
-            ExitCode::FAILURE
-        }
-        Ok(_) => ExitCode::SUCCESS,
+            format!("aborted, nothing touched: {reason}")
+        })?;
+    if failures > 0 || journal.write_failed() {
+        eprintln!("hex-sync: finished with {failures} failure(s)");
+        return Ok(ExitCode::FAILURE);
     }
+    Ok(ExitCode::SUCCESS)
 }

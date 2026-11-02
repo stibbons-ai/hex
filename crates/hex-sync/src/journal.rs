@@ -39,19 +39,19 @@ impl Journal {
         self.write_failed
     }
 
-    pub fn record(&mut self, action: &str, path: &Path, target: &str, outcome: &str) {
+    /// `target` is the Archive path relative to the Archive root, if the action has one.
+    pub fn record(&mut self, action: &str, path: &Path, target: Option<&Path>, outcome: &str) {
+        let path = path.display();
         let Some(log) = self.log.as_mut() else {
             match target {
-                "-" => println!("dry-run: {action} {}", path.display()),
-                _ => println!("dry-run: {action} {} -> {target}", path.display()),
+                Some(target) => println!("dry-run: {action} {path} -> {}", target.display()),
+                None => println!("dry-run: {action} {path}"),
             }
             return;
         };
         let timestamp = humantime::format_rfc3339_seconds(SystemTime::now());
-        let line = format!(
-            "{timestamp}\t{action}\t{}\t{target}\t{outcome}",
-            path.display()
-        );
+        let target = target.unwrap_or(Path::new("-")).display();
+        let line = format!("{timestamp}\t{action}\t{path}\t{target}\t{outcome}");
         println!("{line}");
         if let Err(e) = writeln!(log, "{line}") {
             eprintln!("hex-sync: cannot write log: {e}");

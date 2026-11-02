@@ -40,10 +40,7 @@ impl Env {
         };
         fs::create_dir_all(&env.outbox).unwrap();
         fs::create_dir_all(&env.archive).unwrap();
-        env.write_config(&format!(
-            "outbox = {:?}\narchive = {:?}\nlog = {:?}\n{tail}",
-            env.outbox, env.archive, env.log
-        ));
+        env.write_config(&config_text(&env.outbox, &env.archive, &env.log, tail));
         env
     }
 
@@ -109,6 +106,18 @@ fn set_age(path: &Path, age: Duration) {
     filetime::set_file_mtime(path, mtime).unwrap();
 }
 
+fn chmod(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+fn config_text(outbox: &Path, archive: &Path, log: &Path, tail: &str) -> String {
+    format!("outbox = {outbox:?}\narchive = {archive:?}\nlog = {log:?}\n{tail}")
+}
+
+fn assert_success(output: &Output) {
+    assert!(output.status.success(), "stderr: {}", stderr(output));
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -125,7 +134,7 @@ fn absent_file_is_copied_verified_and_source_removed() {
 
     let output = env.run(&["run"]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert_eq!(
         fs::read(env.archive.join(rel)).unwrap(),
         b"generated document bytes"
@@ -147,7 +156,7 @@ fn identical_file_only_removes_source() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(!env.outbox.join("2026-01/a.pdf").exists());
     assert_eq!(snapshot(&env.archive), archive_before);
     assert!(
@@ -165,7 +174,7 @@ fn different_file_is_copied_under_lowest_free_suffix() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert_eq!(
         fs::read(env.archive.join("a (1).pdf")).unwrap(),
         b"incoming-1"
@@ -175,7 +184,7 @@ fn different_file_is_copied_under_lowest_free_suffix() {
     write(&env.outbox.join("a.pdf"), b"incoming number two");
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert_eq!(
         fs::read(env.archive.join("a (2).pdf")).unwrap(),
         b"incoming number two"
@@ -200,7 +209,7 @@ fn collision_without_extension_appends_suffix_to_name() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert_eq!(
         fs::read(env.archive.join("docs/README (1)")).unwrap(),
         b"new"
@@ -215,7 +224,7 @@ fn partial_files_are_ignored_and_keep_their_folder() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(env.outbox.join("2026-01/upload.pdf.partial").exists());
     assert!(snapshot(&env.archive).is_empty());
 }
@@ -229,7 +238,7 @@ fn files_younger_than_min_age_are_ignored() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(env.outbox.join("fresh.pdf").exists());
     assert!(!env.archive.join("fresh.pdf").exists());
     assert_eq!(fs::read(env.archive.join("old.pdf")).unwrap(), b"old");
@@ -245,7 +254,7 @@ fn empty_outbox_folders_are_removed_but_root_kept() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(env.outbox.is_dir());
     assert_eq!(fs::read_dir(&env.outbox).unwrap().count(), 0);
     assert!(env.archive.join("unrelated-empty").is_dir());
@@ -262,7 +271,7 @@ fn symlinks_are_skipped_logged_and_not_followed() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(fs::symlink_metadata(env.outbox.join("link.pdf")).is_ok());
     assert!(fs::symlink_metadata(env.outbox.join("linked-dir")).is_ok());
     assert_eq!(fs::read(elsewhere.join("target.pdf")).unwrap(), b"outside");
@@ -278,18 +287,10 @@ fn failed_copy_keeps_source_continues_and_exits_non_zero() {
     write(&env.outbox.join("locked/a.pdf"), b"cannot land");
     write(&env.outbox.join("open/b.pdf"), b"lands");
     fs::create_dir_all(env.archive.join("locked")).unwrap();
-    fs::set_permissions(
-        env.archive.join("locked"),
-        fs::Permissions::from_mode(0o555),
-    )
-    .unwrap();
+    chmod(&env.archive.join("locked"), 0o555);
 
     let output = env.run(&[]);
-    fs::set_permissions(
-        env.archive.join("locked"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    chmod(&env.archive.join("locked"), 0o755);
 
     assert!(!output.status.success());
     assert_eq!(
@@ -357,10 +358,10 @@ fn aborts_when_root_is_not_a_directory() {
 fn aborts_when_root_is_unreadable() {
     let env = Env::new();
     write(&env.outbox.join("a.pdf"), b"stays");
-    fs::set_permissions(&env.outbox, fs::Permissions::from_mode(0o311)).unwrap();
+    chmod(&env.outbox, 0o311);
 
     let output = env.run(&[]);
-    fs::set_permissions(&env.outbox, fs::Permissions::from_mode(0o755)).unwrap();
+    chmod(&env.outbox, 0o755);
 
     assert_aborted_untouched(&env, &output);
     assert!(env.outbox.join("a.pdf").exists());
@@ -372,9 +373,11 @@ fn aborts_when_archive_is_inside_outbox() {
     let env = Env::new();
     let nested_archive = env.outbox.join("archive");
     write(&nested_archive.join("a.pdf"), b"same");
-    env.write_config(&format!(
-        "outbox = {:?}\narchive = {:?}\nlog = {:?}\nmin_age_secs = 0\n",
-        env.outbox, nested_archive, env.log
+    env.write_config(&config_text(
+        &env.outbox,
+        &nested_archive,
+        &env.log,
+        "min_age_secs = 0\n",
     ));
 
     let output = env.run(&[]);
@@ -397,7 +400,7 @@ fn dry_run_prints_plans_and_changes_nothing() {
 
     let output = env.run(&["--dry-run"]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     let out = stdout(&output);
     assert!(
         out.contains("copy 2026-01/new.pdf -> 2026-01/new.pdf"),
@@ -467,7 +470,7 @@ fn min_age_defaults_to_sixty_seconds() {
 
     let output = env.run(&[]);
 
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_success(&output);
     assert!(env.outbox.join("fresh.pdf").exists());
     assert!(!env.outbox.join("settled.pdf").exists());
     assert!(env.archive.join("settled.pdf").exists());
