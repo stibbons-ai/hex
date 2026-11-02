@@ -155,9 +155,7 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
                 eprintln!("hex-sync: another run is in progress (lock {path})");
                 return Ok(ExitCode::from(3));
             }
-            Err(LockError::Io(path, e)) => {
-                return Err(format!("cannot open lock {}: {e}", path.display()));
-            }
+            Err(LockError::Io(message)) => return Err(message),
         }
     };
     let mut journal = if args.dry_run {

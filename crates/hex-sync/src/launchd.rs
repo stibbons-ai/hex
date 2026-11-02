@@ -1,13 +1,15 @@
 //! `install`/`uninstall`: schedules `hex-sync run` as a per-user launchd agent.
 
-use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::fsio::{create_dir_all_durable, sync_dir};
+use crate::sync;
 
 const LABEL: &str = "ai.stibbons.hex-sync";
 
@@ -19,24 +21,35 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 /// process") and 113 ("Could not find specified service").
 const NOT_LOADED: [i32; 2] = [3, 113];
 
-/// Writes the agent's plist into `launch_agents_dir` (created if missing) and (re)loads it,
-/// so the latest config always wins.
+/// Where launchd sends the agent's stderr. A fixed folder that always exists on macOS: in
+/// the log's folder, launchd would create missing folders before any root check (a phantom
+/// root) or fail every spawn when it can't (an unmounted volume).
+const STDERR_LOG: &str = "~/Library/Logs/hex-sync.stderr.log";
+
+/// Writes the agent's plist into `launch_agents_dir` (created if missing) and (re)loads it.
+/// The plist holds `interval_secs` and the binary's path, so a change to either needs a
+/// reinstall; every other config edit applies on the next run, which rereads the config.
 pub fn install(config_path: &Path, launch_agents_dir: &Path) -> Result<(), String> {
     let config = Config::load(config_path)?;
+    // A root may be missing now (an unmounted drive), so only the log's own rules apply.
+    sync::check_log(&config.outbox, &config.archive, &config.log)
+        .map_err(|reason| format!("not installed: {reason}"))?;
     let config_path = std::path::absolute(config_path)
         .map_err(|e| format!("cannot resolve {}: {e}", config_path.display()))?;
     let program = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|e| format!("cannot locate the hex-sync binary: {e}"))?;
-    let stderr_log = stderr_log_path(&config.log);
+    let stderr_log = config::expand_home(Path::new(STDERR_LOG));
+    if !stderr_log.is_absolute() {
+        return Err(format!("cannot expand {STDERR_LOG}: HOME is not set"));
+    }
     let interval = config.interval_secs.get();
     let plist = plist(&program, &config_path, interval, &stderr_log)?;
 
     create_dir_all_durable(launch_agents_dir)
         .map_err(|e| format!("cannot create {}: {e}", launch_agents_dir.display()))?;
     let plist_path = plist_path(launch_agents_dir);
-    write_atomically(launch_agents_dir, &plist_path, plist.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", plist_path.display()))?;
+    write_atomically(&plist_path, plist.as_bytes())?;
     println!("wrote {}", plist_path.display());
 
     let domain = gui_domain();
@@ -48,7 +61,12 @@ pub fn install(config_path: &Path, launch_agents_dir: &Path) -> Result<(), Strin
         domain.as_ref(),
         plist_path.as_ref(),
     ];
-    launchctl(&bootstrap).map_err(|e| e.message)?;
+    launchctl(&bootstrap).map_err(|e| {
+        format!(
+            "{}; {LABEL} is not loaded; fix the cause and rerun hex-sync install",
+            e.message
+        )
+    })?;
     println!(
         "loaded {LABEL}: runs `{} run --config {}` every {interval}s; errors go to {}",
         program.display(),
@@ -81,11 +99,6 @@ pub fn uninstall(launch_agents_dir: &Path) -> Result<(), String> {
 
 fn plist_path(launch_agents_dir: &Path) -> PathBuf {
     launch_agents_dir.join(format!("{LABEL}.plist"))
-}
-
-/// Where launchd sends the agent's stderr: `hex-sync.stderr.log` in the log's folder.
-fn stderr_log_path(log: &Path) -> PathBuf {
-    log.with_file_name("hex-sync.stderr.log")
 }
 
 fn gui_domain() -> String {
@@ -152,20 +165,40 @@ fn xml_escape(text: &str) -> String {
     escaped
 }
 
-/// Writes `.<LABEL>.plist.tmp` in `dir`, then renames it over `path`.
-fn write_atomically(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = dir.join(format!(".{LABEL}.plist.tmp"));
-    let result = File::create(&temp)
-        .and_then(|mut file| {
-            file.write_all(bytes)?;
-            file.sync_all()
-        })
-        .and_then(|()| fs::rename(&temp, path));
-    if result.is_err() {
+/// Writes `.<name>.tmp` beside `path` (mode 0644 whatever the umask: launchd rejects a
+/// world-writable plist), then renames it over `path`.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut temp_name = OsString::from(".");
+    temp_name.push(path.file_name().unwrap_or_default());
+    temp_name.push(".tmp");
+    let temp = dir.join(temp_name);
+    let write = || -> io::Result<()> {
+        // A temp left by a crash would keep its old mode.
+        match fs::remove_file(&temp) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    };
+    if let Err(e) = write() {
         let _ = fs::remove_file(&temp);
+        return Err(format!("cannot write {}: {e}", path.display()));
     }
-    result?;
-    sync_dir(dir)
+    sync_dir(dir).map_err(|e| {
+        format!(
+            "wrote {} but cannot sync {}: {e}",
+            path.display(),
+            dir.display()
+        )
+    })
 }
 
 /// `launchctl bootout <domain>/<label>`: true if the agent was loaded, false if it wasn't.
