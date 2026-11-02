@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { domainImportViolations, readDomainSources } from "./domain-imports.ts";
 
-const domain = "/repo/packages/domain";
-const check = (source: string, path = "src/index.ts") =>
+const domain = "/repo/packages/domain/src";
+const check = (source: string, path = "index.ts") =>
   domainImportViolations(domain, [{ path, source }]);
 
 describe("domain purity (allow-list)", () => {
@@ -19,7 +22,7 @@ describe("domain purity (allow-list)", () => {
         ].join("\n"),
       ),
     ).toEqual([]);
-    expect(check('import { x } from "../src/x";', "test/x.test.ts")).toEqual([]);
+    expect(check('import { a } from "../a";', "nested/y.ts")).toEqual([]);
   });
 
   test.each([
@@ -33,21 +36,45 @@ describe("domain purity (allow-list)", () => {
     ['const fs = await import("fs");', '"fs" is not effect'],
     ['const fs = require("fs");', '"fs" is not effect'],
     ['type T = import("hono").Hono;', '"hono" is not effect'],
-    ['import { x } from "../../adapters/src/index.ts";', "leaves the domain package"],
-    ['import { x } from "../../domain-evil/x";', "leaves the domain package"],
+    ['import { x } from "../../adapters/src/index.ts";', "leaves the domain source"],
+    ['import { x } from "../../domain-evil/x";', "leaves the domain source"],
     ["const m = await import(name);", "computed import() or require()"],
     ["const m = require(name);", "computed import() or require()"],
+    ['import { hostname } from /* why */ "os";', '"os" is not effect'],
+    ['import type { Pool } from // line comment\n "pg";', '"pg" is not effect'],
+    ['const os = await import(/* lazy */ "os");', '"os" is not effect'],
+    ['const fs = await import ( "fs" );', '"fs" is not effect'],
+    ["const x = ;", "could not be parsed for imports"],
   ])("rejects %s", (source, message) => {
     const failures = check(source);
     expect(failures).toHaveLength(1);
-    expect(failures[0]).toStartWith("src/index.ts: ");
+    expect(failures[0]).toStartWith("index.ts: ");
     expect(failures[0]).toContain(message);
   });
 
+  test("a string-literal import() split over lines is not a computed import", () => {
+    expect(check('const e = await import(\n  "effect"\n);')).toEqual([]);
+  });
+
+  test("reads files in dot directories too", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hex-domain-"));
+    try {
+      await mkdir(join(directory, ".hidden"), { recursive: true });
+      await writeFile(join(directory, ".hidden", "probe.ts"), 'import "fs";\n');
+      const sources = await readDomainSources(directory);
+      expect(sources.map((file) => file.path)).toEqual([".hidden/probe.ts"]);
+      expect(domainImportViolations(directory, sources)).toEqual([
+        '.hidden/probe.ts: "fs" is not effect; the domain imports Effect only',
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("the repository's domain package passes", async () => {
-    const directory = fileURLToPath(new URL("../packages/domain", import.meta.url));
+    const directory = fileURLToPath(new URL("../packages/domain/src", import.meta.url));
     const sources = await readDomainSources(directory);
-    expect(sources.map((file) => file.path)).toContain("src/index.ts");
+    expect(sources.map((file) => file.path)).toContain("index.ts");
     expect(domainImportViolations(directory, sources)).toEqual([]);
   });
 });

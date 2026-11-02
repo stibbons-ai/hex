@@ -44,16 +44,42 @@ const dependencyFields = [
 
 const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const telemetryOff = "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ";
-/** A script that only chains other scripts runs no code itself. */
-const scriptChain = /^bun run [\w:-]+(?: && bun run [\w:-]+)*$/;
+const chainedScript = /^bun run ([\w:-]+)$/;
+const shellOperators = /&&|\|\||;|\||\n/;
+const telemetryOverride = /\b(?:MASTRA_TELEMETRY_DISABLED|DO_NOT_TRACK)=/;
+
+/**
+ * Telemetry stays off in every script (issue #2). A script either only chains this manifest's own
+ * scripts with `bun run <name> && …` (each of which is checked in turn), or is one command that
+ * starts with the opt-out and neither chains further commands nor sets either variable again.
+ */
+export function scriptViolation(
+  script: string,
+  scriptNames: ReadonlySet<string>,
+): string | undefined {
+  const steps = script.split(" && ").map((step) => chainedScript.exec(step)?.[1]);
+  if (steps.every((name) => name !== undefined)) {
+    const unknown = steps.filter((name) => !scriptNames.has(name!));
+    return unknown.length > 0
+      ? `chains "bun run ${unknown.join('", "bun run ')}", which is not a script in this manifest`
+      : undefined;
+  }
+  if (!script.startsWith(telemetryOff)) return `must start with "${telemetryOff.trim()}"`;
+  const command = script.slice(telemetryOff.length);
+  if (shellOperators.test(command)) {
+    return "must be one command after the telemetry opt-out (no &&, ||, ;, | or newline)";
+  }
+  if (telemetryOverride.test(command)) return "must not set the telemetry variables again";
+  return undefined;
+}
 
 /**
  * - ADR 0003: external versions live only in the root package.json's top-level `catalog`;
  *   every manifest (root included) depends on externals via `catalog:` and on workspace
  *   packages via `workspace:*`; no `overrides` or `resolutions`, which would pin versions
  *   outside the catalog.
- * - ADR 0002: `@mastra/*` catalog entries are exact versions; every script that runs code
- *   starts with `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`.
+ * - Issue #2: every script keeps Mastra and Bun telemetry off (`scriptViolation`).
+ * - ADR 0002: `@mastra/*` catalog entries are exact versions.
  * - `@hex/domain` depends on `effect` and nothing else.
  *
  * Returns one message per violation.
@@ -97,10 +123,11 @@ export function manifestViolations(
         failures.push(`${path}: "${field}" is not allowed; versions live only in the root catalog`);
       }
     }
-    for (const [name, script] of Object.entries(manifest.scripts ?? {})) {
-      if (!script.startsWith(telemetryOff) && !scriptChain.test(script)) {
-        failures.push(`${path}: scripts.${name} must start with "${telemetryOff.trim()}"`);
-      }
+    const scripts = manifest.scripts ?? {};
+    const scriptNames = new Set(Object.keys(scripts));
+    for (const [name, script] of Object.entries(scripts)) {
+      const violation = scriptViolation(script, scriptNames);
+      if (violation) failures.push(`${path}: scripts.${name} ${violation}`);
     }
     for (const field of dependencyFields) {
       for (const [name, specifier] of Object.entries(manifest[field] ?? {})) {
@@ -132,15 +159,20 @@ export function manifestViolations(
 
 /**
  * Reads the root manifest and every manifest its `workspaces` globs match. Throws with a policy
- * message when the root is malformed or a pattern matches no package.
+ * message naming the file when a manifest isn't readable JSON, the root is malformed, or a
+ * pattern matches no package.
  */
 export async function readManifests(
   rootDirectory: string,
 ): Promise<{ root: ManifestFile; packages: ManifestFile[] }> {
-  const read = async (path: string): Promise<ManifestFile> => ({
-    path,
-    manifest: await Bun.file(join(rootDirectory, path)).json(),
-  });
+  const read = async (path: string): Promise<ManifestFile> => {
+    const manifest: unknown = await Bun.file(join(rootDirectory, path))
+      .json()
+      .catch((error: Error) => {
+        throw new Error(`${path}: not readable JSON: ${error.message}`);
+      });
+    return { path, manifest };
+  };
   const root = await read("package.json");
   const decoded = decodeManifest(root.manifest, { errors: "all" });
   if (Result.isFailure(decoded)) {
@@ -171,7 +203,7 @@ if (import.meta.main) {
     (error: Error) => [error.message],
   );
   if (failures.length > 0) {
-    console.error(`Manifest policy failed (ADR 0002, ADR 0003):\n${failures.join("\n")}`);
+    console.error(`Manifest policy failed (ADR 0003, issue #2):\n${failures.join("\n")}`);
     process.exit(1);
   }
   console.log("Manifest policy passed for the root and every workspace package.");

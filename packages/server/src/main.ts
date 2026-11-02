@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { startServer } from "./index";
+import { shutdownOnce } from "./lifecycle";
 
 const DEFAULT_PORT = 4111;
 
@@ -12,21 +13,18 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-const server = await startServer({
+const starting = startServer({
   // HEX_DATA_DIR, else .data, relative to the working directory; empty counts as unset.
   databasePath: resolve(process.env.HEX_DATA_DIR || ".data", "mastra.db"),
   port: parsePort(process.env.HEX_PORT),
 });
-console.log(`hex listening on ${server.url}`);
+// Registered before startup finishes, so an early signal still shuts down cleanly.
+const shutdown = shutdownOnce(starting, {
+  exit: (code) => process.exit(code),
+  error: (message, cause) => console.error(message, cause),
+});
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    server.stop().then(
-      () => process.exit(0),
-      (error: unknown) => {
-        console.error("hex: shutdown failed", error);
-        process.exit(1);
-      },
-    );
-  });
-}
+const server = await starting;
+console.log(`hex listening on ${server.url}`);

@@ -1,4 +1,4 @@
-// Copied from stibbons-ai/iconograph packages/adapters/src/schema.ts at commit
+// Adapted from stibbons-ai/iconograph packages/adapters/src/schema.ts (code unchanged) at commit
 // f15a5f2bb80a6103554b3ad4ff9bec02ef45a018. ADR 0002: re-check this helper (and its contract
 // tests) on every Mastra upgrade.
 //

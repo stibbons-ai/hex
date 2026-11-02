@@ -38,21 +38,24 @@ async function listeningUrl(stdout: ReadableStream<Uint8Array>): Promise<URL> {
 }
 
 describe("bun packages/server/src/main.ts", () => {
-  test("serves health from HEX_DATA_DIR and exits 0 on SIGTERM", async () => {
-    const dataDirectory = join(directory, "nested", "data");
-    const child = spawnMain({ HEX_PORT: "0", HEX_DATA_DIR: dataDirectory });
-    try {
-      const url = await listeningUrl(child.stdout);
-      expect(url.hostname).toBe("127.0.0.1");
-      const health = await fetch(new URL("/health", url));
-      expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: "ok" });
-    } finally {
-      child.kill("SIGTERM");
-    }
-    expect(await child.exited).toBe(0);
-    expect((await stat(join(dataDirectory, "mastra.db"))).size).toBeGreaterThan(0);
-  });
+  test.each(["SIGTERM", "SIGINT"] as const)(
+    "serves health from HEX_DATA_DIR and exits 0 on %s",
+    async (signal) => {
+      const dataDirectory = join(directory, signal, "data");
+      const child = spawnMain({ HEX_PORT: "0", HEX_DATA_DIR: dataDirectory });
+      try {
+        const url = await listeningUrl(child.stdout);
+        expect(url.hostname).toBe("127.0.0.1");
+        const health = await fetch(new URL("/health", url));
+        expect(health.status).toBe(200);
+        expect(await health.json()).toEqual({ status: "ok" });
+      } finally {
+        child.kill(signal);
+      }
+      expect(await child.exited).toBe(0);
+      expect((await stat(join(dataDirectory, "mastra.db"))).size).toBeGreaterThan(0);
+    },
+  );
 
   test("defaults the data directory to .data under the working directory", async () => {
     const child = spawnMain({ HEX_PORT: "0", HEX_DATA_DIR: "" });
@@ -69,7 +72,11 @@ describe("bun packages/server/src/main.ts", () => {
     "rejects HEX_PORT=%j",
     async (port) => {
       const child = spawnMain({ HEX_PORT: port, HEX_DATA_DIR: join(directory, "rejected") });
-      expect(await child.exited).toBe(1);
+      try {
+        expect(await child.exited).toBe(1);
+      } finally {
+        child.kill();
+      }
       expect(await new Response(child.stderr).text()).toContain(
         `HEX_PORT must be an integer from 0 to 65535, got ${JSON.stringify(port)}`,
       );

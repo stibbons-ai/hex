@@ -30,6 +30,8 @@ otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
 `<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
+SIGINT or SIGTERM stops it: requests in flight, open streams included, get 5 seconds before
+they are closed, then Mastra shuts down. A second signal of the same kind kills it at once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -57,8 +59,10 @@ bun run test          # bun test
 | `@hex/server`       | `Bun.serve` entrypoint mounting Mastra's routes via `@mastra/hono`             |
 | `@hex/eval-harness` | Empty until the evaluation slice                                               |
 
-The domain's import allow-list is enforced by `scripts/domain-imports.test.ts`, its dependency
-list by `bun run manifests`; oxlint also flags infrastructure imports there in the editor.
+The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
+list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags
+infrastructure imports there too. `packages/domain/tsconfig.json` type-checks its source without
+Bun or Node globals, so `Bun.*` or `process` there fails `bun run typecheck`.
 
 Mastra does not validate step output, so every step decodes its own output with its Effect schema;
 `packages/adapters/test/schema.test.ts` pins that contract against real workflow runs. Use

@@ -134,21 +134,58 @@ describe("manifest policy", () => {
   test("requires the telemetry opt-out on every script that runs code", () => {
     const scripts = {
       start: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun src/main.ts",
-      check: "bun run lint && bun run test",
+      lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint .",
+      check: "bun run lint && bun run start",
       bare: "bun src/main.ts",
       half: "DO_NOT_TRACK=1 bun src/main.ts",
       swapped: "DO_NOT_TRACK=1 MASTRA_TELEMETRY_DISABLED=1 bun src/main.ts",
       chained: "bun run lint && bun src/main.ts",
-      tool: "oxlint .",
     };
     const message = 'must start with "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1"';
     expect(manifestViolations(root({ scripts }), [pkg("server", { scripts })])).toEqual(
       ["package.json", "packages/server/package.json"].flatMap((path) =>
-        ["bare", "half", "swapped", "chained", "tool"].map(
-          (name) => `${path}: scripts.${name} ${message}`,
-        ),
+        ["bare", "half", "swapped", "chained"].map((name) => `${path}: scripts.${name} ${message}`),
       ),
     );
+  });
+
+  test.each(["oxlint", "check:all", "lint && bun run oxlint"])(
+    "rejects chaining bun run %s when it is not a script in the same manifest",
+    (chain) => {
+      const scripts = {
+        lint: "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 oxlint .",
+        check: `bun run ${chain}`,
+      };
+      expect(manifestViolations(root({ scripts }), [])).toEqual([
+        expect.stringMatching(
+          /^package\.json: scripts\.check chains "bun run .*", which is not a script in this manifest$/,
+        ),
+      ]);
+    },
+  );
+
+  test.each([
+    "bun a.ts && bun b.ts",
+    "bun a.ts || bun b.ts",
+    "bun a.ts; bun b.ts",
+    "echo x | bun b.ts",
+    "bun a.ts\nbun b.ts",
+  ])("rejects a prefixed script that runs further commands: %j", (command) => {
+    const scripts = { run: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      "package.json: scripts.run must be one command after the telemetry opt-out (no &&, ||, ;, | or newline)",
+    ]);
+  });
+
+  test.each([
+    "MASTRA_TELEMETRY_DISABLED=0 bun a.ts",
+    "DO_NOT_TRACK=0 bun a.ts",
+    "env DO_NOT_TRACK= bun a.ts",
+  ])("rejects a prefixed script that sets telemetry again: %j", (command) => {
+    const scripts = { run: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      "package.json: scripts.run must not set the telemetry variables again",
+    ]);
   });
 
   test.each([
@@ -213,5 +250,15 @@ describe("reading manifests", () => {
   test("reports a malformed root with the policy message", async () => {
     const directory = await repository({ workspaces: "packages/*" });
     await expect(readManifests(directory)).rejects.toThrow(/^package\.json: invalid manifest: /);
+  });
+
+  test("names the package.json that isn't readable JSON", async () => {
+    const directory = await repository({ workspaces: ["packages/*"] }, ["domain"]);
+    await writeFile(join(directory, "packages", "domain", "package.json"), "{ not json");
+    await expect(readManifests(directory)).rejects.toThrow(
+      /^packages\/domain\/package\.json: not readable JSON: /,
+    );
+    await writeFile(join(directory, "package.json"), "");
+    await expect(readManifests(directory)).rejects.toThrow(/^package\.json: not readable JSON: /);
   });
 });

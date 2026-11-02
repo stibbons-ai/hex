@@ -4,6 +4,7 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { toMastraSchema } from "@hex/adapters";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
+import { LibSQLStore } from "@mastra/libsql";
 import { Schema } from "effect";
 import { type RunningServer, type ServerOptions, startServer } from "../src";
 
@@ -82,6 +83,8 @@ describe("hex server", () => {
       for (const host of [
         "evil.example",
         `evil.example:${server.url.port}`,
+        `0.0.0.0:${server.url.port}`,
+        `[::1]:${server.url.port}`,
         "127.0.0.1:1",
         "localhost",
       ]) {
@@ -141,4 +144,97 @@ test("keeps Mastra's default logger unless told otherwise", async () => {
   } finally {
     consoleError.mockRestore();
   }
+});
+
+describe("stop()", () => {
+  test("closes a held-open stream after the grace period and still shuts down", async () => {
+    const release = Promise.withResolvers<void>();
+    const hang = createWorkflow({ id: "hang", inputSchema: Message, outputSchema: Message })
+      .then(
+        createStep({
+          id: "hang",
+          inputSchema: Message,
+          outputSchema: Message,
+          execute: async ({ inputData }) => {
+            await release.promise;
+            return inputData;
+          },
+        }),
+      )
+      .commit();
+    const shutdown = Promise.withResolvers<void>();
+    const server = await startServer({
+      databasePath: join(directory, "stream", "mastra.db"),
+      port: 0,
+      logger: false,
+      workflows: { hang },
+      stopGraceMs: 200,
+    });
+    const originalShutdown = server.mastra.shutdown.bind(server.mastra);
+    server.mastra.shutdown = async (...args) => {
+      shutdown.resolve();
+      return originalShutdown(...args);
+    };
+    try {
+      const response = await fetch(new URL("/api/workflows/hang/stream?runId=held", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inputData: { message: "hold" } }),
+      });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      await reader.read(); // the stream is open and the step is waiting
+
+      const started = performance.now();
+      await server.stop();
+      expect(performance.now() - started).toBeLessThan(3000);
+      await shutdown.promise; // Mastra's shutdown ran after the forced close
+      reader.releaseLock();
+    } finally {
+      // The step outlives shutdown and then fails against the closed store; keep that out of the
+      // test output.
+      const quiet = (["error", "warn", "log"] as const).map((level) =>
+        spyOn(console, level).mockImplementation(() => {}),
+      );
+      release.resolve();
+      await Bun.sleep(100);
+      for (const spy of quiet) spy.mockRestore();
+    }
+  });
+
+  test("rejects with a failing Mastra shutdown and still closes the store", async () => {
+    const close = spyOn(LibSQLStore.prototype, "close");
+    try {
+      const server = await startServer({
+        databasePath: join(directory, "shutdown-fails", "mastra.db"),
+        port: 0,
+        logger: false,
+      });
+      const failure = new Error("mastra shutdown failed");
+      server.mastra.shutdown = async () => {
+        throw failure;
+      };
+      close.mockClear();
+      await expect(server.stop()).rejects.toBe(failure);
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  test("a failed start closes the store and keeps the original error", async () => {
+    const taken = await start({ databasePath: join(directory, "taken", "mastra.db") });
+    const close = spyOn(LibSQLStore.prototype, "close");
+    try {
+      const failed = startServer({
+        databasePath: join(directory, "port-in-use", "mastra.db"),
+        port: Number(taken.url.port),
+        logger: false,
+      });
+      await expect(failed).rejects.toThrow(/EADDRINUSE|in use/i);
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      close.mockRestore();
+    }
+  });
 });
