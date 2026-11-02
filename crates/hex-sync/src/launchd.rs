@@ -27,8 +27,9 @@ const NOT_LOADED: [i32; 2] = [3, 113];
 const STDERR_LOG: &str = "~/Library/Logs/hex-sync.stderr.log";
 
 /// Writes the agent's plist into `launch_agents_dir` (created if missing) and (re)loads it.
-/// The plist holds `interval_secs` and the binary's path, so a change to either needs a
-/// reinstall; every other config edit applies on the next run, which rereads the config.
+/// The plist holds `interval_secs`, the config's path and the binary's resolved path:
+/// reinstall after changing `interval_secs` or moving the config or the binary; other config
+/// edits apply on the next run, which rereads the config.
 pub fn install(config_path: &Path, launch_agents_dir: &Path) -> Result<(), String> {
     let config = Config::load(config_path)?;
     // A root may be missing now (an unmounted drive), so only the log's own rules apply.
@@ -41,7 +42,9 @@ pub fn install(config_path: &Path, launch_agents_dir: &Path) -> Result<(), Strin
         .map_err(|e| format!("cannot locate the hex-sync binary: {e}"))?;
     let stderr_log = config::expand_home(Path::new(STDERR_LOG));
     if !stderr_log.is_absolute() {
-        return Err(format!("cannot expand {STDERR_LOG}: HOME is not set"));
+        return Err(format!(
+            "cannot expand {STDERR_LOG}: HOME is not set or not absolute"
+        ));
     }
     let interval = config.interval_secs.get();
     let plist = plist(&program, &config_path, interval, &stderr_log)?;
@@ -165,8 +168,10 @@ fn xml_escape(text: &str) -> String {
     escaped
 }
 
-/// Writes `.<name>.tmp` beside `path` (mode 0644 whatever the umask: launchd rejects a
-/// world-writable plist), then renames it over `path`.
+/// Writes `.<name>.tmp` beside `path`, then renames it over `path`. The mode is at most 0644:
+/// the umask can only narrow it, so the plist is never world-writable (launchd rejects that).
+/// The temp name is fixed, so a temp left by a crashed install is found and replaced; two
+/// installs at once may then fail one of them, but the plist that lands is always complete.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut temp_name = OsString::from(".");

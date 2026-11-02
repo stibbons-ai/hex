@@ -116,9 +116,10 @@ fn report(result: Result<(), String>) -> ExitCode {
 }
 
 /// Exit codes: 0 all done; 1 some files failed, or a log line (on a dry run, a plan line)
-/// could not be written, which stops the pass; 2 nothing done (`Err`: config error, log
-/// cannot be opened, is a symlink or lies inside a root, the lock file cannot be opened, or
-/// a root check failed); 3 nothing done because another run holds the lock.
+/// could not be written, which stops the pass; 2 nothing done (`Err`: config error, the log's
+/// folder cannot be created, the log or the lock file cannot be opened or locked, the log
+/// is a symlink or lies inside a root, or a root check failed); 3 nothing done because
+/// another run holds the lock.
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
     let roots = match sync::check_roots(&config.outbox, &config.archive, &config.log) {

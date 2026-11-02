@@ -171,7 +171,7 @@ impl Env {
         }
         let (outbox, archive) = (snapshot(&self.outbox), snapshot(&self.archive));
         let output = self.run(&[]);
-        assert_exit_2(&output, "aborted");
+        assert_exit(&output, 2, "aborted");
         assert_eq!(snapshot(&self.outbox), outbox);
         assert_eq!(snapshot(&self.archive), archive);
         if logged {
@@ -231,10 +231,22 @@ fn assert_partial_failure(output: &Output) {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(output));
 }
 
-/// Exit 2 with `needle` in stderr.
-fn assert_exit_2(output: &Output, needle: &str) {
-    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(output));
+/// Exit `code` with `needle` in stderr.
+fn assert_exit(output: &Output, code: i32, needle: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "stderr: {}",
+        stderr(output)
+    );
     assert!(stderr(output).contains(needle), "{}", stderr(output));
+}
+
+/// Spawns `command` (under `SPAWN`) and collects its output.
+fn output(mut command: Command) -> Output {
+    spawn_locked(|| command.spawn().unwrap())
+        .wait_with_output()
+        .unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -767,7 +779,7 @@ fn aborts_when_root_is_unreadable() {
     let output = env.run(&[]);
     chmod(&env.outbox, 0o755);
 
-    assert_exit_2(&output, "aborted");
+    assert_exit(&output, 2, "aborted");
     assert!(env.log_text().contains("\tabort\t"));
     assert!(env.outbox.join("a.pdf").exists());
     assert_eq!(snapshot(&env.archive).len(), 1);
@@ -834,7 +846,7 @@ fn aborts_when_log_is_inside_a_root() {
 
             let output = env.run(&[]);
 
-            assert_exit_2(&output, "inside");
+            assert_exit(&output, 2, "inside");
             assert!(!log.exists(), "{inside}");
             assert_eq!(log.parent().unwrap().exists(), logs_present, "{inside}");
             assert!(env.outbox.join("a.pdf").exists());
@@ -856,7 +868,7 @@ fn aborts_without_writing_a_log_inside_an_unreadable_root() {
         let output = env.run(&[]);
         chmod(&root, 0o755);
 
-        assert_exit_2(&output, "inside");
+        assert_exit(&output, 2, "inside");
         assert!(!log.exists(), "{inside}");
         assert_eq!(snapshot(&env.outbox), outbox);
         assert_eq!(snapshot(&env.archive), archive);
@@ -871,7 +883,7 @@ fn dry_run_abort_writes_no_log() {
 
     let output = env.run(&["--dry-run"]);
 
-    assert_exit_2(&output, "aborted");
+    assert_exit(&output, 2, "aborted");
     assert!(!env.log.exists());
 }
 
@@ -887,7 +899,7 @@ fn abort_never_creates_a_missing_root_that_holds_the_log() {
 
         let output = env.run(&[]);
 
-        assert_exit_2(&output, "not logged");
+        assert_exit(&output, 2, "not logged");
         assert!(!env.archive.exists(), "{log}");
         assert!(env.outbox.join("a.pdf").exists());
     }
@@ -904,7 +916,7 @@ fn aborts_when_log_is_a_symlink() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "symlink");
+    assert_exit(&output, 2, "symlink");
     assert!(!env.outbox.join("log.tsv").exists());
     assert!(env.outbox.join("a.pdf").exists());
 }
@@ -922,7 +934,7 @@ fn abort_reason_survives_a_log_that_cannot_be_opened() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "cannot open log");
+    assert_exit(&output, 2, "cannot open log");
     assert!(stderr(&output).contains("Archive"), "{}", stderr(&output));
     assert!(!env.archive.exists());
 }
@@ -1083,7 +1095,7 @@ fn missing_required_key_is_a_config_error() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "archive");
+    assert_exit(&output, 2, "archive");
     assert!(env.outbox.join("a.pdf").exists());
     assert!(!env.log.exists());
 }
@@ -1095,7 +1107,7 @@ fn unknown_key_is_a_config_error() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "password");
+    assert_exit(&output, 2, "password");
     assert!(env.outbox.join("a.pdf").exists());
 }
 
@@ -1103,7 +1115,7 @@ fn unknown_key_is_a_config_error() {
 fn zero_interval_is_a_config_error() {
     let env = Env::with_config_tail("interval_secs = 0\n");
 
-    assert_exit_2(&env.run(&[]), "interval_secs");
+    assert_exit(&env.run(&[]), 2, "interval_secs");
 }
 
 #[test]
@@ -1111,7 +1123,7 @@ fn relative_path_is_a_config_error() {
     let env = Env::new();
     env.set_paths(Path::new("outbox"), &env.archive, &env.log);
 
-    assert_exit_2(&env.run(&[]), "absolute");
+    assert_exit(&env.run(&[]), 2, "absolute");
 }
 
 #[test]
@@ -1309,12 +1321,6 @@ impl Launchd {
         command
     }
 
-    fn output(mut command: Command) -> Output {
-        spawn_locked(|| command.spawn().unwrap())
-            .wait_with_output()
-            .unwrap()
-    }
-
     fn install_command(&self, config: &Path, bootout_exit: i32, bootstrap_exit: i32) -> Command {
         let args = [
             OsStr::new("install"),
@@ -1327,16 +1333,20 @@ impl Launchd {
     }
 
     fn install(&self, config: &Path, bootout_exit: i32, bootstrap_exit: i32) -> Output {
-        Self::output(self.install_command(config, bootout_exit, bootstrap_exit))
+        output(self.install_command(config, bootout_exit, bootstrap_exit))
     }
 
-    fn uninstall(&self, bootout_exit: i32) -> Output {
+    fn uninstall_command(&self, bootout_exit: i32) -> Command {
         let args = [
             OsStr::new("uninstall"),
             OsStr::new("--launch-agents-dir"),
             self.dir.as_os_str(),
         ];
-        Self::output(self.command(&args, bootout_exit, OK))
+        self.command(&args, bootout_exit, OK)
+    }
+
+    fn uninstall(&self, bootout_exit: i32) -> Output {
+        output(self.uninstall_command(bootout_exit))
     }
 
     /// One line per launchctl call, its arguments space-separated.
@@ -1453,12 +1463,7 @@ fn install_with_an_invalid_config_writes_and_loads_nothing() {
 
     let output = launchd.install(&env.config, OK, OK);
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("invalid config"),
-        "{}",
-        stderr(&output)
-    );
+    assert_exit(&output, 1, "invalid config");
     assert!(!launchd.dir.exists());
     assert!(launchd.calls().is_empty());
 }
@@ -1470,13 +1475,12 @@ fn install_fails_when_bootstrap_fails_and_keeps_the_plist() {
 
     let output = launchd.install(&env.config, BOOTOUT_NOT_LOADED, BOOTSTRAP_IO_ERROR);
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_exit(&output, 1, "Input/output error");
     let err = stderr(&output);
     assert!(
         err.contains(&format!("bootstrap {}", gui_domain())),
         "{err}"
     );
-    assert!(err.contains("Input/output error"), "{err}");
     assert!(
         err.contains(
             "ai.stibbons.hex-sync is not loaded; fix the cause and rerun hex-sync install"
@@ -1493,8 +1497,7 @@ fn install_fails_on_an_unexpected_bootout_error_without_bootstrapping() {
 
     let output = launchd.install(&env.config, UNEXPECTED_FAILURE, OK);
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stderr(&output).contains("bootout"), "{}", stderr(&output));
+    assert_exit(&output, 1, "bootout");
     assert_eq!(launchd.calls().len(), 1, "{:?}", launchd.calls());
 }
 
@@ -1540,7 +1543,7 @@ fn install_writes_a_relative_config_path_as_absolute_without_resolving_symlinks(
     let mut command = launchd.install_command(Path::new("link/sync.toml"), OK, OK);
     command.current_dir(&env.root);
 
-    let output = Launchd::output(command);
+    let output = output(command);
 
     assert_success(&output);
     let expected = format!(
@@ -1562,7 +1565,7 @@ fn install_and_uninstall_default_to_paths_under_home() {
     fs::rename(&env.config, &config).unwrap();
     let launchd = Launchd::new(&env);
 
-    let installed = Launchd::output(launchd.command(&[OsStr::new("install")], OK, OK));
+    let installed = output(launchd.command(&[OsStr::new("install")], OK, OK));
 
     assert_success(&installed);
     let expected = format!("<string>{}</string>", config.display());
@@ -1572,18 +1575,16 @@ fn install_and_uninstall_default_to_paths_under_home() {
         launchd.plist_text()
     );
 
-    let removed = Launchd::output(launchd.command(&[OsStr::new("uninstall")], OK, OK));
+    let removed = output(launchd.command(&[OsStr::new("uninstall")], OK, OK));
 
     assert_success(&removed);
     assert!(!launchd.plist.exists());
 }
 
-#[test]
-fn install_creates_a_plist_launchd_accepts_whatever_the_umask() {
+/// Runs `command` with umask 0, so only the mode the binary asks for limits the files it
+/// creates.
+fn with_umask_0(command: &mut Command) {
     use std::os::unix::process::CommandExt;
-    let env = Env::new();
-    let launchd = Launchd::new(&env);
-    let mut command = launchd.install_command(&env.config, OK, OK);
     // SAFETY: umask is async-signal-safe and touches no memory.
     unsafe {
         command.pre_exec(|| {
@@ -1591,30 +1592,69 @@ fn install_creates_a_plist_launchd_accepts_whatever_the_umask() {
             Ok(())
         });
     }
+}
 
-    assert_success(&Launchd::output(command));
+#[test]
+fn install_creates_a_plist_launchd_accepts_whatever_the_umask() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    with_umask_0(&mut command);
+
+    assert_success(&output(command));
 
     let mode = fs::metadata(&launchd.plist).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o644);
 }
 
 #[test]
-fn install_refuses_a_log_inside_a_root() {
+fn install_replaces_a_temp_left_by_a_crashed_install() {
     let env = Env::new();
-    env.set_paths(&env.outbox, &env.archive, &env.outbox.join("logs/sync.log"));
     let launchd = Launchd::new(&env);
+    let temp = launchd.dir.join(format!(".{LABEL}.plist.tmp"));
+    write(&temp, b"half a plist");
+    chmod(&temp, 0o666);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    with_umask_0(&mut command);
 
-    let output = launchd.install(&env.config, OK, OK);
+    assert_success(&output(command));
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("not installed: log"),
-        "{}",
-        stderr(&output)
-    );
+    let mode = fs::metadata(&launchd.plist).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644);
+    assert!(launchd.plist_text().starts_with("<?xml"));
+    let entries: Vec<_> = fs::read_dir(&launchd.dir).unwrap().collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+}
+
+#[test]
+fn install_refuses_a_log_inside_a_root() {
+    for root in ["outbox", "archive"] {
+        let env = Env::new();
+        let root = env.root.join(root);
+        env.set_paths(&env.outbox, &env.archive, &root.join("logs/sync.log"));
+        let launchd = Launchd::new(&env);
+
+        let output = launchd.install(&env.config, OK, OK);
+
+        assert_exit(&output, 1, "not installed: log");
+        assert!(!launchd.dir.exists());
+        assert!(launchd.calls().is_empty());
+        assert!(!root.join("logs").exists());
+    }
+}
+
+#[test]
+fn install_fails_without_home_before_writing_anything() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    command.env_remove("HOME");
+
+    let output = output(command);
+
+    assert_exit(&output, 1, "HOME is not set or not absolute");
     assert!(!launchd.dir.exists());
     assert!(launchd.calls().is_empty());
-    assert!(!env.outbox.join("logs").exists());
 }
 
 #[test]
@@ -1637,8 +1677,7 @@ fn uninstall_fails_on_an_unexpected_bootout_error_and_keeps_the_plist() {
 
     let output = launchd.uninstall(UNEXPECTED_FAILURE);
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stderr(&output).contains("bootout"), "{}", stderr(&output));
+    assert_exit(&output, 1, "bootout");
     assert!(launchd.plist.exists());
 }
 
@@ -1646,22 +1685,12 @@ fn uninstall_fails_on_an_unexpected_bootout_error_and_keeps_the_plist() {
 fn uninstall_fails_when_launchctl_cannot_run() {
     let env = Env::new();
     let launchd = Launchd::new(&env);
-    let args = [
-        OsStr::new("uninstall"),
-        OsStr::new("--launch-agents-dir"),
-        launchd.dir.as_os_str(),
-    ];
-    let mut command = launchd.command(&args, OK, OK);
+    let mut command = launchd.uninstall_command(OK);
     command.env("HEX_SYNC_LAUNCHCTL", env.root.join("missing-launchctl"));
 
-    let output = Launchd::output(command);
+    let output = output(command);
 
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("cannot run"),
-        "{}",
-        stderr(&output)
-    );
+    assert_exit(&output, 1, "cannot run");
     assert!(
         !stdout(&output).contains("not loaded"),
         "{}",
@@ -1713,16 +1742,30 @@ fn a_run_holds_the_lock_for_its_whole_pass() {
     }
 
     // Not `env.run`: its Archive bookkeeping would race run A's writes.
-    let refused = spawn_locked(|| env.command(&["run"]).spawn().unwrap())
-        .wait_with_output()
-        .unwrap();
+    let refused = output(env.command(&["run"]));
 
-    assert_eq!(refused.status.code(), Some(3), "{}", stderr(&refused));
-    assert!(stderr(&refused).contains("another run is in progress"));
+    assert_exit(&refused, 3, "another run is in progress");
     let first = first.wait_with_output().unwrap();
     assert_success(&first);
     assert_eq!(snapshot(&env.archive).len(), FILES);
     assert_eq!(outbox_entries(&env), 0);
+}
+
+#[test]
+fn run_aborts_when_the_log_folder_cannot_be_created() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"stays");
+    let read_only = env.root.join("read-only");
+    fs::create_dir(&read_only).unwrap();
+    chmod(&read_only, 0o555);
+    let log = read_only.join("logs/sync.log");
+    env.set_paths(&env.outbox, &env.archive, &log);
+
+    let output = env.run(&["run"]);
+
+    assert_exit(&output, 2, "cannot create log folder");
+    assert!(env.outbox.join("a.pdf").exists());
+    assert!(snapshot(&env.archive).is_empty());
 }
 
 #[test]
@@ -1736,7 +1779,7 @@ fn run_aborts_when_the_lock_file_is_a_symlink() {
 
     let output = env.run(&["run"]);
 
-    assert_exit_2(&output, "cannot open lock");
+    assert_exit(&output, 2, "cannot open lock");
     assert!(!target.exists());
     assert_eq!(snapshot(&env.outbox), outbox);
     assert_eq!(snapshot(&env.archive), archive);

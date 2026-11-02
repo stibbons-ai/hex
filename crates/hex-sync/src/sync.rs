@@ -84,8 +84,9 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
     })
 }
 
-/// Checks only the log location: not a symlink, not inside an Outbox or Archive that exists.
-/// A missing root passes (it may be an unmounted drive).
+/// Checks only the log location: not a symlink, not inside an Outbox or Archive that
+/// resolves. A root that doesn't resolve (missing, or an unreadable ancestor) passes: it may
+/// be an unmounted drive.
 pub fn check_log(outbox: &Path, archive: &Path, log: &Path) -> Result<(), String> {
     check_log_location(log, [&identify(outbox), &identify(archive)])
 }
@@ -97,9 +98,9 @@ fn check_log_location(log: &Path, roots: [&io::Result<Root>; 2]) -> Result<(), S
             log.display()
         ));
     }
-    // Every root that exists counts, readable or not. A missing root is not looked at: the
-    // abort then never creates a folder, so a log under it stays unwritten whatever its
-    // spelling.
+    // Every root that resolves counts, readable or not. One that doesn't is not looked at:
+    // in `run`, `check_root` then aborts without creating a folder, so a log under a missing
+    // root stays unwritten whatever its spelling.
     for root in roots.into_iter().flatten() {
         if log_inside(log, root)? {
             return Err(format!(

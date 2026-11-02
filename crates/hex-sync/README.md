@@ -117,16 +117,17 @@ hex-sync uninstall   # unload the agent and remove its plist
 `install [--config <path>] [--launch-agents-dir <dir>]` loads the config (failing on an invalid
 one, or on a log that is a symlink or lies inside an existing Outbox or Archive; a missing root
 is fine, it may be an unmounted drive), then writes `<dir>/ai.stibbons.hex-sync.plist`
-(default dir `~/Library/LaunchAgents`, created if missing; the plist is mode `0644`). The agent
+(default dir `~/Library/LaunchAgents`, created if missing; the plist's mode is at most `0644`:
+the umask can only narrow it, so it is never world-writable, which launchd rejects). The agent
 runs `<this binary> run --config <absolute config path>` every `interval_secs`, the first time
 one interval after loading. Its stdout goes to `/dev/null` (it only echoes the log); its
 stderr, where config errors, aborts and refused runs show up, goes to
 `~/Library/Logs/hex-sync.stderr.log`. That folder always exists, so launchd never creates a
 folder on the agent's behalf (in the log's folder it could recreate a missing root before
 hex-sync's checks run, or fail every start on an unmounted volume). Install then reloads the
-agent (`launchctl bootout`, then `bootstrap gui/<uid>`). The plist holds only `interval_secs`
-and the binary's resolved path: reinstall after changing `interval_secs` or moving the binary;
-other config edits apply on the next run, which rereads the config.
+agent (`launchctl bootout`, then `bootstrap gui/<uid>`). The plist holds `interval_secs`, the
+config's path and the binary's resolved path: reinstall after changing `interval_secs` or
+moving the config or the binary; other config edits apply on the next run.
 
 `uninstall [--launch-agents-dir <dir>]` unloads the agent and removes the plist; either being
 gone already is fine. Both commands say what they did and exit `0`, or `1` with the failing
