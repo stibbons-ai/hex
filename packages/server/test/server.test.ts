@@ -345,6 +345,8 @@ test("answers a response that fails to encode with a plain, logged 500", async (
   }
 });
 
+// oRPC's serializer finds the cycle only by recursing until the stack overflows: ~0.5 s on a
+// fast Mac, 1.5 s on CI Linux and 4-6.5 s on CI macOS runners, past bun's 5 s default.
 test("logs an output oRPC's encoder rejects, once", async () => {
   const circular: Record<string, unknown> = {};
   circular.self = circular;
@@ -365,7 +367,7 @@ test("logs an output oRPC's encoder rejects, once", async () => {
   } finally {
     logged.mockRestore();
   }
-});
+}, 20_000);
 
 test("keeps Mastra's default logger unless told otherwise", async () => {
   // Mastra's default logger writes errors with console.error; the noop logger writes nothing.
