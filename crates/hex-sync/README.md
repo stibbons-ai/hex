@@ -80,9 +80,9 @@ plans.
 Every action is appended to the log as one tab-separated line: timestamp, action, path
 (relative to the Outbox; to the Archive for `stale-temp`), target (relative to the Archive, or
 the Outbox for `restore-claim`; `-` if none), outcome. A tab or newline in a file name is
-written as is and breaks that line's format. Each
-line is also echoed to stdout; a closed stdout is ignored. If a log line can't be written, the
-line goes to stderr, the pass stops, and nothing more is moved.
+written as is and breaks that line's format. Each line is also echoed to stdout; a closed
+stdout is ignored. If a log line can't be written, the line goes to stderr, the pass stops,
+and nothing more is moved.
 
 Exit codes:
 

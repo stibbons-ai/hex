@@ -2,13 +2,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use filetime::FileTime;
 use tempfile::TempDir;
+
+/// Held while a child is spawned. A child that another test thread forks in the meantime
+/// would hold `run_with_closed_stdout`'s pipe read end until it execs, and the write the
+/// test expects to fail could then succeed. `spawn` returns only after the exec.
+static SPAWN: Mutex<()> = Mutex::new(());
+
+fn spawn_locked(spawn: impl FnOnce() -> Child) -> Child {
+    let _guard = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+    spawn()
+}
 
 const BIN: &str = env!("CARGO_BIN_EXE_hex-sync");
 
@@ -70,9 +82,11 @@ impl Env {
 
     /// Like `run`, with stdout a pipe whose read end is already closed.
     fn run_with_closed_stdout(&self, args: &[&str]) -> Output {
-        let (reader, writer) = std::io::pipe().unwrap();
-        drop(reader);
-        self.run_command(self.command(args).stdout(writer))
+        self.run_spawned(|| {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            self.command(args).stdout(writer).spawn().unwrap()
+        })
     }
 
     /// Like `run`, with any file write past 512 bytes failing (EFBIG; SIGXFSZ ignored).
@@ -81,20 +95,31 @@ impl Env {
         command
             .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$0\" \"$@\"", BIN])
             .arg("--config")
-            .arg(&self.config);
+            .arg(&self.config)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         self.run_command(&mut command)
     }
 
     fn run_command(&self, command: &mut Command) -> Output {
+        self.run_spawned(|| command.spawn().unwrap())
+    }
+
+    fn run_spawned(&self, spawn: impl FnOnce() -> Child) -> Output {
         let before = self.archive_state();
-        let output = command.output().unwrap();
+        let output = spawn_locked(spawn).wait_with_output().unwrap();
         self.assert_archive_kept(&before);
         output
     }
 
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
-        command.args(args).arg("--config").arg(&self.config);
+        command
+            .args(args)
+            .arg("--config")
+            .arg(&self.config)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         command
     }
 
@@ -335,17 +360,17 @@ fn identical_numbered_copy_counts_as_archived() {
 fn archive_symlink_at_target_is_never_identical() {
     let env = Env::new();
     let elsewhere = env.root.join("elsewhere/a.pdf");
-    write(&elsewhere, b"same bytes");
+    // As long as the symlink's own size (its target path), so only the file-type check
+    // can tell them apart.
+    let bytes = elsewhere.as_os_str().as_bytes();
+    write(&elsewhere, bytes);
     symlink(&elsewhere, env.archive.join("a.pdf")).unwrap();
-    write(&env.outbox.join("a.pdf"), b"same bytes");
+    write(&env.outbox.join("a.pdf"), bytes);
 
     let output = env.run(&[]);
 
     assert_success(&output);
-    assert_eq!(
-        fs::read(env.archive.join("a (1).pdf")).unwrap(),
-        b"same bytes"
-    );
+    assert_eq!(fs::read(env.archive.join("a (1).pdf")).unwrap(), bytes);
     assert!(
         fs::symlink_metadata(env.archive.join("a.pdf"))
             .unwrap()
@@ -384,21 +409,24 @@ fn document_named_like_a_temp_file_is_archived() {
 #[test]
 fn existing_file_with_temp_name_survives_and_is_reported() {
     let env = Env::new();
-    write(&env.archive.join(".hex-sync-0.tmp"), b"not ours");
-    write(&env.outbox.join("a.pdf"), b"incoming");
+    write(&env.archive.join("sub/.hex-sync-0.tmp"), b"not ours");
+    write(&env.outbox.join("sub/a.pdf"), b"incoming");
 
     let output = env.run(&[]);
 
     assert_success(&output);
     assert_eq!(
-        fs::read(env.archive.join(".hex-sync-0.tmp")).unwrap(),
+        fs::read(env.archive.join("sub/.hex-sync-0.tmp")).unwrap(),
         b"not ours"
     );
-    assert_eq!(fs::read(env.archive.join("a.pdf")).unwrap(), b"incoming");
+    assert_eq!(
+        fs::read(env.archive.join("sub/a.pdf")).unwrap(),
+        b"incoming"
+    );
     assert_eq!(snapshot(&env.archive).len(), 2, "no temp left behind");
     assert!(
         env.log_text()
-            .contains("\tstale-temp\t.hex-sync-0.tmp\t-\tkept")
+            .contains("\tstale-temp\tsub/.hex-sync-0.tmp\t-\tkept")
     );
 }
 
@@ -709,7 +737,7 @@ fn aborts_when_root_is_unreadable() {
 #[test]
 fn aborts_when_archive_is_inside_outbox() {
     let env = Env::new();
-    let nested_archive = env.outbox.join("archive");
+    let nested_archive = env.outbox.join("a/b/archive");
     write(&nested_archive.join("a.pdf"), b"same");
     env.set_paths(&env.outbox, &nested_archive, &env.log);
 
@@ -754,17 +782,58 @@ fn aborts_when_archive_is_the_outbox_through_a_firmlink() {
 #[test]
 fn aborts_when_log_is_inside_a_root() {
     for inside in ["outbox", "archive"] {
+        // With the log's folder missing (the root is the nearest existing folder) and
+        // present.
+        for logs_present in [false, true] {
+            let env = Env::new();
+            write(&env.outbox.join("a.pdf"), b"stays");
+            let log = env.root.join(inside).join("logs/sync.log");
+            if logs_present {
+                fs::create_dir(log.parent().unwrap()).unwrap();
+            }
+            env.set_paths(&env.outbox, &env.archive, &log);
+
+            let output = env.run(&[]);
+
+            assert_exit_2(&output, "inside");
+            assert!(!log.exists(), "{inside}");
+            assert_eq!(log.parent().unwrap().exists(), logs_present, "{inside}");
+            assert!(env.outbox.join("a.pdf").exists());
+        }
+    }
+}
+
+#[test]
+fn aborts_without_writing_a_log_inside_an_unreadable_root() {
+    for inside in ["outbox", "archive"] {
         let env = Env::new();
         write(&env.outbox.join("a.pdf"), b"stays");
-        let log = env.root.join(inside).join("logs/sync.log");
+        let root = env.root.join(inside);
+        let log = root.join("hex.log");
         env.set_paths(&env.outbox, &env.archive, &log);
+        let (outbox, archive) = (snapshot(&env.outbox), snapshot(&env.archive));
+        chmod(&root, 0o311);
 
         let output = env.run(&[]);
+        chmod(&root, 0o755);
 
         assert_exit_2(&output, "inside");
-        assert!(!log.parent().unwrap().exists(), "{inside}");
-        assert!(env.outbox.join("a.pdf").exists());
+        assert!(!log.exists(), "{inside}");
+        assert_eq!(snapshot(&env.outbox), outbox);
+        assert_eq!(snapshot(&env.archive), archive);
     }
+}
+
+#[test]
+fn dry_run_abort_writes_no_log() {
+    let env = Env::new();
+    fs::remove_dir(&env.archive).unwrap();
+    fs::create_dir_all(env.log.parent().unwrap()).unwrap();
+
+    let output = env.run(&["--dry-run"]);
+
+    assert_exit_2(&output, "aborted");
+    assert!(!env.log.exists());
 }
 
 #[test]
@@ -1035,11 +1104,16 @@ fn home_relative_paths_and_default_config_location() {
     write(&env.outbox.join("a.pdf"), b"via home");
     let before = env.archive_state();
 
-    let output = Command::new(BIN)
-        .env("HOME", &env.root)
-        .stdout(Stdio::null())
-        .output()
-        .unwrap();
+    let output = spawn_locked(|| {
+        Command::new(BIN)
+            .env("HOME", &env.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    })
+    .wait_with_output()
+    .unwrap();
 
     env.assert_archive_kept(&before);
     assert_success(&output);

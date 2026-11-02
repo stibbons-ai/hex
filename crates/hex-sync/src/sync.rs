@@ -36,8 +36,9 @@ const ENDLESS: &str = "an unbounded name sequence always reaches a free name";
 /// Why a run stopped before touching anything.
 pub struct Abort {
     pub reason: String,
-    /// False when the log lies inside a root or is a symlink, so the abort goes to stderr
-    /// only.
+    /// True when the abort may be appended to the log (it is, only if the log's folder
+    /// already exists). False when the log lies inside a root, is a symlink, or cannot be
+    /// resolved, so the abort goes to stderr only.
     pub loggable: bool,
 }
 
@@ -59,11 +60,12 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
             log.display()
         )));
     }
-    let outbox_check = check_root(outbox, "Outbox");
-    let archive_check = check_root(archive, "Archive");
-    // A root that failed its check is not looked at here: the abort then never creates a
-    // folder, so a log under a missing root stays unwritten whatever its spelling.
-    for root in [&outbox_check, &archive_check].into_iter().flatten() {
+    let outbox_identity = identify(outbox);
+    let archive_identity = identify(archive);
+    // Every root that exists counts, readable or not. A missing root is not looked at: the
+    // abort then never creates a folder, so a log under it stays unwritten whatever its
+    // spelling.
+    for root in [&outbox_identity, &archive_identity].into_iter().flatten() {
         if log_inside(log, root).map_err(unloggable)? {
             return Err(unloggable(format!(
                 "log {} is inside {}; move it out of the Outbox and Archive",
@@ -77,8 +79,8 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
         loggable: true,
     };
     let (outbox, archive) = (
-        outbox_check.map_err(loggable)?,
-        archive_check.map_err(loggable)?,
+        check_root(outbox, "Outbox", outbox_identity).map_err(loggable)?,
+        check_root(archive, "Archive", archive_identity).map_err(loggable)?,
     );
     // By (device, inode), so firmlinks and bind mounts can't hide an overlap.
     if outbox.is_within(archive.id()) || archive.is_within(outbox.id()) {
@@ -111,17 +113,23 @@ impl Root {
     }
 }
 
-/// Resolves a root, failing if it is missing, not a directory, or unreadable.
-fn check_root(path: &Path, label: &str) -> Result<Root, String> {
+/// Canonical path and lineage of an existing folder, whether or not it is readable.
+fn identify(path: &Path) -> io::Result<Root> {
+    let path = fs::canonicalize(path)?;
+    let lineage = lineage(&path)?;
+    Ok(Root { path, lineage })
+}
+
+/// Fails if the root is missing, not a directory, or unreadable; otherwise returns its
+/// `identity`.
+fn check_root(path: &Path, label: &str, identity: io::Result<Root>) -> Result<Root, String> {
     let root = format!("{label} {}", path.display());
     let meta = fs::metadata(path).map_err(|e| format!("{root} is not accessible: {e}"))?;
     if !meta.is_dir() {
         return Err(format!("{root} is not a directory"));
     }
     fs::read_dir(path).map_err(|e| format!("{root} is not readable: {e}"))?;
-    let path = fs::canonicalize(path).map_err(|e| format!("{root} cannot be resolved: {e}"))?;
-    let lineage = lineage(&path).map_err(|e| format!("{root} cannot be resolved: {e}"))?;
-    Ok(Root { path, lineage })
+    identity.map_err(|e| format!("{root} cannot be resolved: {e}"))
 }
 
 /// True when the log (or the nearest existing folder it would be created in) lies in `root`.
@@ -236,44 +244,35 @@ impl Pass<'_> {
         }
     }
 
-    /// Dry run: plans a claim's restore under the name the real run would pick (see
-    /// `put_back`), then plans the restored file like the scan would.
+    /// Dry run: plans a claim's restore under the name the real run would pick, then plans
+    /// the restored file like the scan would.
     fn plan_recovery(&mut self, claim_rel: &Path, original_rel: &Path) {
         let claim = self.outbox.join(claim_rel);
-        let claim_meta = match fs::symlink_metadata(&claim) {
-            Ok(meta) => meta,
+        let target = fs::symlink_metadata(&claim).and_then(|claim_meta| {
+            restore_target(
+                self.outbox,
+                &claim_meta,
+                original_rel,
+                &self.planned_restores,
+            )
+        });
+        let (target, redundant) = match target {
+            Ok(found) => found,
             Err(e) => {
                 self.fail(Action::RestoreClaim, claim_rel, None, e);
                 return;
             }
         };
-        for candidate in candidates(original_rel) {
-            if self.planned_restores.contains(&candidate) {
-                continue;
-            }
-            // A claim that is a second link of an existing name is dropped; the scan then
-            // plans that file under its own name.
-            let redundant = match fs::symlink_metadata(self.outbox.join(&candidate)) {
-                Err(e) if e.kind() == ErrorKind::NotFound => false,
-                Ok(existing) if is_same(&existing, &claim_meta) => true,
-                Ok(_) => continue,
-                Err(e) => {
-                    self.fail(Action::RestoreClaim, claim_rel, Some(&candidate), e);
-                    return;
-                }
-            };
-            self.journal.record(
-                Action::RestoreClaim,
-                claim_rel,
-                Some(&candidate),
-                Outcome::Planned,
-            );
-            let removed = redundant || self.visit_file_at(&candidate, &claim);
-            self.planned_restores.insert(candidate);
-            self.planned_claims.insert(claim_rel.to_path_buf(), removed);
-            return;
-        }
-        unreachable!("{ENDLESS}")
+        self.journal.record(
+            Action::RestoreClaim,
+            claim_rel,
+            Some(&target),
+            Outcome::Planned,
+        );
+        // A redundant claim is just dropped; the scan plans the file under its own name.
+        let removed = redundant || self.visit_file_at(&target, &claim);
+        self.planned_restores.insert(target);
+        self.planned_claims.insert(claim_rel.to_path_buf(), removed);
     }
 
     /// Processes a folder (relative to the Outbox); returns true when it ends up empty.
@@ -679,32 +678,56 @@ fn discard_temp(temp: &Path, error: impl Display) -> String {
     }
 }
 
-/// See [`Pass::restore_claim`]; returns the name the file got back.
-fn put_back(outbox: &Path, claim_rel: &Path, original_rel: &Path) -> Result<PathBuf, String> {
-    let claim = outbox.join(claim_rel);
-    for target in candidates(original_rel) {
-        let dest = outbox.join(&target);
-        let redundant = match rename_noreplace(&claim, &dest) {
-            Ok(()) => return Ok(target),
-            Err(RenameError::BothLinked(_)) => true,
-            // An earlier run's fallback left the claim as a second link of the original.
-            Err(RenameError::Failed(e)) if e.kind() == ErrorKind::AlreadyExists => {
-                same_file(&claim, &dest)
-                    .map_err(|e| format!("cannot compare with {}: {e}", target.display()))?
-            }
-            Err(RenameError::Failed(e)) => return Err(e.to_string()),
-        };
-        if redundant {
-            return match fs::remove_file(&claim) {
-                Ok(()) => Ok(target),
-                Err(e) => Err(format!(
-                    "restored as {}, but cannot remove the claim link: {e}",
-                    target.display()
-                )),
-            };
+/// Where a claim goes back to: the first of `original_rel`, `name (1).ext`, … (skipping
+/// `taken`) that is free, or that already holds the claim's file, in which case the claim is
+/// a redundant second link (`true`). Shared by the restore and its dry-run plan.
+fn restore_target(
+    outbox: &Path,
+    claim_meta: &fs::Metadata,
+    original_rel: &Path,
+    taken: &HashSet<PathBuf>,
+) -> io::Result<(PathBuf, bool)> {
+    for candidate in candidates(original_rel) {
+        if taken.contains(&candidate) {
+            continue;
+        }
+        match fs::symlink_metadata(outbox.join(&candidate)) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok((candidate, false)),
+            Ok(existing) if is_same(&existing, claim_meta) => return Ok((candidate, true)),
+            Ok(_) => {}
+            Err(e) => return Err(e),
         }
     }
     unreachable!("{ENDLESS}")
+}
+
+/// See [`Pass::restore_claim`]; returns the name the file got back.
+fn put_back(outbox: &Path, claim_rel: &Path, original_rel: &Path) -> Result<PathBuf, String> {
+    let claim = outbox.join(claim_rel);
+    loop {
+        let (target, redundant) = fs::symlink_metadata(&claim)
+            .and_then(|claim_meta| {
+                restore_target(outbox, &claim_meta, original_rel, &HashSet::new())
+            })
+            .map_err(|e| e.to_string())?;
+        if !redundant {
+            match rename_noreplace(&claim, &outbox.join(&target)) {
+                Ok(()) => return Ok(target),
+                // Both names now hold the file: the claim link is dropped below.
+                Err(RenameError::BothLinked(_)) => {}
+                // Taken since it was checked: look again.
+                Err(RenameError::Failed(e)) if e.kind() == ErrorKind::AlreadyExists => continue,
+                Err(RenameError::Failed(e)) => return Err(e.to_string()),
+            }
+        }
+        return match fs::remove_file(&claim) {
+            Ok(()) => Ok(target),
+            Err(e) => Err(format!(
+                "restored as {}, but cannot remove the claim link: {e}",
+                target.display()
+            )),
+        };
+    }
 }
 
 /// Removes the claim only if it still hashes to `expected` (the Archive copy's digest) and
