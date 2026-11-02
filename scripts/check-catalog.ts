@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Result, Schema } from "effect";
 
-const Dependencies = Schema.optionalKey(Schema.Record(Schema.String, Schema.String));
+const StringMap = Schema.optionalKey(Schema.Record(Schema.String, Schema.String));
 
 /** The package.json fields the catalog policy reads; other fields pass through unchecked. */
 const Manifest = Schema.Struct({
@@ -17,14 +17,13 @@ const Manifest = Schema.Struct({
       }),
     ]),
   ),
-  catalog: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  catalog: StringMap,
   catalogs: Schema.optionalKey(Schema.Unknown),
-  dependencies: Dependencies,
-  devDependencies: Dependencies,
-  optionalDependencies: Dependencies,
-  peerDependencies: Dependencies,
+  dependencies: StringMap,
+  devDependencies: StringMap,
+  optionalDependencies: StringMap,
+  peerDependencies: StringMap,
 });
-type Manifest = typeof Manifest.Type;
 const decodeManifest = Schema.decodeUnknownSync(Manifest);
 const decodeManifestResult = Schema.decodeUnknownResult(Manifest);
 
@@ -64,11 +63,7 @@ export function catalogViolations(root: ManifestFile, packages: readonly Manifes
   const { catalog = {}, catalogs, workspaces } = decodedRoot.manifest;
   if (!decodedRoot.manifest.catalog) failures.push(`${root.path}: missing top-level "catalog"`);
   if (catalogs !== undefined) failures.push(`${root.path}: named "catalogs" are not used`);
-  if (
-    workspaces &&
-    "packages" in workspaces &&
-    ("catalog" in workspaces || "catalogs" in workspaces)
-  ) {
+  if (workspaces && ("catalog" in workspaces || "catalogs" in workspaces)) {
     failures.push(`${root.path}: catalog must be top-level, not nested under "workspaces"`);
   }
   for (const [name, version] of Object.entries(catalog)) {

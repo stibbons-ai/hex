@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { startServer } from "./index";
 
 const DEFAULT_PORT = 4111;
@@ -14,7 +14,7 @@ function parsePort(value: string | undefined): number {
 
 const server = await startServer({
   // The data directory: HEX_DATA_DIR, else ./.data (git-ignored); empty counts as unset.
-  databasePath: join(resolve(process.env.HEX_DATA_DIR || ".data"), "mastra.db"),
+  databasePath: resolve(process.env.HEX_DATA_DIR || ".data", "mastra.db"),
   port: parsePort(process.env.HEX_PORT),
 });
 console.log(`hex listening on ${server.url}`);
