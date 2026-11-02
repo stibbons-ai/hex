@@ -57,9 +57,9 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
             log.display()
         )));
     }
-    let outbox = (outbox, check_root(outbox, "Outbox"));
-    let archive = (archive, check_root(archive, "Archive"));
-    for (configured, checked) in [&outbox, &archive] {
+    let outbox_check = check_root(outbox, "Outbox");
+    let archive_check = check_root(archive, "Archive");
+    for (configured, checked) in [(outbox, &outbox_check), (archive, &archive_check)] {
         match checked {
             Ok(root) if log_inside(log, root).map_err(unloggable)? => {
                 return Err(unloggable(format!(
@@ -83,7 +83,10 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
         reason,
         loggable: true,
     };
-    let (outbox, archive) = (outbox.1.map_err(loggable)?, archive.1.map_err(loggable)?);
+    let (outbox, archive) = (
+        outbox_check.map_err(loggable)?,
+        archive_check.map_err(loggable)?,
+    );
     // By (device, inode), so firmlinks and bind mounts can't hide an overlap.
     if outbox.is_within(archive.id()) || archive.is_within(outbox.id()) {
         return Err(loggable(format!(
@@ -549,7 +552,7 @@ impl Pass<'_> {
         let dir = target.parent().ok_or("target has no parent folder")?;
         create_dir_all_durable(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let (temp, source_digest) = self
-            .write_temp(rel, source, target)
+            .write_temp(rel, source, dir, target)
             .map_err(|e| format!("copy failed: {e}"))?;
         match rename_noreplace(&temp, target) {
             Ok(()) => {}
@@ -575,16 +578,16 @@ impl Pass<'_> {
         Ok(target_digest)
     }
 
-    /// Copies `source` into a new `.hex-sync-<n>.tmp` beside `target` (lowest `n` not taken
-    /// and not `target` itself), synced to disk; returns its path and the digest of the
-    /// bytes read. Temps already there are logged as `stale-temp` and left alone.
+    /// Copies `source` into a new `.hex-sync-<n>.tmp` in `dir` (lowest `n` not taken and not
+    /// `target` itself), synced to disk; returns its path and the digest of the bytes read.
+    /// Temps already there are logged as `stale-temp` and left alone.
     fn write_temp(
         &mut self,
         rel: &Path,
         source: &Path,
+        dir: &Path,
         target: &Path,
     ) -> io::Result<(PathBuf, Digest256)> {
-        let dir = target.parent().unwrap_or(self.archive);
         let mut input = fs::File::open(source)?;
         for n in 0u32.. {
             let temp = dir.join(format!("{TEMP_PREFIX}{n}.tmp"));

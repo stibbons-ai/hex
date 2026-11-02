@@ -117,15 +117,12 @@ impl Journal {
         let action = action.as_str();
         let path = path.display();
         let Some(log) = self.log.as_mut() else {
-            let target = target.map(|t| format!(" -> {}", t.display()));
+            let target = target.map_or(String::new(), |t| format!(" -> {}", t.display()));
             let outcome = match outcome {
                 Outcome::Planned => String::new(),
                 other => format!(" [{other}]"),
             };
-            let line = format!(
-                "dry-run: {action} {path}{}{outcome}\n",
-                target.unwrap_or_default()
-            );
+            let line = format!("dry-run: {action} {path}{target}{outcome}\n");
             if io::stdout().write_all(line.as_bytes()).is_err() {
                 self.write_failed = true;
             }

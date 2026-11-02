@@ -95,12 +95,12 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
         &mut journal,
     );
     if journal.write_failed() {
-        let output = if args.dry_run {
-            "the plan to stdout".to_string()
+        if args.dry_run {
+            eprintln!("hex-sync: stopped early: cannot write the plan to stdout");
         } else {
-            format!("log {}", config.log.display())
-        };
-        eprintln!("hex-sync: stopped early: cannot write {output}");
+            let log = config.log.display();
+            eprintln!("hex-sync: stopped early: cannot write log {log}");
+        }
         return Ok(ExitCode::FAILURE);
     }
     if failures > 0 {
