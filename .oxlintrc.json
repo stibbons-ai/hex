@@ -1,0 +1,49 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "regex": "(^|[/\\\\])@mastra[/\\\\][^/\\\\]+([/\\\\][^/\\\\]+)*[/\\\\]ee([/\\\\]|$)",
+            "message": "Mastra enterprise (ee) modules are not permitted; use Apache-2.0 community APIs."
+          },
+          {
+            "regex": "(^|[/\\\\])ee([/\\\\]|$)",
+            "message": "Enterprise ee entrypoints, including relative and deep imports, are prohibited."
+          },
+          {
+            "regex": "^@mastra/(server|hono)($|/)",
+            "message": "@mastra/server (also behind @mastra/hono) loads Mastra enterprise ee code; serve through the oRPC API instead (ADR 0004)."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["packages/domain/**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "regex": "(^|[/\\\\])ee([/\\\\]|$)",
+                "message": "Enterprise ee entrypoints are prohibited."
+              },
+              {
+                "regex": "^(@mastra/|@libsql/|libsql($|/)|hono($|/)|@orpc/|node:|bun($|:)|@hex/(adapters|server|eval-harness)($|/))",
+                "message": "The domain package is pure Effect, not infrastructure."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
