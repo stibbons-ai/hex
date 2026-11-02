@@ -21,7 +21,10 @@ pub enum Action {
     SkipSymlink,
     SkipSpecial,
     /// The mtime is in the future or unreadable, so the age cannot be judged.
-    SkipFutureMtime,
+    SkipBadMtime,
+    /// A `.hex-sync-<n>.tmp` already in the Archive (left by a crash, or another run's);
+    /// never deleted.
+    StaleTemp,
     ReadDir,
     Stat,
     Plan,
@@ -39,7 +42,8 @@ impl Action {
             Self::Rmdir => "rmdir",
             Self::SkipSymlink => "skip-symlink",
             Self::SkipSpecial => "skip-special",
-            Self::SkipFutureMtime => "skip-future-mtime",
+            Self::SkipBadMtime => "skip-bad-mtime",
+            Self::StaleTemp => "stale-temp",
             Self::ReadDir => "read-dir",
             Self::Stat => "stat",
             Self::Plan => "plan",
@@ -100,7 +104,8 @@ impl Journal {
         self.log.is_none()
     }
 
-    /// True once a log line could not be written; the pass must then stop and exit non-zero.
+    /// True once a line could not be written (the log, or stdout on a dry run); the pass
+    /// must then stop and exit non-zero.
     pub fn write_failed(&self) -> bool {
         self.write_failed
     }
@@ -112,14 +117,18 @@ impl Journal {
         let action = action.as_str();
         let path = path.display();
         let Some(log) = self.log.as_mut() else {
-            let _ = match target {
-                Some(target) => writeln!(
-                    io::stdout(),
-                    "dry-run: {action} {path} -> {}",
-                    target.display()
-                ),
-                None => writeln!(io::stdout(), "dry-run: {action} {path}"),
+            let target = target.map(|t| format!(" -> {}", t.display()));
+            let outcome = match outcome {
+                Outcome::Planned => String::new(),
+                other => format!(" [{other}]"),
             };
+            let line = format!(
+                "dry-run: {action} {path}{}{outcome}\n",
+                target.unwrap_or_default()
+            );
+            if io::stdout().write_all(line.as_bytes()).is_err() {
+                self.write_failed = true;
+            }
             return;
         };
         let timestamp = humantime::format_rfc3339_seconds(SystemTime::now());
@@ -127,7 +136,8 @@ impl Journal {
         let line = format!("{timestamp}\t{action}\t{path}\t{target}\t{outcome}\n");
         // One write per line, so an append never interleaves half lines.
         if let Err(e) = log.write_all(line.as_bytes()) {
-            let _ = writeln!(io::stderr(), "hex-sync: cannot write log: {e}");
+            // stdout may be /dev/null under a scheduler: keep the lost line on stderr.
+            let _ = write!(io::stderr(), "hex-sync: cannot write log: {e}: {line}");
             self.write_failed = true;
         }
         let _ = io::stdout().write_all(line.as_bytes());

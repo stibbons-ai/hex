@@ -1,5 +1,6 @@
 //! Filesystem primitives the sync relies on for its safety guarantees.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read};
 use std::os::unix::fs::MetadataExt;
@@ -11,7 +12,7 @@ const BUFFER_SIZE: usize = 64 * 1024;
 
 pub type Digest256 = sha2::digest::Output<Sha256>;
 
-/// (device, inode): identifies a file or directory regardless of the path used to reach it
+/// (device, inode): identifies a file or folder regardless of the path used to reach it
 /// (symlinks, macOS firmlinks, bind mounts).
 pub type FileId = (u64, u64);
 
@@ -22,6 +23,13 @@ pub fn file_id(meta: &fs::Metadata) -> FileId {
 /// True when both paths name the same inode (symlinks not followed).
 pub fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
     Ok(file_id(&fs::symlink_metadata(a)?) == file_id(&fs::symlink_metadata(b)?))
+}
+
+/// Identities of `path` and all its ancestors, `path` first (symlinks followed).
+pub fn lineage(path: &Path) -> io::Result<Vec<FileId>> {
+    path.ancestors()
+        .map(|p| fs::metadata(p).map(|m| file_id(&m)))
+        .collect()
 }
 
 pub fn hash_file(path: &Path) -> io::Result<Digest256> {
@@ -48,28 +56,69 @@ pub fn hash_stream(
     }
 }
 
-/// Flushes a directory's entries (a rename or link inside it) to stable storage.
+/// Flushes a folder's entries (a rename or link inside it) to stable storage.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// `create_dir_all`, then syncs the parent of every folder it created, so the new folders
+/// survive a crash along with whatever is placed in them.
+pub fn create_dir_all_durable(dir: &Path) -> io::Result<()> {
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|p| fs::symlink_metadata(p).is_err())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// How [`rename_noreplace`] failed.
+#[derive(Debug)]
+pub enum RenameError {
+    /// Nothing changed.
+    Failed(io::Error),
+    /// The fallback linked the file under the new name but could not remove the old one:
+    /// both names now hold the same file.
+    BothLinked(io::Error),
+}
+
+impl fmt::Display for RenameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(e) => write!(f, "{e}"),
+            Self::BothLinked(e) => write!(
+                f,
+                "linked under the new name, but the old name could not be removed: {e}"
+            ),
+        }
+    }
 }
 
 /// Atomic rename that fails with `AlreadyExists` instead of replacing `to`.
 ///
 /// Where the filesystem lacks an exclusive rename it falls back to `hard_link` (which also
-/// refuses to replace) plus removing `from`. If only that removal fails, the error is
-/// returned with both names still linked to the same file; callers check with `same_file`.
-pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+/// refuses to replace) plus removing `from`.
+pub fn rename_noreplace(from: &Path, to: &Path) -> Result<(), RenameError> {
     match rename_exclusive(from, to) {
+        Ok(()) => Ok(()),
         Err(e)
             if matches!(
                 e.raw_os_error(),
                 Some(libc::EINVAL | libc::ENOTSUP | libc::ENOSYS)
             ) =>
         {
-            fs::hard_link(from, to)?;
-            fs::remove_file(from)
+            fs::hard_link(from, to).map_err(RenameError::Failed)?;
+            fs::remove_file(from).map_err(RenameError::BothLinked)
         }
-        other => other,
+        Err(e) => Err(RenameError::Failed(e)),
     }
 }
 

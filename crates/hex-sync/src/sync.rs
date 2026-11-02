@@ -6,9 +6,10 @@
 //! - a source is first renamed to a private claim name (`.hex-sync.<name>`) in its own
 //!   folder, so a file that replaces it mid-run is never touched; the claim is removed only
 //!   after it was re-hashed equal to a regular Archive file that is not the claim itself, and
-//!   restored to its name on any failure. Claims left by a crash are restored before the scan.
+//!   whose folder entry was synced to disk; on any failure it is restored to its name.
+//!   Claims left by a crash are restored before the scan.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::fs::{self, OpenOptions};
@@ -18,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::fsio::{
-    Digest256, FileId, file_id, hash_file, hash_stream, rename_noreplace, same_file, sync_dir,
+    Digest256, FileId, RenameError, create_dir_all_durable, file_id, hash_file, hash_stream,
+    lineage, rename_noreplace, same_file, sync_dir,
 };
 use crate::journal::{Action, Journal, Outcome};
 
@@ -27,11 +29,13 @@ const PARTIAL_SUFFIX: &[u8] = b".partial";
 const CLAIM_PREFIX: &str = ".hex-sync.";
 /// Temp files in the Archive are `.hex-sync-<n>.tmp`.
 const TEMP_PREFIX: &str = ".hex-sync-";
+const SAME_FILE: &str = "source and Archive file are the same file";
 
 /// Why a run stopped before touching anything.
 pub struct Abort {
     pub reason: String,
-    /// False when the log itself is misplaced, so the abort must not be written to it.
+    /// False when writing the abort to the log would itself touch a root (or follow a
+    /// symlinked log), so it goes to stderr only.
     pub loggable: bool,
 }
 
@@ -43,30 +47,45 @@ pub struct Roots {
 
 /// Checks both roots and the log location before any action.
 pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, Abort> {
-    let outbox = check_root(outbox, "Outbox");
-    let archive = check_root(archive, "Archive");
-    for root in [&outbox, &archive].into_iter().flatten() {
-        if log_inside(log, root).map_err(|reason| Abort {
-            reason,
-            loggable: false,
-        })? {
-            return Err(Abort {
-                reason: format!(
+    let unloggable = |reason| Abort {
+        reason,
+        loggable: false,
+    };
+    if fs::symlink_metadata(log).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(unloggable(format!(
+            "log {} is a symlink; point the config at its target",
+            log.display()
+        )));
+    }
+    let outbox = (outbox, check_root(outbox, "Outbox"));
+    let archive = (archive, check_root(archive, "Archive"));
+    for (configured, checked) in [&outbox, &archive] {
+        match checked {
+            Ok(root) if log_inside(log, root).map_err(unloggable)? => {
+                return Err(unloggable(format!(
                     "log {} is inside {}; move it out of the Outbox and Archive",
                     log.display(),
-                    root.path.display()
-                ),
-                loggable: false,
-            });
+                    configured.display()
+                )));
+            }
+            Ok(_) => {}
+            // A missing root may be an unmounted volume: opening a log under it would
+            // create the root.
+            Err(reason) if log.starts_with(configured) => {
+                return Err(unloggable(format!(
+                    "{reason} (not logged: the log is inside it)"
+                )));
+            }
+            Err(_) => {}
         }
     }
     let loggable = |reason| Abort {
         reason,
         loggable: true,
     };
-    let (outbox, archive) = (outbox.map_err(loggable)?, archive.map_err(loggable)?);
+    let (outbox, archive) = (outbox.1.map_err(loggable)?, archive.1.map_err(loggable)?);
     // By (device, inode), so firmlinks and bind mounts can't hide an overlap.
-    if outbox.chain.contains(&archive.chain[0]) || archive.chain.contains(&outbox.chain[0]) {
+    if outbox.is_within(archive.id()) || archive.is_within(outbox.id()) {
         return Err(loggable(format!(
             "Outbox {} and Archive {} overlap",
             outbox.path.display(),
@@ -82,7 +101,18 @@ pub fn check_roots(outbox: &Path, archive: &Path, log: &Path) -> Result<Roots, A
 struct Root {
     path: PathBuf,
     /// Identities of the folder and all its ancestors, the folder first.
-    chain: Vec<FileId>,
+    lineage: Vec<FileId>,
+}
+
+impl Root {
+    fn id(&self) -> FileId {
+        self.lineage[0]
+    }
+
+    /// True when this root is the folder `id` or lies inside it.
+    fn is_within(&self, id: FileId) -> bool {
+        self.lineage.contains(&id)
+    }
 }
 
 /// Resolves a root, failing if it is missing, not a directory, or unreadable.
@@ -94,14 +124,8 @@ fn check_root(path: &Path, label: &str) -> Result<Root, String> {
     }
     fs::read_dir(path).map_err(|e| format!("{root} is not readable: {e}"))?;
     let path = fs::canonicalize(path).map_err(|e| format!("{root} cannot be resolved: {e}"))?;
-    let chain = identity_chain(&path).map_err(|e| format!("{root} cannot be resolved: {e}"))?;
-    Ok(Root { path, chain })
-}
-
-fn identity_chain(path: &Path) -> io::Result<Vec<FileId>> {
-    path.ancestors()
-        .map(|p| fs::metadata(p).map(|m| file_id(&m)))
-        .collect()
+    let lineage = lineage(&path).map_err(|e| format!("{root} cannot be resolved: {e}"))?;
+    Ok(Root { path, lineage })
 }
 
 /// True when the log (or the nearest existing folder it would be created in) lies in `root`.
@@ -109,10 +133,10 @@ fn log_inside(log: &Path, root: &Root) -> Result<bool, String> {
     let Some(existing) = log.ancestors().find(|p| fs::metadata(p).is_ok()) else {
         return Ok(false);
     };
-    let chain = fs::canonicalize(existing)
-        .and_then(|p| identity_chain(&p))
+    let log_lineage = fs::canonicalize(existing)
+        .and_then(|p| lineage(&p))
         .map_err(|e| format!("log {} cannot be resolved: {e}", log.display()))?;
-    Ok(chain.contains(&root.chain[0]))
+    Ok(log_lineage.contains(&root.id()))
 }
 
 /// Runs one pass; returns the number of files or folders that could not be handled.
@@ -125,6 +149,8 @@ pub fn run(roots: &Roots, min_age: Duration, journal: &mut Journal) -> usize {
         journal,
         failures: 0,
         planned: HashSet::new(),
+        planned_restores: HashSet::new(),
+        planned_claims: HashMap::new(),
     };
     pass.recover_claims(Path::new(""));
     pass.visit_dir(Path::new(""));
@@ -138,9 +164,13 @@ struct Pass<'a> {
     now: SystemTime,
     journal: &'a mut Journal,
     failures: usize,
-    /// Archive paths a dry run has planned to create, so later plans avoid them like a
-    /// real run would.
+    /// Dry run: Archive paths planned to be created, so later plans avoid them like a real
+    /// run would.
     planned: HashSet<PathBuf>,
+    /// Dry run: Outbox names claims are planned to be restored to.
+    planned_restores: HashSet<PathBuf>,
+    /// Dry run: claim (relative path) → whether its restored file would leave the Outbox.
+    planned_claims: HashMap<PathBuf, bool>,
 }
 
 /// Where a source file goes in the Archive.
@@ -200,12 +230,37 @@ impl Pass<'_> {
                 Ok(t) if t.is_file() => {
                     if let Some(original) = claimed_name(&entry.file_name()) {
                         let original = rel.join(original);
-                        self.restore_claim(&child, &original);
+                        if self.journal.is_dry_run() {
+                            self.plan_recovery(&child, &original);
+                        } else {
+                            self.restore_claim(&child, &original);
+                        }
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Dry run: plans a claim's restore under the name the real run would pick, then plans
+    /// the restored file like the scan would.
+    fn plan_recovery(&mut self, claim_rel: &Path, original_rel: &Path) {
+        let restored = candidates(original_rel)
+            .find(|c| {
+                !self.planned_restores.contains(c)
+                    && fs::symlink_metadata(self.outbox.join(c))
+                        .is_err_and(|e| e.kind() == ErrorKind::NotFound)
+            })
+            .expect("an unbounded candidate list always has a free name");
+        self.journal.record(
+            Action::RestoreClaim,
+            claim_rel,
+            Some(&restored),
+            Outcome::Planned,
+        );
+        let removed = self.visit_file_at(&restored, &self.outbox.join(claim_rel));
+        self.planned_restores.insert(restored);
+        self.planned_claims.insert(claim_rel.to_path_buf(), removed);
     }
 
     /// Processes a folder (relative to the Outbox); returns true when it ends up empty.
@@ -240,7 +295,11 @@ impl Pass<'_> {
                     false
                 }
                 Ok(t) if t.is_dir() => self.visit_dir(&child) && self.remove_empty_dir(&child),
-                Ok(t) if t.is_file() => self.visit_file(&child),
+                Ok(t) if t.is_file() => match self.planned_claims.get(&child) {
+                    // Dry run: already planned by `plan_recovery`.
+                    Some(&removed) => removed,
+                    None => self.visit_file_at(&child, &self.outbox.join(&child)),
+                },
                 Ok(_) => {
                     self.journal
                         .record(Action::SkipSpecial, &child, None, Outcome::Skipped);
@@ -280,16 +339,17 @@ impl Pass<'_> {
         }
     }
 
-    /// Processes one regular file; returns true when the source is removed (or would be).
-    fn visit_file(&mut self, rel: &Path) -> bool {
+    /// Processes the regular file at `source`, known in the Outbox as `rel` (on a dry run a
+    /// claim's file under its restored name); returns true when the source is removed (or
+    /// would be).
+    fn visit_file_at(&mut self, rel: &Path, source: &Path) -> bool {
         let Some(name) = rel.file_name() else {
             return false;
         };
         if name.as_bytes().ends_with(PARTIAL_SUFFIX) || claimed_name(name).is_some() {
             return false;
         }
-        let source = self.outbox.join(rel);
-        let meta = match fs::symlink_metadata(&source) {
+        let meta = match fs::symlink_metadata(source) {
             Ok(meta) => meta,
             Err(e) => {
                 self.fail(Action::Stat, rel, None, e);
@@ -301,7 +361,7 @@ impl Pass<'_> {
             Age::Young => return false,
             Age::Unknown => {
                 self.journal
-                    .record(Action::SkipFutureMtime, rel, None, Outcome::Skipped);
+                    .record(Action::SkipBadMtime, rel, None, Outcome::Skipped);
                 return false;
             }
         }
@@ -310,24 +370,41 @@ impl Pass<'_> {
             return false;
         }
         if self.journal.is_dry_run() {
-            return self.plan_only(rel, &source, &meta);
+            return self.plan_only(rel, source, &meta);
         }
 
         let claim_rel = rel.with_file_name(claim_name(name));
         let claim = self.outbox.join(&claim_rel);
-        if let Err(e) = rename_noreplace(&source, &claim) {
+        if let Err(e) = rename_noreplace(source, &claim) {
+            let both_linked = matches!(e, RenameError::BothLinked(_));
             self.fail(Action::Claim, rel, None, e);
-            if fs::symlink_metadata(&claim).is_ok() {
-                // The hard-link fallback linked the claim but kept the source name.
-                self.restore_claim(&claim_rel, rel);
+            if both_linked && same_file(source, &claim).unwrap_or(false) {
+                // The claim is a second link to the source, which keeps the bytes.
+                if let Err(e) = fs::remove_file(&claim) {
+                    self.fail(Action::Claim, &claim_rel, None, e);
+                }
             }
             return false;
         }
+        // Whatever was renamed must be the regular file that was scanned.
+        match fs::symlink_metadata(&claim) {
+            Ok(claimed) if claimed.is_file() && file_id(&claimed) == file_id(&meta) => {}
+            _ => {
+                self.fail(
+                    Action::Claim,
+                    rel,
+                    None,
+                    "source changed before it was claimed",
+                );
+                self.restore_claim(&claim_rel, rel);
+                return false;
+            }
+        }
         let (action, target, result) = match self.plan(rel, &claim, &meta) {
             Ok(plan) => {
-                let target = plan.target(rel);
-                let result = self.execute(&plan, target, &claim);
-                (plan.action(), Some(target.to_path_buf()), result)
+                let target = plan.target(rel).to_path_buf();
+                let result = self.execute(&plan, rel, &target, &claim);
+                (plan.action(), Some(target), result)
             }
             Err(e) => (Action::Plan, None, Err(e)),
         };
@@ -363,10 +440,8 @@ impl Pass<'_> {
         }
     }
 
+    /// A future or unreadable mtime is never old enough, whatever `min_age_secs` says.
     fn age(&self, meta: &fs::Metadata) -> Age {
-        if self.min_age.is_zero() {
-            return Age::Old;
-        }
         let Some(age) = meta
             .modified()
             .ok()
@@ -402,10 +477,9 @@ impl Pass<'_> {
     /// Decides where `file` (the source or its claim, described by `meta`) goes.
     fn plan(&self, rel: &Path, file: &Path, meta: &fs::Metadata) -> Result<Plan, String> {
         let mut file_digest = None;
-        let mut candidate = rel.to_path_buf();
-        for n in 1u32.. {
+        for (n, candidate) in candidates(rel).enumerate() {
             match self.archive_entry(&candidate).map_err(|e| e.to_string())? {
-                ArchiveEntry::Absent if n == 1 => return Ok(Plan::Copy),
+                ArchiveEntry::Absent if n == 0 => return Ok(Plan::Copy),
                 ArchiveEntry::Absent => return Ok(Plan::CopyRenamed(candidate)),
                 ArchiveEntry::Planned => {}
                 // Only a regular file can count as identical; never follow an Archive symlink.
@@ -430,9 +504,8 @@ impl Pass<'_> {
                 }
                 ArchiveEntry::Present(_) => {}
             }
-            candidate = with_suffix(rel, n);
         }
-        unreachable!("u32 range exhausted looking for a free name")
+        unreachable!("an unbounded candidate list always ends in a free name")
     }
 
     fn archive_entry(&self, rel: &Path) -> io::Result<ArchiveEntry> {
@@ -446,28 +519,110 @@ impl Pass<'_> {
         }
     }
 
-    /// Carries out a plan for a claimed source: copy if needed, then remove the claim.
-    fn execute(&self, plan: &Plan, target_rel: &Path, claim: &Path) -> Result<(), String> {
+    /// Carries out a plan for a claimed source: copy if needed, make the Archive entry
+    /// durable, then remove the claim.
+    fn execute(
+        &mut self,
+        plan: &Plan,
+        rel: &Path,
+        target_rel: &Path,
+        claim: &Path,
+    ) -> Result<(), String> {
         let target = self.archive.join(target_rel);
         let digest = match plan {
             Plan::Identical { digest, .. } => *digest,
-            Plan::Copy | Plan::CopyRenamed(_) => copy_verified(claim, &target)?,
+            Plan::Copy | Plan::CopyRenamed(_) => self.copy_verified(rel, claim, &target)?,
         };
+        let dir = target.parent().ok_or("target has no parent folder")?;
+        sync_dir(dir).map_err(|e| format!("cannot sync {}: {e}", dir.display()))?;
         remove_claim(claim, &target, &digest)
+    }
+
+    /// Copies `source` to `target` without ever exposing a partial file under `target` or
+    /// replacing an existing one, then re-reads `target` and returns its digest.
+    fn copy_verified(
+        &mut self,
+        rel: &Path,
+        source: &Path,
+        target: &Path,
+    ) -> Result<Digest256, String> {
+        let dir = target.parent().ok_or("target has no parent folder")?;
+        create_dir_all_durable(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let (temp, source_digest) = self
+            .write_temp(rel, source, target)
+            .map_err(|e| format!("copy failed: {e}"))?;
+        match rename_noreplace(&temp, target) {
+            Ok(()) => {}
+            Err(e @ RenameError::BothLinked(_)) => {
+                return Err(format!(
+                    "Archive copy placed, but temp {} left: {e}",
+                    temp.display()
+                ));
+            }
+            // `write_temp` created this temp file, so removing it touches nothing else.
+            Err(RenameError::Failed(e)) => {
+                return Err(match fs::remove_file(&temp) {
+                    Ok(()) => format!("copy failed: {e}"),
+                    Err(re) => format!("copy failed: {e}; temp {} left: {re}", temp.display()),
+                });
+            }
+        }
+        let target_digest =
+            hash_file(target).map_err(|e| format!("cannot re-read Archive copy: {e}"))?;
+        if source_digest != target_digest {
+            return Err("verification failed: Archive copy differs from source".into());
+        }
+        Ok(target_digest)
+    }
+
+    /// Copies `source` into a new `.hex-sync-<n>.tmp` beside `target` (lowest `n` not taken
+    /// and not `target` itself), synced to disk; returns its path and the digest of the
+    /// bytes read. Temps already there are logged as `stale-temp` and left alone.
+    fn write_temp(
+        &mut self,
+        rel: &Path,
+        source: &Path,
+        target: &Path,
+    ) -> io::Result<(PathBuf, Digest256)> {
+        let dir = target.parent().unwrap_or(self.archive);
+        let mut input = fs::File::open(source)?;
+        for n in 0u32.. {
+            let temp = dir.join(format!("{TEMP_PREFIX}{n}.tmp"));
+            if temp == target {
+                continue;
+            }
+            let mut output = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(output) => output,
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    let stale = temp.strip_prefix(self.archive).unwrap_or(&temp);
+                    self.journal
+                        .record(Action::StaleTemp, rel, Some(stale), Outcome::Kept);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let written = hash_stream(&mut input, |chunk| output.write_all(chunk))
+                .and_then(|digest| output.sync_all().map(|()| digest));
+            return match written {
+                Ok(digest) => Ok((temp, digest)),
+                Err(e) => {
+                    // Created by this call above, so it is this run's own scratch file.
+                    if let Err(re) = fs::remove_file(&temp) {
+                        return Err(io::Error::other(format!(
+                            "{e}; temp {} left: {re}",
+                            temp.display()
+                        )));
+                    }
+                    Err(e)
+                }
+            };
+        }
+        unreachable!("u32 range exhausted looking for a free temp name")
     }
 
     /// Renames a claim back to `original_rel` without replacing anything; if that name was
     /// taken meanwhile, to the lowest free `name (n).ext` in the Outbox.
     fn restore_claim(&mut self, claim_rel: &Path, original_rel: &Path) {
-        if self.journal.is_dry_run() {
-            self.journal.record(
-                Action::RestoreClaim,
-                claim_rel,
-                Some(original_rel),
-                Outcome::Planned,
-            );
-            return;
-        }
         match put_back(self.outbox, claim_rel, original_rel) {
             Ok(restored) => self.journal.record(
                 Action::RestoreClaim,
@@ -486,8 +641,6 @@ impl Pass<'_> {
     }
 }
 
-const SAME_FILE: &str = "source and Archive file are the same file";
-
 fn claim_name(name: &OsStr) -> OsString {
     let mut claim = OsString::from(CLAIM_PREFIX);
     claim.push(name);
@@ -500,98 +653,45 @@ fn claimed_name(name: &OsStr) -> Option<&OsStr> {
     (!original.is_empty()).then(|| OsStr::from_bytes(original))
 }
 
-/// `name (n).ext`, or `name (n)` without an extension, in the same folder as `rel`.
-fn with_suffix(rel: &Path, n: u32) -> PathBuf {
-    let mut name = OsString::from(rel.file_stem().unwrap_or_default());
-    name.push(format!(" ({n})"));
-    if let Some(extension) = rel.extension() {
-        name.push(".");
-        name.push(extension);
-    }
-    rel.with_file_name(name)
+/// `rel`, then `name (1).ext`, `name (2).ext`, … (`name (n)` without an extension) in the
+/// same folder.
+fn candidates(rel: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    std::iter::once(rel.to_path_buf()).chain((1u32..).map(move |n| {
+        let mut name = OsString::from(rel.file_stem().unwrap_or_default());
+        name.push(format!(" ({n})"));
+        if let Some(extension) = rel.extension() {
+            name.push(".");
+            name.push(extension);
+        }
+        rel.with_file_name(name)
+    }))
 }
 
 /// See [`Pass::restore_claim`]; returns the name the file got back.
-fn put_back(outbox: &Path, claim_rel: &Path, original_rel: &Path) -> io::Result<PathBuf> {
+fn put_back(outbox: &Path, claim_rel: &Path, original_rel: &Path) -> Result<PathBuf, String> {
     let claim = outbox.join(claim_rel);
-    let mut target = original_rel.to_path_buf();
-    let mut n = 0;
-    loop {
+    for target in candidates(original_rel) {
         let dest = outbox.join(&target);
-        match rename_noreplace(&claim, &dest) {
+        let redundant = match rename_noreplace(&claim, &dest) {
             Ok(()) => return Ok(target),
-            // Both names hold the same file (a hard-link fallback that could not finish):
-            // the claim is a redundant link.
-            Err(_) if same_file(&claim, &dest).unwrap_or(false) => {
-                fs::remove_file(&claim)?;
-                return Ok(target);
+            Err(RenameError::BothLinked(_)) => true,
+            // An earlier run's fallback left the claim as a second link of the original.
+            Err(RenameError::Failed(e)) if e.kind() == ErrorKind::AlreadyExists => {
+                same_file(&claim, &dest).unwrap_or(false)
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                n += 1;
-                target = with_suffix(original_rel, n);
-            }
-            Err(e) => return Err(e),
+            Err(RenameError::Failed(e)) => return Err(e.to_string()),
+        };
+        if redundant {
+            return match fs::remove_file(&claim) {
+                Ok(()) => Ok(target),
+                Err(e) => Err(format!(
+                    "restored as {}, but cannot remove the claim link: {e}",
+                    target.display()
+                )),
+            };
         }
     }
-}
-
-/// Copies `source` to `target` without ever exposing a partial file under `target` or
-/// replacing an existing one, makes the new name durable, then re-reads `target` and
-/// returns its digest.
-fn copy_verified(source: &Path, target: &Path) -> Result<Digest256, String> {
-    let dir = target.parent().ok_or("target has no parent folder")?;
-    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let (temp, source_digest) = write_temp(source, dir).map_err(|e| format!("copy failed: {e}"))?;
-    if let Err(e) = rename_noreplace(&temp, target) {
-        if same_file(&temp, target).unwrap_or(false) {
-            return Err(format!(
-                "Archive copy placed, but temp link {} left: {e}",
-                temp.display()
-            ));
-        }
-        // `write_temp` created this temp file, so removing it touches nothing else.
-        return Err(match fs::remove_file(&temp) {
-            Ok(()) => format!("copy failed: {e}"),
-            Err(re) => format!("copy failed: {e}; temp {} left: {re}", temp.display()),
-        });
-    }
-    sync_dir(dir).map_err(|e| format!("cannot sync {}: {e}", dir.display()))?;
-    let target_digest =
-        hash_file(target).map_err(|e| format!("cannot re-read Archive copy: {e}"))?;
-    if source_digest != target_digest {
-        return Err("verification failed: Archive copy differs from source".into());
-    }
-    Ok(target_digest)
-}
-
-/// Copies `source` into a new `.hex-sync-<n>.tmp` in `dir` (lowest `n` not taken), synced
-/// to disk; returns its path and the digest of the bytes read.
-fn write_temp(source: &Path, dir: &Path) -> io::Result<(PathBuf, Digest256)> {
-    let mut input = fs::File::open(source)?;
-    for n in 0u32.. {
-        let temp = dir.join(format!("{TEMP_PREFIX}{n}.tmp"));
-        let mut output = match OpenOptions::new().write(true).create_new(true).open(&temp) {
-            Ok(output) => output,
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        let written = hash_stream(&mut input, |chunk| output.write_all(chunk))
-            .and_then(|digest| output.sync_all().map(|()| digest));
-        return match written {
-            Ok(digest) => Ok((temp, digest)),
-            Err(e) => {
-                // Created by this call above, so it is this run's own scratch file.
-                if let Err(re) = fs::remove_file(&temp) {
-                    return Err(io::Error::other(format!(
-                        "{e}; temp {} left: {re}",
-                        temp.display()
-                    )));
-                }
-                Err(e)
-            }
-        };
-    }
-    unreachable!("u32 range exhausted looking for a free temp name")
+    unreachable!("an unbounded candidate list always ends in a free name")
 }
 
 /// Removes the claim only if it still hashes to `expected` (the Archive copy's digest) and

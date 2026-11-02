@@ -61,9 +61,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Exit codes: 0 all done; 1 some files failed or the log could not be written (the pass
-/// stops at the first log failure); 2 nothing done (`Err`: config error, log cannot be
-/// opened or lies inside a root, or a root check failed).
+/// Exit codes: 0 all done; 1 some files failed, or a log line (on a dry run, a plan line)
+/// could not be written, which stops the pass; 2 nothing done (`Err`: config error, log
+/// cannot be opened, is a symlink or lies inside a root, or a root check failed).
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
     let aborted = |reason| format!("aborted, nothing touched: {reason}");
@@ -74,8 +74,13 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let mut journal = if args.dry_run {
         Journal::dry_run()
     } else {
-        Journal::open(&config.log)
-            .map_err(|e| format!("cannot open log {}: {e}", config.log.display()))?
+        Journal::open(&config.log).map_err(|e| {
+            let cannot_open = format!("cannot open log {}: {e}", config.log.display());
+            match &roots {
+                Err(abort) => aborted(format!("{}; {cannot_open}", abort.reason)),
+                Ok(_) => cannot_open,
+            }
+        })?
     };
     let roots = roots.map_err(|abort| {
         if !journal.is_dry_run() {
@@ -90,10 +95,12 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
         &mut journal,
     );
     if journal.write_failed() {
-        eprintln!(
-            "hex-sync: stopped early: cannot write log {}",
-            config.log.display()
-        );
+        let output = if args.dry_run {
+            "the plan to stdout".to_string()
+        } else {
+            format!("log {}", config.log.display())
+        };
+        eprintln!("hex-sync: stopped early: cannot write {output}");
         return Ok(ExitCode::FAILURE);
     }
     if failures > 0 {
