@@ -1,0 +1,37 @@
+name: hex-sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/hex-sync/**"
+      - ".github/workflows/hex-sync.yml"
+  pull_request:
+    paths:
+      - "crates/hex-sync/**"
+      - ".github/workflows/hex-sync.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: crates/hex-sync
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/hex-sync
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
