@@ -240,23 +240,23 @@ impl Pass<'_> {
     /// `put_back`), then plans the restored file like the scan would.
     fn plan_recovery(&mut self, claim_rel: &Path, original_rel: &Path) {
         let claim = self.outbox.join(claim_rel);
+        let claim_meta = match fs::symlink_metadata(&claim) {
+            Ok(meta) => meta,
+            Err(e) => {
+                self.fail(Action::RestoreClaim, claim_rel, None, e);
+                return;
+            }
+        };
         for candidate in candidates(original_rel) {
             if self.planned_restores.contains(&candidate) {
                 continue;
             }
-            let path = self.outbox.join(&candidate);
             // A claim that is a second link of an existing name is dropped; the scan then
             // plans that file under its own name.
-            let redundant = match fs::symlink_metadata(&path) {
+            let redundant = match fs::symlink_metadata(self.outbox.join(&candidate)) {
                 Err(e) if e.kind() == ErrorKind::NotFound => false,
-                Ok(_) => match same_file(&claim, &path) {
-                    Ok(true) => true,
-                    Ok(false) => continue,
-                    Err(e) => {
-                        self.fail(Action::RestoreClaim, claim_rel, Some(&candidate), e);
-                        return;
-                    }
-                },
+                Ok(existing) if is_same(&existing, &claim_meta) => true,
+                Ok(_) => continue,
                 Err(e) => {
                     self.fail(Action::RestoreClaim, claim_rel, Some(&candidate), e);
                     return;
@@ -409,16 +409,15 @@ impl Pass<'_> {
             return false;
         }
         // Whatever was renamed must be the regular file that was scanned.
-        let claimed = fs::symlink_metadata(&claim);
-        if !claimed
-            .as_ref()
-            .is_ok_and(|c| c.is_file() && is_same(c, &meta))
-        {
-            let detail = claimed.err().map(|e| format!(": {e}")).unwrap_or_default();
-            let error = format!("source changed before it was claimed{detail}");
-            self.fail(Action::Claim, rel, None, error);
-            self.restore_claim(&claim_rel, rel);
-            return false;
+        match fs::symlink_metadata(&claim) {
+            Ok(claimed) if claimed.is_file() && is_same(&claimed, &meta) => {}
+            claimed => {
+                let detail = claimed.err().map(|e| format!(": {e}")).unwrap_or_default();
+                let error = format!("source changed before it was claimed{detail}");
+                self.fail(Action::Claim, rel, None, error);
+                self.restore_claim(&claim_rel, rel);
+                return false;
+            }
         }
         let (action, target, result) = match self.plan(rel, &claim, &meta) {
             Ok(plan) => {
