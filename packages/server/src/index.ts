@@ -76,6 +76,7 @@ export async function startServer({
         }),
       ],
     });
+    const rpcOptions = { prefix: "/rpc", context: { mastra } } as const;
     // The bound port is known only after Bun.serve, so the check reads the set per request.
     let hosts = new Set<string>();
     const server = Bun.serve({
@@ -88,10 +89,7 @@ export async function startServer({
         if (request.method === "GET" && new URL(request.url).pathname === "/health") {
           return Response.json({ status: "ok" });
         }
-        const { matched, response } = await handler.handle(request, {
-          prefix: "/rpc",
-          context: { mastra },
-        });
+        const { matched, response } = await handler.handle(request, rpcOptions);
         return matched ? response : new Response("Not found", { status: 404 });
       },
     });

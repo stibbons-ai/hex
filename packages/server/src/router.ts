@@ -37,16 +37,8 @@ export const router = api.router({
     runs: api.workflows.runs.handler(async ({ context, input, errors }) => {
       const workflow = registeredWorkflow(context.mastra, input.workflowId);
       if (!workflow) throw errors.NOT_FOUND();
-      const { runs, total } = await workflow.listWorkflowRuns();
-      return {
-        total,
-        runs: runs.map(({ runId, workflowName, createdAt, updatedAt }) => ({
-          runId,
-          workflowName,
-          createdAt,
-          updatedAt,
-        })),
-      };
+      // The contract's output schema keeps only the fields it lists, so snapshots stay out.
+      return workflow.listWorkflowRuns();
     }),
   },
 });

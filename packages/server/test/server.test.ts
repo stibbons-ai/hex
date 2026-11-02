@@ -16,16 +16,25 @@ const lanAddress = Object.values(networkInterfaces())
   .find((address) => address && address.family === "IPv4" && !address.internal)?.address;
 
 const Message = toMastraSchema(Schema.Struct({ message: Schema.String }));
-const echo = createWorkflow({ id: "echo", inputSchema: Message, outputSchema: Message })
-  .then(
-    createStep({
-      id: "echo",
-      inputSchema: Message,
-      outputSchema: Message,
-      execute: async ({ inputData }) => inputData,
-    }),
-  )
-  .commit();
+
+/** A workflow with one step, both named `id`, from Message to Message. */
+function oneStep(
+  id: string,
+  execute: (input: typeof Message.Type) => Promise<typeof Message.Type>,
+) {
+  return createWorkflow({ id, inputSchema: Message, outputSchema: Message })
+    .then(
+      createStep({
+        id,
+        inputSchema: Message,
+        outputSchema: Message,
+        execute: ({ inputData }) => execute(inputData),
+      }),
+    )
+    .commit();
+}
+
+const echo = oneStep("echo", async (input) => input);
 
 /** The typed oRPC client a caller of the API uses. */
 function client(server: RunningServer, headers: Record<string, string> = {}) {
@@ -36,20 +45,11 @@ function client(server: RunningServer, headers: Record<string, string> = {}) {
 
 /** A one-step workflow whose step calls `entered`, then waits for `release`. */
 function gated(id: string, entered: () => void, release: Promise<void>) {
-  return createWorkflow({ id, inputSchema: Message, outputSchema: Message })
-    .then(
-      createStep({
-        id,
-        inputSchema: Message,
-        outputSchema: Message,
-        execute: async ({ inputData }) => {
-          entered();
-          await release;
-          return inputData;
-        },
-      }),
-    )
-    .commit();
+  return oneStep(id, async (input) => {
+    entered();
+    await release;
+    return input;
+  });
 }
 
 let directory: string;
@@ -141,27 +141,27 @@ describe("hex server", () => {
     });
   });
 
-  test.each(["/health", "/rpc/health"])(
-    "serves %s only to a loopback Host header",
-    async (path) => {
-      for (const host of [`127.0.0.1:${server.url.port}`, `localhost:${server.url.port}`]) {
-        expect(await client(server, { host }).health()).toEqual({ status: "ok" });
+  test.each([
+    ["/health", "GET"],
+    ["/rpc/health", "POST"],
+  ])("serves %s only to a loopback Host header", async (path, method) => {
+    const url = new URL(path, server.url);
+    for (const host of [`127.0.0.1:${server.url.port}`, `localhost:${server.url.port}`]) {
+      expect((await fetch(url, { method, headers: { host } })).status).toBe(200);
+    }
+    for (const host of [
+      "evil.example",
+      `evil.example:${server.url.port}`,
+      `0.0.0.0:${server.url.port}`,
+      `[::1]:${server.url.port}`,
+      "127.0.0.1:1",
+      "localhost",
+    ]) {
+      for (const verb of ["GET", "POST"]) {
+        expect((await fetch(url, { method: verb, headers: { host } })).status).toBe(403);
       }
-      const url = new URL(path, server.url);
-      for (const host of [
-        "evil.example",
-        `evil.example:${server.url.port}`,
-        `0.0.0.0:${server.url.port}`,
-        `[::1]:${server.url.port}`,
-        "127.0.0.1:1",
-        "localhost",
-      ]) {
-        for (const method of ["GET", "POST"]) {
-          expect((await fetch(url, { method, headers: { host } })).status).toBe(403);
-        }
-      }
-    },
-  );
+    }
+  });
 
   test.skipIf(lanAddress === undefined)(
     "refuses connections on a non-loopback address",
@@ -199,18 +199,9 @@ test("persists workflow runs through Mastra into the LibSQL file", async () => {
 });
 
 test("reports a failed run, and logs server faults but not caller errors", async () => {
-  const failing = createWorkflow({ id: "failing", inputSchema: Message, outputSchema: Message })
-    .then(
-      createStep({
-        id: "failing",
-        inputSchema: Message,
-        outputSchema: Message,
-        execute: async () => {
-          throw new Error("step broke");
-        },
-      }),
-    )
-    .commit();
+  const failing = oneStep("failing", async () => {
+    throw new Error("step broke");
+  });
   const server = await start({
     databasePath: join(directory, "faults", "mastra.db"),
     workflows: { failing },
