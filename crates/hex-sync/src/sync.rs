@@ -26,6 +26,12 @@ use crate::fsio::{
 use crate::journal::{Action, Journal, Outcome};
 
 const PARTIAL_SUFFIX: &[u8] = b".partial";
+/// Folder metadata written by Finder and Explorer; never a Document.
+const OS_METADATA_NAMES: [&[u8]; 2] = [b".DS_Store", b"Thumbs.db"];
+/// AppleDouble resource-fork companions written on non-HFS volumes: `._<name>`, starting
+/// with this magic number. The name alone is not enough, since a Document may start with `._`.
+const APPLE_DOUBLE_PREFIX: &[u8] = b"._";
+const APPLE_DOUBLE_MAGIC: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
 /// Prefix of a claimed source in the Outbox; the rest of the name is the original name.
 const CLAIM_PREFIX: &str = ".hex-sync.";
 /// Temp files in the Archive are `.hex-sync-<n>.tmp`.
@@ -358,7 +364,7 @@ impl Pass<'_> {
         let Some(name) = rel.file_name() else {
             return false;
         };
-        if name.as_bytes().ends_with(PARTIAL_SUFFIX) || claimed_name(name).is_some() {
+        if is_ignored(name) || claimed_name(name).is_some() {
             return false;
         }
         let meta = match fs::symlink_metadata(source) {
@@ -368,6 +374,9 @@ impl Pass<'_> {
                 return false;
             }
         };
+        if name.as_bytes().starts_with(APPLE_DOUBLE_PREFIX) && is_apple_double(source) {
+            return false;
+        }
         match self.age(&meta) {
             Age::Old => {}
             Age::Young => return false,
@@ -647,6 +656,27 @@ fn claim_name(name: &OsStr) -> OsString {
 fn claimed_name(name: &OsStr) -> Option<&OsStr> {
     let original = name.as_bytes().strip_prefix(CLAIM_PREFIX.as_bytes())?;
     (!original.is_empty()).then(|| OsStr::from_bytes(original))
+}
+
+/// Names the sync never moves: Filing's in-progress `*.partial` files and folder metadata.
+fn is_ignored(name: &OsStr) -> bool {
+    let name = name.as_bytes();
+    name.ends_with(PARTIAL_SUFFIX) || OS_METADATA_NAMES.contains(&name)
+}
+
+/// Whether the file at `path` starts with the AppleDouble magic number. Opened without
+/// following a symlink or blocking on a FIFO swapped in since the scan. An unreadable file
+/// counts as not AppleDouble, so it goes on to the normal path, which reports the error.
+fn is_apple_double(path: &Path) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut magic = [0u8; 4];
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok_and(|()| magic == APPLE_DOUBLE_MAGIC)
 }
 
 /// `rel`, then `name (1).ext`, `name (2).ext`, … (`name (n)` without an extension) in the
