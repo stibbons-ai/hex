@@ -81,13 +81,11 @@ describe("bun packages/server/src/main.ts", () => {
         child.kill();
       }
       const stderr = await new Response(child.stderr).text();
-      // The whole stderr is part of the received value, so a failure shows what was reported.
-      expect({
-        reports: stderr.match(/Failed to start server/g)?.length ?? 0,
-        stderr,
-      }).toMatchObject({
-        reports: 1,
-      });
+      // Count Bun's printed error lines only: under GitHub Actions, Bun also emits an
+      // `::error …::` annotation for the same uncaught error. The whole stderr is part of the
+      // received value, so a failure shows what was reported.
+      const reports = stderr.match(/^error: Failed to start server/gm)?.length ?? 0;
+      expect({ reports, stderr }).toMatchObject({ reports: 1 });
     } finally {
       await taken.stop(true);
     }
