@@ -9,14 +9,18 @@ import { startServer } from "../src";
 import type { ServerOptions } from "../src";
 import { loadChatConfig } from "../src/config";
 import { REPLY, mockModel } from "./mock-model";
+import { freePort, within } from "./timeouts";
 
 const DANIEL = "U0DANIEL";
 
 interface FakeSlack {
   server: Server<undefined>;
-  connected: Promise<ServerWebSocket<undefined>>;
-  closed: Promise<void>;
-  posted: Promise<URLSearchParams>;
+  /** Web API methods called, in order. */
+  methods: string[];
+  /** Each waits at most 2 s. */
+  connected(): Promise<ServerWebSocket<undefined>>;
+  closed(): Promise<void>;
+  posted(): Promise<URLSearchParams>;
 }
 
 interface FakeSlackOptions {
@@ -24,12 +28,15 @@ interface FakeSlackOptions {
   openError?: string;
   /** Makes `auth.test` fail with this Slack error code (the bot token is rejected). */
   authError?: string;
+  /** `auth.test` answers only once this settles (a slow Slack). */
+  authHold?: Promise<void>;
 }
 
-function fakeSlack({ openError, authError }: FakeSlackOptions = {}): FakeSlack {
+function fakeSlack({ openError, authError, authHold }: FakeSlackOptions = {}): FakeSlack {
   const connected = Promise.withResolvers<ServerWebSocket<undefined>>();
   const closed = Promise.withResolvers<void>();
   const posted = Promise.withResolvers<URLSearchParams>();
+  const methods: string[] = [];
   const server: Server<undefined> = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -40,6 +47,7 @@ function fakeSlack({ openError, authError }: FakeSlackOptions = {}): FakeSlack {
       }
       const method = pathname.replace(/^\/api\//, "");
       const body = new URLSearchParams(await request.text());
+      methods.push(method);
       switch (method) {
         case "apps.connections.open":
           return Response.json(
@@ -48,6 +56,7 @@ function fakeSlack({ openError, authError }: FakeSlackOptions = {}): FakeSlack {
               : { ok: true, url: `ws://127.0.0.1:${server.port}/socket` },
           );
         case "auth.test":
+          await authHold;
           return Response.json(
             authError
               ? { ok: false, error: authError }
@@ -80,9 +89,10 @@ function fakeSlack({ openError, authError }: FakeSlackOptions = {}): FakeSlack {
   });
   return {
     server,
-    connected: connected.promise,
-    closed: closed.promise,
-    posted: posted.promise,
+    methods,
+    connected: () => within(connected.promise, "the Slack socket to open"),
+    closed: () => within(closed.promise, "the Slack socket to close"),
+    posted: () => within(posted.promise, "a chat.postMessage call"),
   };
 }
 
@@ -138,14 +148,6 @@ async function chatFor(slack: FakeSlack) {
   return { ...chat!, model: mockModel() };
 }
 
-/** A port nothing listens on, so a test can prove the HTTP server never bound it. */
-async function freePort(): Promise<number> {
-  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-  const port = probe.port!;
-  await probe.stop(true);
-  return port;
-}
-
 function options(name: string, rest: Partial<ServerOptions>): ServerOptions {
   return { databasePath: join(directory, name, "mastra.db"), port: 0, logger: false, ...rest };
 }
@@ -155,26 +157,33 @@ test("answers a Slack DM over socket mode and closes the socket on stop()", asyn
   try {
     const server = await startServer(options("dm", { chat: await chatFor(slack) }));
     try {
-      const socket = await slack.connected;
+      const socket = await slack.connected();
       socket.send(directMessage(DANIEL, "hi hex"));
-      const reply = await slack.posted;
+      const reply = await slack.posted();
       expect(reply.get("channel")).toBe("D0DANIEL");
       expect(reply.get("markdown_text")).toBe(REPLY);
       expect(reply.get("token")).toBe("xoxb-test");
     } finally {
       await server.stop();
     }
-    await slack.closed;
+    await slack.closed();
+    // Typing status is off: no assistant-thread status calls.
+    expect(slack.methods).not.toContain("assistant.threads.setStatus");
   } finally {
     await slack.server.stop(true);
   }
 });
 
-test("a Slack socket that cannot connect fails startup", async () => {
+test("a Slack socket that cannot connect fails startup and leaves nothing open", async () => {
   const slack = fakeSlack({ openError: "invalid_auth" });
   try {
-    const failed = startServer(options("invalid-auth", { chat: await chatFor(slack) }));
-    await expect(failed).rejects.toThrow(/invalid_auth/);
+    const chat = await chatFor(slack);
+    const disconnect = spyOn(chat.channels["slack"]!.adapter, "disconnect");
+    const port = await freePort();
+    const failed = startServer(options("invalid-auth", { port, chat }));
+    await expect(within(failed, "the start to fail")).rejects.toThrow(/invalid_auth/);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
   } finally {
     await slack.server.stop(true);
   }
@@ -185,11 +194,11 @@ test("a bot token Slack rejects fails startup, naming the variable, and closes t
   try {
     const port = await freePort();
     const failed = startServer(options("bad-bot-token", { port, chat: await chatFor(slack) }));
-    await expect(failed).rejects.toThrow(
+    await expect(within(failed, "the start to fail")).rejects.toThrow(
       'chat channel "slack": Slack did not accept SLACK_BOT_TOKEN',
     );
     await expect(failed).rejects.not.toThrow("xoxb-test");
-    await slack.closed;
+    await slack.closed();
     await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
   } finally {
     await slack.server.stop(true);
@@ -204,9 +213,30 @@ test("a Slack socket that keeps retrying fails startup at the deadline and is sh
     const disconnect = spyOn(chat.channels["slack"]!.adapter, "disconnect");
     const port = await freePort();
     const failed = startServer(options("retrying", { port, chat, chatStartTimeoutMs: 200 }));
-    await expect(failed).rejects.toThrow("hex: chat channels did not connect within 200 ms");
+    await expect(within(failed, "the start to fail")).rejects.toThrow(
+      "hex: chat channels did not start within 200 ms",
+    );
     expect(disconnect).toHaveBeenCalledTimes(1);
     await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("a Slack start that finishes after the deadline leaves no socket open", async () => {
+  const authAnswer = Promise.withResolvers<void>();
+  const slack = fakeSlack({ authHold: authAnswer.promise });
+  try {
+    const failed = startServer(
+      options("late-auth", { chat: await chatFor(slack), chatStartTimeoutMs: 200 }),
+    );
+    await expect(within(failed, "the start to fail")).rejects.toThrow(
+      "hex: chat channels did not start within 200 ms",
+    );
+    // Slack answers late: the start goes on, opens the socket, and hex closes it again.
+    authAnswer.resolve();
+    await slack.connected();
+    await slack.closed();
   } finally {
     await slack.server.stop(true);
   }

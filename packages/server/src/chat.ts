@@ -1,5 +1,4 @@
 import { decideSender } from "@hex/domain";
-import type { ChannelAllowlists } from "@hex/domain";
 import { Agent } from "@mastra/core/agent";
 import type {
   ChannelAdapterConfig,
@@ -26,8 +25,8 @@ export interface ChatChannel {
   /** Sender IDs allowed on this channel; everyone else is ignored. Empty answers no one. */
   allowlist: readonly string[];
   /**
-   * Called once the channel has started; throws when it can't work although it connected (Slack:
-   * the bot token was rejected).
+   * Called once the channel has started; throws when it can't work although it connected. An
+   * adapter that only warns on an auth failure must supply it (Slack: the bot token was rejected).
    */
   verify?: () => void;
 }
@@ -41,37 +40,38 @@ export interface ChatOptions {
 
 export interface ChatAgent {
   agent: Agent;
-  /** Resolves once every message admitted so far has been handled (answered or failed). */
+  /** From now on, admits no message: each is logged (without its text) and dropped. */
+  close(): void;
+  /**
+   * Resolves once every admitted message run has been handled (answered or failed), including
+   * runs admitted while waiting. Approval-click runs are not covered: core doesn't await them.
+   */
   settled(): Promise<void>;
+  /** Admitted message runs not yet handled. */
+  pending(): number;
 }
 
-/** Whether the sender may reach the agent; a denied one is logged, without the message text. */
-function admits(
-  allowlists: ChannelAllowlists,
-  ctx: ChannelHandlerContext,
-  platform: string,
-  sender: string | undefined,
-): boolean {
-  if (decideSender(allowlists, platform, sender) === "allow") return true;
+function logIgnored(ctx: ChannelHandlerContext, reason: string, platform: string, sender?: string) {
   // No message text: a stranger's words are not ours to keep, not even in logs.
-  ctx.mastra?.getLogger().warn("hex: ignored message from a sender not on the allowlist", {
+  ctx.mastra?.getLogger().warn(`hex: ignored message ${reason}`, {
     platform,
     sender: sender ?? null,
   });
-  return false;
 }
 
 /**
  * The chat agent: answers allowlisted senders on every configured channel, with one memory thread
  * per channel conversation under resource {@link CHAT_RESOURCE_ID} and resource-scoped working
  * memory. A sender not on its channel's allowlist never reaches the agent: no reply, nothing
- * stored. Throws when a channel's key differs from its adapter's name, since the allowlist is
- * looked up by that name.
+ * stored. Throws when there are no channels, or when a channel's key differs from its adapter's
+ * name, since the allowlist is looked up by that name.
  */
 export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
+  const entries = Object.entries(channels);
+  if (entries.length === 0) throw new Error("chat needs at least one channel");
   const allowlists: Record<string, readonly string[]> = {};
   const adapters: Record<string, ChannelAdapterConfig> = {};
-  for (const [platform, { adapter, allowlist }] of Object.entries(channels)) {
+  for (const [platform, { adapter, allowlist }] of entries) {
     if (adapter.name !== platform) {
       throw new Error(`chat channel "${platform}": its adapter reports platform "${adapter.name}"`);
     }
@@ -79,13 +79,23 @@ export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
     adapters[platform] = {
       adapter,
       formatError: () => CHAT_ERROR_REPLY,
-      // Off: in Slack channel threads it calls assistant.threads.setStatus, which needs the
-      // assistant:write scope and only works in Slack's assistant threads.
+      // Off: Slack's typing status (assistant.threads.setStatus) targets its assistant threads,
+      // not the DMs and channel threads hex answers in.
       typingStatus: false,
     };
   }
   // Handler promises cover the whole run: core awaits the agent's stream before returning.
   const inFlight = new Set<Promise<void>>();
+  let closing = false;
+  const admits = (ctx: ChannelHandlerContext, platform: string, sender: string | undefined) => {
+    if (closing) {
+      logIgnored(ctx, "while hex is shutting down", platform, sender);
+      return false;
+    }
+    if (decideSender(allowlists, platform, sender) === "allow") return true;
+    logIgnored(ctx, "from a sender not on the allowlist", platform, sender);
+    return false;
+  };
   const track = (handling: Promise<void>) => {
     inFlight.add(handling);
     void handling.then(
@@ -95,7 +105,7 @@ export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
     return handling;
   };
   const guard: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
-    if (admits(allowlists, ctx, thread.adapter.name, message.author.userId)) {
+    if (admits(ctx, thread.adapter.name, message.author.userId)) {
       await track(defaultHandler(thread, message));
     }
   };
@@ -112,9 +122,9 @@ export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
         onDirectMessage: guard,
         onMention: guard,
         onSubscribedMessage: guard,
-        // Button clicks (tool approvals) are held to the same allowlist.
+        // Button clicks (tool approvals) are guarded too, if interactivity is ever enabled.
         onAction: async (event, defaultHandler, ctx) => {
-          if (admits(allowlists, ctx, event.adapter.name, event.user.userId)) {
+          if (admits(ctx, event.adapter.name, event.user.userId)) {
             await track(defaultHandler());
           }
         },
@@ -130,8 +140,12 @@ export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
   });
   return {
     agent,
-    settled: async () => {
-      await Promise.allSettled(inFlight);
+    close: () => {
+      closing = true;
     },
+    settled: async () => {
+      while (inFlight.size > 0) await Promise.allSettled(inFlight);
+    },
+    pending: () => inFlight.size,
   };
 }

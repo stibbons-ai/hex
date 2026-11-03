@@ -8,6 +8,7 @@ import type {
   RawMessage,
   ThreadInfo,
 } from "chat";
+import { within } from "./timeouts";
 
 export interface Incoming {
   /** Conversation key; `dm-*` conversations are direct messages, others channel threads. */
@@ -37,12 +38,15 @@ export class FakeChatAdapter implements Adapter {
   #ids = 0;
   #waiters: { count: number; resolve: () => void }[] = [];
 
-  /** Resolves once `count` messages have been posted (the reply follows the run, unawaited). */
+  /**
+   * Resolves once `count` messages have been posted; rejects after 2 s. receive() already waits
+   * for the run, so this is for runs started without awaiting receive().
+   */
   posts(count: number): Promise<void> {
     if (this.posted.length >= count) return Promise.resolve();
     const { promise, resolve } = Promise.withResolvers<void>();
     this.#waiters.push({ count, resolve });
-    return promise;
+    return within(promise, `${count} posted message(s)`);
   }
 
   async initialize(chat: ChatInstance): Promise<void> {

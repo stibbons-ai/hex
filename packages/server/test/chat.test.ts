@@ -9,6 +9,7 @@ import { type ChatOptions, type RunningServer, type ServerOptions, startServer }
 import { CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 import { REPLY, mockModel } from "./mock-model";
+import { freePort, within } from "./timeouts";
 
 const DANIEL = "U0DANIEL";
 const STRANGER = "U0STRANGER";
@@ -302,6 +303,48 @@ describe("chat channel lifecycle", () => {
     expect(errors).toEqual([]);
   });
 
+  test("a message that reaches hex after stop() began is dropped and logged", async () => {
+    const adapter = new FakeChatAdapter();
+    const server = await startServer(serverOptions(chatOptions(adapter)));
+    const disconnect = adapter.disconnect.bind(adapter);
+    let warnings: unknown[][] = [];
+    let threads: unknown[] = ["not checked"];
+    adapter.disconnect = async () => {
+      // stop() has begun (it disconnects first); the platform still delivers one late message.
+      warnings = await logged(server, "warn", () =>
+        adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "late words" }),
+      );
+      threads = await allThreads(server);
+      await disconnect();
+    };
+    await server.stop();
+    expect(adapter.posted).toEqual([]);
+    expect(threads).toEqual([]);
+    expect(warnings).toEqual([
+      ["hex: ignored message while hex is shutting down", { platform: "fake", sender: DANIEL }],
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain("late words");
+  });
+
+  test("stop() logs replies its grace period cuts off", async () => {
+    const entered = Promise.withResolvers<void>();
+    // The run never finishes: the model waits forever.
+    const model = mockModel({
+      before: async () => {
+        entered.resolve();
+        await new Promise(() => {});
+      },
+    });
+    const adapter = new FakeChatAdapter();
+    const server = await startServer(
+      serverOptions(chatOptions(adapter, model), { stopGraceMs: 50 }),
+    );
+    void adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
+    await within(entered.promise, "the run to start");
+    const warnings = await logged(server, "warn", () => server.stop());
+    expect(warnings).toContainEqual(["hex: stop: 1 chat replies cut off"]);
+  });
+
   test("a channel that fails to connect fails startup and leaves nothing open", async () => {
     const adapter = new FakeChatAdapter();
     const failure = new Error("connect refused");
@@ -314,9 +357,29 @@ describe("chat channel lifecycle", () => {
     adapter.connectWait = new Promise(() => {});
     await expectFailedStart(
       adapter,
-      (failed) => expect(failed).rejects.toThrow("hex: chat channels did not connect within 50 ms"),
+      (failed) => expect(failed).rejects.toThrow("hex: chat channels did not start within 50 ms"),
       { chatStartTimeoutMs: 50 },
     );
+  });
+
+  test("a channel that finishes starting after the deadline is disconnected then", async () => {
+    const adapter = new FakeChatAdapter();
+    const late = Promise.withResolvers<void>();
+    adapter.connectWait = late.promise;
+    const disconnected = Promise.withResolvers<void>();
+    const disconnect = adapter.disconnect.bind(adapter);
+    adapter.disconnect = async () => {
+      await disconnect();
+      if (adapter.disconnects === 2) disconnected.resolve();
+    };
+    await expectFailedStart(
+      adapter,
+      (failed) => expect(failed).rejects.toThrow("did not start within 50 ms"),
+      { chatStartTimeoutMs: 50 },
+    );
+    late.resolve();
+    await within(disconnected.promise, "the late start to be disconnected");
+    expect(adapter.connected).toBe(false);
   });
 
   test("a channel that connects but fails its check fails startup", async () => {
@@ -374,6 +437,12 @@ describe("chat channel lifecycle", () => {
       ['hex: chat channel "fake": empty allowlist, nobody will be answered'],
     ]);
   });
+
+  test("chat without channels is rejected", () => {
+    expect(() => createChatAgent({ model: mockModel(), channels: {} })).toThrow(
+      "chat needs at least one channel",
+    );
+  });
 });
 
 /**
@@ -387,11 +456,12 @@ async function expectFailedStart(
   chat: ChatOptions = chatOptions(adapter),
 ) {
   const close = spyOn(LibSQLStore.prototype, "close");
-  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-  const free = probe.port!;
-  await probe.stop(true);
+  const free = await freePort();
   try {
-    await check(startServer(serverOptions(chat, { port: free, ...options })));
+    await within(
+      Promise.resolve(check(startServer(serverOptions(chat, { port: free, ...options })))),
+      "the start to fail",
+    );
     expect(adapter.disconnects).toBe(1);
     expect(close).toHaveBeenCalledTimes(1);
     // Nothing listens on the port: the HTTP server never started.

@@ -136,4 +136,21 @@ describe("bun packages/server/src/main.ts", () => {
       `hex config ${config}: channel "slack": environment variable SLACK_APP_TOKEN is not set`,
     );
   });
+
+  test("a config with no channels runs without chat, saying so", async () => {
+    const config = join(directory, "no-channels.json");
+    await Bun.write(config, JSON.stringify({ chat: { model: "openai/gpt-5", channels: {} } }));
+    const child = spawnMain({
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "no-channels"),
+      HEX_CONFIG: config,
+    });
+    try {
+      const { output } = await listeningUrl(child.stdout);
+      expect(output).toContain(`hex: chat off: ${config} configures no channels`);
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await child.exited).toBe(0);
+  });
 });

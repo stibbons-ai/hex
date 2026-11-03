@@ -48,12 +48,15 @@ export interface ServerOptions {
 const DEFAULT_STOP_GRACE_MS = 5000;
 const DEFAULT_CHAT_START_TIMEOUT_MS = 30_000;
 
-/** Rejects with `message` when `promise` hasn't settled within `ms`. */
-async function withDeadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  const deadline = Promise.withResolvers<never>();
-  const timer = setTimeout(() => deadline.reject(new Error(message)), ms);
+/**
+ * Whether `promise` settled within `ms`: true when it resolved in time, false on timeout; a
+ * rejection in time is rethrown.
+ */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  const timeout = Promise.withResolvers<boolean>();
+  const timer = setTimeout(() => timeout.resolve(false), ms);
   try {
-    return await Promise.race([promise, deadline.promise]);
+    return await Promise.race([promise.then(() => true), timeout.promise]);
   } finally {
     clearTimeout(timer);
   }
@@ -65,10 +68,11 @@ export interface RunningServer {
   hostname: string;
   mastra: Mastra;
   /**
-   * Disconnects the chat channels (no new messages), stops accepting requests and gives in-flight
-   * ones (open streams and chat replies included) `stopGraceMs` before closing them, then shuts
-   * Mastra down (which closes the store) and closes the store again as a fallback. Each step runs
-   * even if an earlier one fails. LibSQL's file handles may stay open until GC.
+   * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
+   * accepting requests and gives in-flight ones (open streams and chat replies included)
+   * `stopGraceMs` before closing them, then shuts Mastra down (which closes the store) and closes
+   * the store again as a fallback. Each step runs even if an earlier one fails; a step cut short
+   * is logged. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
 }
@@ -77,8 +81,9 @@ export interface RunningServer {
  * Our own Bun.serve entrypoint: `GET`/`HEAD /health` plus the oRPC API under /rpc (ADR 0004), both
  * behind the Host allow-list, and the chat channels when configured. Channels connect out (Slack
  * socket mode); no webhook route is served. Startup fails, with everything closed again, when a
- * channel doesn't connect within `chatStartTimeoutMs`, fails to connect, or connects but can't
- * work (its `verify` throws, e.g. Slack rejected the bot token).
+ * channel doesn't start within `chatStartTimeoutMs` (it is disconnected again if it finishes
+ * starting later), fails to start, or starts but can't work (its `verify` throws, e.g. Slack
+ * rejected the bot token).
  */
 export async function startServer({
   databasePath,
@@ -91,7 +96,7 @@ export async function startServer({
 }: ServerOptions): Promise<RunningServer> {
   const storage = await createLocalStore(databasePath);
   // Slack: closes the socket (and stops its reconnect loop). Every adapter is disconnected even
-  // if another fails.
+  // if another fails. Safe to run more than once.
   const disconnectChat = () =>
     closeInOrder(
       Object.values(chat?.channels ?? {}).map(
@@ -111,14 +116,19 @@ export async function startServer({
     });
     if (chat && chatAgent) {
       // Mastra starts the channels without awaiting them and only logs a failure (so a failed
-      // connect is logged twice: by Mastra and as our startup error); awaiting the same start here
-      // makes a channel that can't connect fail startup. Slack's socket client retries some
-      // failures forever, hence the deadline.
-      await withDeadline(
-        chatAgent.agent.getChannels()!.initialize(mastra),
-        chatStartTimeoutMs,
-        `hex: chat channels did not connect within ${chatStartTimeoutMs} ms`,
-      );
+      // start is logged twice: by Mastra and as our startup error); awaiting the same start here
+      // makes a channel that can't start fail startup. Starting covers Slack's bot-token check and
+      // its socket connect, whose client retries some failures forever, hence the deadline.
+      const starting = chatAgent.agent.getChannels()!.initialize(mastra);
+      if (!(await settlesWithin(starting, chatStartTimeoutMs))) {
+        // The start goes on in the background and may still open a socket nobody would own.
+        void starting
+          .then(disconnectChat, () => {})
+          .catch((error: unknown) => {
+            console.error("hex: disconnecting chat channels after a late start failed", error);
+          });
+        throw new Error(`hex: chat channels did not start within ${chatStartTimeoutMs} ms`);
+      }
       for (const [platform, { allowlist, verify }] of Object.entries(chat.channels)) {
         try {
           verify?.();
@@ -190,14 +200,28 @@ export async function startServer({
       mastra,
       stop: () =>
         closeInOrder([
-          disconnectChat,
           async () => {
-            // Graceful stop never resolves while a client holds a stream open, so bound it.
-            const grace = Promise.withResolvers<void>();
-            const timer = setTimeout(grace.resolve, stopGraceMs);
-            await Promise.race([Promise.all([server.stop(), chatAgent?.settled()]), grace.promise]);
-            clearTimeout(timer);
-            await server.stop(true);
+            chatAgent?.close();
+            if (!(await settlesWithin(disconnectChat(), stopGraceMs))) {
+              mastra
+                .getLogger()
+                .warn(`hex: stop: chat channels did not disconnect within ${stopGraceMs} ms`);
+            }
+          },
+          async () => {
+            try {
+              // Graceful stop never resolves while a client holds a stream open, so bound it.
+              const drained = await settlesWithin(
+                Promise.all([server.stop(), chatAgent?.settled()]),
+                stopGraceMs,
+              );
+              const cutOff = chatAgent?.pending() ?? 0;
+              if (!drained && cutOff > 0) {
+                mastra.getLogger().warn(`hex: stop: ${cutOff} chat replies cut off`);
+              }
+            } finally {
+              await server.stop(true);
+            }
           },
           () => mastra.shutdown(),
           () => storage.close(),

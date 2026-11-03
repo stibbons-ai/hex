@@ -30,9 +30,10 @@ answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<p
 `<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
-SIGINT or SIGTERM stops it: chat channels disconnect first, then requests in flight, open streams
-included, get 5 seconds before they are closed, then Mastra shuts down. A second signal of the
-same kind kills it at once.
+SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first, then
+requests in flight, open streams and chat replies included, get 5 seconds before they are closed
+(replies cut off are logged), then Mastra shuts down. A second signal of the same kind kills it at
+once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -62,24 +63,26 @@ routes don't work against this entrypoint.
 
 ## Chat (Slack)
 
-hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it already
-replied in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
+hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it was asked
+in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
 WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. Only senders on
-a channel's allowlist get an answer. Anyone else's DM, @-mention, reply in such a thread or button
-click is ignored (no reply, nothing stored) and logged as one line with platform and sender ID,
-never the text; other channel messages never reach hex at all. Earlier messages of a channel
-thread are not read into memory. Slash commands are not answered. Every allowlisted conversation,
-on every channel, shares the memory resource `daniel` (working memory on, scoped to the
-resource), with one memory thread per conversation: a DM, a thread inside a DM, or a channel
-thread. A failed reply posts "Something went wrong; see the hex log." and logs the detail. No
-typing indicator is shown (Slack's needs the `assistant:write` scope and works only in its
-assistant threads).
+a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such a thread (and
+button click, should interactivity ever be enabled) is ignored (no reply, nothing stored) and
+logged as one line with platform and sender ID, never the text; other channel messages never
+reach hex at all. Messages arriving while hex shuts down are dropped and logged the same way.
+Earlier messages of a channel thread are not read into memory. Slash commands are not answered.
+Every allowlisted conversation, on every channel, shares the memory resource `daniel` (working
+memory on, scoped to the resource), with one memory thread per conversation: a DM, a thread
+inside a DM, or a channel thread. A failed reply posts "Something went wrong; see the hex log."
+and logs the detail. No typing indicator is shown: Slack's (`assistant.threads.setStatus`)
+targets its assistant threads, not the DMs and channel threads hex answers in.
 
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
-connect, doesn't connect within 30 seconds, or connects but can't work (Slack rejected the bot
-token); the server then closes everything again.
+start, doesn't start within 30 seconds (Slack: bot-token check and socket connect), or starts but
+can't work (Slack rejected the bot token); the server then closes everything again, including a
+channel that finishes starting after the deadline.
 
 ```json
 {
