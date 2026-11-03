@@ -2,12 +2,11 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Agent } from "@mastra/core/agent";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { LibSQLStore } from "@mastra/libsql";
 import { createMockModel } from "@mastra/core/test-utils/llm-mock";
-import { type RunningServer, startServer } from "../src";
-import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
+import { type ChatOptions, type RunningServer, startServer } from "../src";
+import { CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 
 const DANIEL = "U0DANIEL";
@@ -27,16 +26,18 @@ afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-function mockModel(): MastraModelConfig {
-  return createMockModel({ mockText: REPLY, version: "v2" }) as MastraModelConfig;
+function chatOptions(adapter: FakeChatAdapter): ChatOptions {
+  const model = createMockModel({ mockText: REPLY, version: "v2" }) as MastraModelConfig;
+  return { model, adapters: { fake: adapter }, allowlists: { fake: [DANIEL] } };
 }
 
-async function start(adapter = new FakeChatAdapter()) {
+async function start() {
+  const adapter = new FakeChatAdapter();
   const server = await startServer({
     databasePath: join(directory, `chat-${databases++}`, "mastra.db"),
     port: 0,
     logger: false,
-    chat: { model: mockModel(), adapters: { fake: adapter }, allowlists: { fake: [DANIEL] } },
+    chat: chatOptions(adapter),
   });
   servers.push(server);
   return { server, adapter };
@@ -87,12 +88,8 @@ describe("chat channels (fake adapter)", () => {
     const [thread, ...others] = await allThreads(server);
     expect(others).toEqual([]);
     expect(thread?.resourceId).toBe(CHAT_RESOURCE_ID);
-    const { messages } = await (
-      await memoryStore(server)
-    ).listMessages({
-      threadId: thread!.id,
-      perPage: false,
-    });
+    const store = await memoryStore(server);
+    const { messages } = await store.listMessages({ threadId: thread!.id, perPage: false });
     // Channel messages reach the agent as signals.
     expect(messages.map((message) => message.role)).toEqual(["signal", "assistant"]);
     expect(messages.every((message) => message.resourceId === CHAT_RESOURCE_ID)).toBe(true);
@@ -159,8 +156,7 @@ describe("chat channels (fake adapter)", () => {
   });
 
   test("the agent's memory has working memory on", async () => {
-    const { server } = await start();
-    const agent = server.mastra.getAgent(CHAT_AGENT_ID) as Agent;
+    const agent = createChatAgent(chatOptions(new FakeChatAdapter()));
     const memory = await agent.getMemory();
     expect(memory?.getMergedThreadConfig().workingMemory?.enabled).toBe(true);
   });
@@ -173,7 +169,7 @@ describe("chat channel lifecycle", () => {
       databasePath: join(directory, "lifecycle", "mastra.db"),
       port: 0,
       logger: false,
-      chat: { model: mockModel(), adapters: { fake: adapter }, allowlists: { fake: [DANIEL] } },
+      chat: chatOptions(adapter),
     });
     expect(adapter.connected).toBe(true);
     const order: string[] = [];
@@ -205,7 +201,7 @@ describe("chat channel lifecycle", () => {
         databasePath: join(directory, "connect-fails", "mastra.db"),
         port: free,
         logger: false,
-        chat: { model: mockModel(), adapters: { fake: adapter }, allowlists: { fake: [DANIEL] } },
+        chat: chatOptions(adapter),
       });
       await expect(failed).rejects.toBe(failure);
       expect(adapter.disconnects).toBe(1);

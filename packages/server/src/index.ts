@@ -4,7 +4,7 @@ import { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
 import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
-import { createChatAgent, disconnectAdapters } from "./chat";
+import { createChatAgent } from "./chat";
 import type { ChatOptions } from "./chat";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
@@ -71,6 +71,11 @@ export async function startServer({
   chat,
 }: ServerOptions): Promise<RunningServer> {
   const storage = await createLocalStore(databasePath);
+  // Slack: closes the socket. Every adapter is disconnected even if another fails.
+  const disconnectChat = () =>
+    closeInOrder(
+      Object.values(chat?.adapters ?? {}).map((adapter) => async () => adapter.disconnect?.()),
+    );
   try {
     await storage.init();
     const agent = chat ? createChatAgent(chat) : undefined;
@@ -139,9 +144,7 @@ export async function startServer({
       mastra,
       stop: () =>
         closeInOrder([
-          async () => {
-            if (chat) await disconnectAdapters(chat.adapters);
-          },
+          disconnectChat,
           async () => {
             // Graceful stop never resolves while a client holds a stream open, so bound it.
             const grace = Promise.withResolvers<void>();
@@ -156,14 +159,12 @@ export async function startServer({
     };
   } catch (error) {
     // Keep the startup error; a failure to close what was half-built is only logged.
-    if (chat) {
-      await disconnectAdapters(chat.adapters).catch((closeError: unknown) => {
-        console.error(
-          "hex: disconnecting chat channels after a failed start also failed",
-          closeError,
-        );
-      });
-    }
+    await disconnectChat().catch((closeError: unknown) => {
+      console.error(
+        "hex: disconnecting chat channels after a failed start also failed",
+        closeError,
+      );
+    });
     await storage.close().catch((closeError: unknown) => {
       console.error("hex: closing storage after a failed start also failed", closeError);
     });

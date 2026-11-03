@@ -29,7 +29,7 @@ export class FakeChatAdapter implements Adapter {
   readonly posted: { threadId: string; text: string }[] = [];
   connected = false;
   disconnects = 0;
-  /** Set to make the next connect fail. */
+  /** While set, every connect fails with it. */
   connectError: Error | undefined;
   #chat: ChatInstance | undefined;
   #ids = 0;

@@ -15,18 +15,16 @@ const REPLY = "hello from hex";
 
 interface FakeSlack {
   server: Server<undefined>;
-  /** Web API calls by method, with their form bodies. */
-  calls: { method: string; body: URLSearchParams }[];
   connected: Promise<ServerWebSocket<undefined>>;
   closed: Promise<void>;
   posted: Promise<URLSearchParams>;
 }
 
-function fakeSlack({ connectionsOpen = { ok: true } as Record<string, unknown> } = {}): FakeSlack {
+/** `openError` makes `apps.connections.open` fail with that Slack error code. */
+function fakeSlack({ openError }: { openError?: string } = {}): FakeSlack {
   const connected = Promise.withResolvers<ServerWebSocket<undefined>>();
   const closed = Promise.withResolvers<void>();
   const posted = Promise.withResolvers<URLSearchParams>();
-  const calls: FakeSlack["calls"] = [];
   const server: Server<undefined> = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -37,13 +35,12 @@ function fakeSlack({ connectionsOpen = { ok: true } as Record<string, unknown> }
       }
       const method = pathname.replace(/^\/api\//, "");
       const body = new URLSearchParams(await request.text());
-      calls.push({ method, body });
       switch (method) {
         case "apps.connections.open":
           return Response.json(
-            connectionsOpen.ok
-              ? { ok: true, url: `ws://127.0.0.1:${server.port}/socket` }
-              : connectionsOpen,
+            openError
+              ? { ok: false, error: openError }
+              : { ok: true, url: `ws://127.0.0.1:${server.port}/socket` },
           );
         case "auth.test":
           return Response.json({
@@ -80,7 +77,6 @@ function fakeSlack({ connectionsOpen = { ok: true } as Record<string, unknown> }
   });
   return {
     server,
-    calls,
     connected: connected.promise,
     closed: closed.promise,
     posted: posted.promise,
@@ -186,7 +182,7 @@ test("answers a Slack DM over socket mode and closes the socket on stop()", asyn
 });
 
 test("a Slack socket that cannot connect fails startup", async () => {
-  const slack = fakeSlack({ connectionsOpen: { ok: false, error: "invalid_auth" } });
+  const slack = fakeSlack({ openError: "invalid_auth" });
   try {
     const failed = startServer({
       databasePath: join(directory, "invalid-auth", "mastra.db"),

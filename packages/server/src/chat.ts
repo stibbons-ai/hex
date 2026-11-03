@@ -23,12 +23,20 @@ export interface ChatOptions {
   allowlists: ChannelAllowlists;
 }
 
-function logIgnored(ctx: ChannelHandlerContext, channel: string, sender: string | undefined) {
+/** Whether the sender may reach the agent; a denied one is logged, without the message text. */
+function admits(
+  allowlists: ChannelAllowlists,
+  ctx: ChannelHandlerContext,
+  channel: string,
+  sender: string | undefined,
+): boolean {
+  if (decideSender(allowlists, channel, sender) === "allow") return true;
   // No message text: a stranger's words are not ours to keep, not even in logs.
   ctx.mastra?.getLogger().warn("hex: ignored message from a sender not on the allowlist", {
     channel,
     sender: sender ?? null,
   });
+  return false;
 }
 
 /**
@@ -38,12 +46,8 @@ function logIgnored(ctx: ChannelHandlerContext, channel: string, sender: string 
  */
 export function createChatAgent({ model, adapters, allowlists }: ChatOptions): Agent {
   const guard: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
-    const channel = thread.adapter.name;
-    const sender = message.author.userId;
-    if (decideSender(allowlists, channel, sender) === "allow") {
+    if (admits(allowlists, ctx, thread.adapter.name, message.author.userId)) {
       await defaultHandler(thread, message);
-    } else {
-      logIgnored(ctx, channel, sender);
     }
   };
   return new Agent({
@@ -61,10 +65,8 @@ export function createChatAgent({ model, adapters, allowlists }: ChatOptions): A
         onSubscribedMessage: guard,
         // Button clicks (tool approvals) are held to the same allowlist.
         onAction: async (event, defaultHandler, ctx) => {
-          const channel = event.adapter.name;
-          const sender = event.user.userId;
-          if (decideSender(allowlists, channel, sender) === "allow") await defaultHandler();
-          else logIgnored(ctx, channel, sender);
+          if (admits(allowlists, ctx, event.adapter.name, event.user.userId))
+            await defaultHandler();
         },
         onSlashCommand: false,
       },
@@ -74,17 +76,4 @@ export function createChatAgent({ model, adapters, allowlists }: ChatOptions): A
       resolveResourceId: () => CHAT_RESOURCE_ID,
     },
   });
-}
-
-/** Disconnects every adapter (Slack: closes the socket), even after a failure. */
-export async function disconnectAdapters(adapters: Readonly<Record<string, Adapter>>) {
-  const results = await Promise.allSettled(
-    Object.values(adapters).map(async (adapter) => adapter.disconnect?.()),
-  );
-  const failures = results.flatMap((result) =>
-    result.status === "rejected" ? [result.reason] : [],
-  );
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1)
-    throw new AggregateError(failures, "Several chat adapters failed to disconnect");
 }
