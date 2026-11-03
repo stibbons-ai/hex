@@ -30,8 +30,9 @@ answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<p
 `<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
-SIGINT or SIGTERM stops it: requests in flight, open streams included, get 5 seconds before
-they are closed, then Mastra shuts down. A second signal of the same kind kills it at once.
+SIGINT or SIGTERM stops it: chat channels disconnect first, then requests in flight, open streams
+included, get 5 seconds before they are closed, then Mastra shuts down. A second signal of the
+same kind kills it at once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -59,6 +60,97 @@ await hex.workflows.list();
 Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
 routes don't work against this entrypoint.
 
+## Chat (Slack)
+
+hex answers direct messages and @-mentions in Slack through Mastra Channels, in Slack's socket
+mode: the server opens an outbound WebSocket to Slack, so nothing is exposed publicly and no
+webhook route is served. Only senders on a channel's allowlist get an answer; anyone else is
+ignored (no reply, nothing stored) and logged once per message with channel and sender ID, never
+the text. Every allowlisted conversation, on every channel, shares the memory resource `daniel`
+(working memory on), with one memory thread per conversation (a DM, or a channel thread).
+
+Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
+says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing
+secret fails startup with the file and the problem; so does a channel that can't connect.
+
+```json
+{
+  "chat": {
+    "model": "anthropic/claude-sonnet-4-5",
+    "channels": {
+      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] }
+    }
+  }
+}
+```
+
+- `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
+  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+- `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
+  An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
+  package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
+- `allowlist`: exact sender IDs (case and whitespace count); an empty list answers no one.
+
+Secrets live only in the environment, never in the file:
+
+| Variable          | Holds                                                         |
+| ----------------- | ------------------------------------------------------------- |
+| `HEX_CONFIG`      | Path of the config file                                       |
+| `SLACK_APP_TOKEN` | App-level token (`xapp-…`) with `connections:write`           |
+| `SLACK_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`)                               |
+| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one |
+
+### Slack app for socket mode
+
+1. At [api.slack.com/apps](https://api.slack.com/apps): **Create New App** → **From an app
+   manifest**, pick the workspace, paste:
+
+   ```yaml
+   display_information:
+     name: hex
+   features:
+     app_home:
+       messages_tab_enabled: true
+       messages_tab_read_only_enabled: false
+     bot_user:
+       display_name: hex
+       always_online: true
+   oauth_config:
+     scopes:
+       bot:
+         - app_mentions:read
+         - channels:history
+         - chat:write
+         - groups:history
+         - im:history
+         - im:read
+         - mpim:history
+         - users:read
+   settings:
+     event_subscriptions:
+       bot_events:
+         - app_mention
+         - message.channels
+         - message.groups
+         - message.im
+         - message.mpim
+     socket_mode_enabled: true
+   ```
+
+2. **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**, scope
+   `connections:write`: that `xapp-…` token is `SLACK_APP_TOKEN`.
+3. **Install App** → install to the workspace: the **Bot User OAuth Token** (`xoxb-…`) is
+   `SLACK_BOT_TOKEN`.
+4. Your Slack user ID for the allowlist: in Slack, open your profile → **⋮** → **Copy member ID**
+   (`U…`).
+
+Run it, then DM the app in Slack (App Home → **Messages**):
+
+```sh
+export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…
+HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
+```
+
 ## Check
 
 ```sh
@@ -77,7 +169,7 @@ bun run test          # bun test
 | ------------------- | ------------------------------------------------------------------------------ |
 | `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health` and the oRPC API (`contract`) over Mastra    |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels |
 | `@hex/eval-harness` | Empty until the evaluation slice                                               |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency

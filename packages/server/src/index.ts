@@ -4,11 +4,14 @@ import { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
 import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
+import { createChatAgent, disconnectAdapters } from "./chat";
+import type { ChatOptions } from "./chat";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
 import { router } from "./router";
 
 export { contract } from "./contract";
+export type { ChatOptions } from "./chat";
 
 /**
  * Loopback only: other machines can't connect. Local browsers still can, so requests are also
@@ -30,6 +33,11 @@ export interface ServerOptions {
   workflows?: Record<string, AnyWorkflow>;
   /** How long stop() lets in-flight requests and open streams finish before closing them. */
   stopGraceMs?: number;
+  /**
+   * The chat agent and its channels; omitted runs without chat. The server owns the adapters: it
+   * connects them on start and disconnects them in stop() or after a failed start.
+   */
+  chat?: ChatOptions;
 }
 
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -40,17 +48,19 @@ export interface RunningServer {
   hostname: string;
   mastra: Mastra;
   /**
-   * Stops accepting requests and gives in-flight ones (open streams included) `stopGraceMs` before
-   * closing them, then shuts Mastra down (which closes the store) and closes the store again as a
-   * fallback. Each step runs even if an earlier one fails. LibSQL's file handles may stay open
-   * until GC.
+   * Disconnects the chat channels (no new messages), stops accepting requests and gives in-flight
+   * ones (open streams included) `stopGraceMs` before closing them, then shuts Mastra down (which
+   * closes the store) and closes the store again as a fallback. Each step runs even if an earlier
+   * one fails. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
 }
 
 /**
  * Our own Bun.serve entrypoint: `GET`/`HEAD /health` plus the oRPC API under /rpc (ADR 0004), both
- * behind the Host allow-list.
+ * behind the Host allow-list, and the chat channels when configured. Channels connect out (Slack
+ * socket mode); no webhook route is served. Startup fails, with everything closed again, when a
+ * channel fails to connect.
  */
 export async function startServer({
   databasePath,
@@ -58,15 +68,21 @@ export async function startServer({
   logger,
   workflows,
   stopGraceMs = DEFAULT_STOP_GRACE_MS,
+  chat,
 }: ServerOptions): Promise<RunningServer> {
   const storage = await createLocalStore(databasePath);
   try {
     await storage.init();
+    const agent = chat ? createChatAgent(chat) : undefined;
     const mastra = new Mastra({
       storage,
       ...(logger === undefined ? {} : { logger }),
       ...(workflows ? { workflows } : {}),
+      ...(agent ? { agents: { [agent.id]: agent } } : {}),
     });
+    // Mastra starts the channels without awaiting them and only logs a failure; awaiting the same
+    // start here makes a channel that can't connect fail startup.
+    await agent?.getChannels()?.initialize(mastra);
     // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
     const logFault = (error: unknown) => {
       if (error instanceof ORPCError && error.status < 500) return;
@@ -124,6 +140,9 @@ export async function startServer({
       stop: () =>
         closeInOrder([
           async () => {
+            if (chat) await disconnectAdapters(chat.adapters);
+          },
+          async () => {
             // Graceful stop never resolves while a client holds a stream open, so bound it.
             const grace = Promise.withResolvers<void>();
             const timer = setTimeout(grace.resolve, stopGraceMs);
@@ -136,7 +155,15 @@ export async function startServer({
         ]),
     };
   } catch (error) {
-    // Keep the startup error; a failure to close the half-built store is only logged.
+    // Keep the startup error; a failure to close what was half-built is only logged.
+    if (chat) {
+      await disconnectAdapters(chat.adapters).catch((closeError: unknown) => {
+        console.error(
+          "hex: disconnecting chat channels after a failed start also failed",
+          closeError,
+        );
+      });
+    }
     await storage.close().catch((closeError: unknown) => {
       console.error("hex: closing storage after a failed start also failed", closeError);
     });

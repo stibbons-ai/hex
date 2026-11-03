@@ -5,10 +5,14 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@chat-adapter/slack": "catalog:",
     "@hex/adapters": "workspace:*",
+    "@hex/domain": "workspace:*",
     "@mastra/core": "catalog:",
+    "@mastra/memory": "catalog:",
     "@orpc/contract": "catalog:",
     "@orpc/server": "catalog:",
+    "chat": "catalog:",
     "effect": "catalog:"
   },
   "devDependencies": {

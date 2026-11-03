@@ -105,4 +105,54 @@ describe("bun packages/server/src/main.ts", () => {
       );
     },
   );
+
+  test("runs without chat, saying so once, when HEX_CONFIG is not set", async () => {
+    const child = spawnMain({
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "no-chat"),
+      HEX_CONFIG: "",
+    });
+    let output = "";
+    try {
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      while (!output.includes("hex listening on")) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        output += decoder.decode(value, { stream: true });
+      }
+      reader.releaseLock();
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await child.exited).toBe(0);
+    expect(output.match(/hex: chat off: HEX_CONFIG is not set/g)).toHaveLength(1);
+  });
+
+  test("a config that can't be used fails startup with the file and the problem", async () => {
+    const config = join(directory, "hex.json");
+    await Bun.write(
+      config,
+      JSON.stringify({
+        chat: {
+          model: "anthropic/claude-sonnet-4-5",
+          channels: { slack: { options: { mode: "socket" }, allowlist: ["U0DANIEL"] } },
+        },
+      }),
+    );
+    const child = spawnMain({
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "bad-config"),
+      HEX_CONFIG: config,
+      SLACK_APP_TOKEN: "",
+    });
+    try {
+      expect(await child.exited).toBe(1);
+    } finally {
+      child.kill();
+    }
+    expect(await new Response(child.stderr).text()).toContain(
+      `hex config ${config}: channel "slack": environment variable SLACK_APP_TOKEN is not set`,
+    );
+  });
 });
