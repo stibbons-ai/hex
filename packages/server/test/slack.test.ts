@@ -96,6 +96,7 @@ function fakeSlack({ openError, authError, authHold }: FakeSlackOptions = {}): F
   };
 }
 
+/** A DM reply inside a thread (`thread_ts` set), where Slack's typing status would apply. */
 function directMessage(sender: string, text: string) {
   return JSON.stringify({
     envelope_id: `envelope-${sender}`,
@@ -114,6 +115,7 @@ function directMessage(sender: string, text: string) {
         text,
         ts: "1700000000.000100",
         event_ts: "1700000000.000100",
+        thread_ts: "1699999999.000100",
       },
     },
   });

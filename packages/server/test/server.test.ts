@@ -413,8 +413,17 @@ describe("stop()", () => {
       );
       await entered.promise; // the request is in flight and the step is waiting
 
+      const warn = spyOn(server.mastra.getLogger(), "warn");
       const started = performance.now();
-      await server.stop();
+      try {
+        await server.stop();
+        // The cut-off is logged, even without chat.
+        expect(warn).toHaveBeenCalledWith(
+          "hex: stop: requests and chat replies still running after 200 ms were cut off",
+        );
+      } finally {
+        warn.mockRestore();
+      }
       expect(performance.now() - started).toBeLessThan(3000);
       await shutdown.promise; // Mastra's shutdown ran after the forced close
       // The forced close ended the client's request: it fails instead of waiting.

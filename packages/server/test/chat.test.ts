@@ -342,7 +342,72 @@ describe("chat channel lifecycle", () => {
     void adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
     await within(entered.promise, "the run to start");
     const warnings = await logged(server, "warn", () => server.stop());
-    expect(warnings).toContainEqual(["hex: stop: 1 chat replies cut off"]);
+    expect(warnings).toContainEqual([
+      "hex: stop: requests and chat replies still running after 50 ms were cut off (1 chat replies)",
+    ]);
+  });
+
+  test("stop() gives up on a channel that never disconnects and still closes everything", async () => {
+    const adapter = new FakeChatAdapter();
+    adapter.disconnect = () => new Promise(() => {});
+    const port = await freePort();
+    const server = await startServer(
+      serverOptions(chatOptions(adapter), { port, stopGraceMs: 50 }),
+    );
+    const close = spyOn(LibSQLStore.prototype, "close");
+    try {
+      const warnings = await logged(server, "warn", () => within(server.stop(), "stop()"));
+      expect(warnings).toContainEqual(["hex: stop: chat channels did not disconnect within 50 ms"]);
+      expect(close).toHaveBeenCalled();
+      await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+    } finally {
+      close.mockRestore();
+    }
+  });
+
+  test("a channel disconnect that fails after stop() gave up on it is logged", async () => {
+    const adapter = new FakeChatAdapter();
+    const failing = Promise.withResolvers<void>();
+    adapter.disconnect = () => failing.promise;
+    const server = await startServer(serverOptions(chatOptions(adapter), { stopGraceMs: 50 }));
+    const failure = new Error("socket refused to close");
+    const warnings = await logged(server, "warn", async () => {
+      await within(server.stop(), "stop()");
+      failing.reject(failure);
+      // hex's handler was attached first, so it has run once ours has.
+      await failing.promise.catch(() => {});
+    });
+    expect(warnings).toContainEqual([
+      "hex: stop: disconnecting chat channels failed late",
+      failure,
+    ]);
+  });
+
+  test("a failed start gives up on a channel that never disconnects", async () => {
+    const adapter = new FakeChatAdapter();
+    adapter.disconnect = () => new Promise(() => {});
+    const chat: ChatOptions = {
+      model: mockModel(),
+      channels: {
+        fake: {
+          adapter,
+          allowlist: [DANIEL],
+          verify: () => {
+            throw new Error("token rejected");
+          },
+        },
+      },
+    };
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failed = startServer(serverOptions(chat, { stopGraceMs: 50 }));
+      await expect(within(failed, "the start to fail")).rejects.toThrow("token rejected");
+      expect(errors).toHaveBeenCalledWith(
+        "hex: after a failed start: chat channels did not disconnect within 50 ms",
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   test("a channel that fails to connect fails startup and leaves nothing open", async () => {

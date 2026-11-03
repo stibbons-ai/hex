@@ -32,7 +32,7 @@ working directory (git-ignored at the repository root); it is created on start. 
 repository root.
 SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first, then
 requests in flight, open streams and chat replies included, get 5 seconds before they are closed
-(replies cut off are logged), then Mastra shuts down. A second signal of the same kind kills it at
+(the cut-off is logged), then Mastra shuts down. A second signal of the same kind kills it at
 once.
 
 ```sh
@@ -81,8 +81,10 @@ Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs 
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
 start, doesn't start within 30 seconds (Slack: bot-token check and socket connect), or starts but
-can't work (Slack rejected the bot token); the server then closes everything again, including a
-channel that finishes starting after the deadline.
+can't work (Slack rejected the bot token); the server then closes what it started and `bun run
+start` exits with code 1. A Slack start that only finishes after the deadline is disconnected again
+if it was still checking the bot token; one still connecting its socket stays open until the
+process exits.
 
 ```json
 {
