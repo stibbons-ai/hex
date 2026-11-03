@@ -64,7 +64,7 @@ outbox = "/srv/hex/outbox"                   # required
 archive = "~/Proton Drive/Buchhaltung"       # required
 log = "~/Library/Logs/hex/sync.log"          # required, appended to; outside both roots, no symlink
 min_age_secs = 60                            # optional, default 60
-interval_secs = 900                          # optional, default 900, > 0 (used by the scheduler)
+interval_secs = 900                          # optional, default 900, > 0 (seconds between scheduled runs)
 ```
 
 Paths must be absolute or start with `~/`.
@@ -91,13 +91,62 @@ Exit codes:
 
 - `0`: done;
 - `1`: some files failed, or a line could not be written (the log; on a dry run, stdout);
-- `2`: nothing done (config error, the log can't be opened, lies inside a root or is a symlink,
-  or a root check failed).
+- `2`: nothing done (config error, the log's folder can't be created, the log can't be opened,
+  the lock file can't be opened or locked, the log lies inside a root or is a symlink, or a root
+  check failed);
+- `3`: nothing done because another run is in progress (see below).
+
+### One run at a time
+
+A run takes an exclusive `flock` on `<log>.lock` (for `sync.log`, `sync.log.lock`) right after
+the root checks, which only read, and before it writes anything but the log's folder and the
+lock file; it holds the lock for the whole pass. If another run holds it, the run touches
+nothing, logs nothing, prints `hex-sync: another run is in progress (lock <path>)` to stderr
+and exits `3`. The lock is
+released when the process exits, however it exits, so a lock file left behind is harmless and
+never needs deleting. A run that aborts takes no lock (it may not create the log's folder) and
+only appends its abort line. A dry run takes no lock and doesn't create the lock file; run
+during a live run, it may show that run's claims as `restore-claim` plans.
+
+### Scheduling (macOS)
+
+```sh
+hex-sync install     # run every interval_secs as the launchd agent ai.stibbons.hex-sync
+hex-sync uninstall   # unload the agent and remove its plist
+```
+
+`install [--config <path>] [--launch-agents-dir <dir>]` loads the config (failing on an invalid
+one, or on a log that is a symlink or lies inside an Outbox or Archive that can be resolved;
+one that can't, e.g. missing on an unmounted drive, is fine), then writes
+`<dir>/ai.stibbons.hex-sync.plist` (default dir `~/Library/LaunchAgents`, created if missing;
+the plist's mode is at most `0644`: the umask can only narrow it, so it is never
+world-writable, which launchd rejects). The agent runs `<this binary> run --config <absolute
+config path>` every `interval_secs`, the first time
+one interval after loading. Its stdout goes to `/dev/null` (it only echoes the log); its
+stderr, where config errors, aborts and refused runs show up, goes to
+`~/Library/Logs/hex-sync.stderr.log`. That folder always exists, so launchd never creates a
+folder on the agent's behalf (in the log's folder it could recreate a missing root before
+hex-sync's checks run, or fail every start on an unmounted volume). Install then reloads the
+agent (`launchctl bootout`, then `bootstrap gui/<uid>`). The plist holds `interval_secs`, the
+config's path and the binary's resolved path: reinstall after changing `interval_secs` or
+moving the config or the binary; other config edits apply on the next run.
+
+`uninstall [--launch-agents-dir <dir>]` unloads the agent and removes the plist; either being
+gone already is fine. Both commands say what they did and exit `0`, or `1` with the failing
+step (a failed `launchctl` call is named with its stderr). A failed `bootstrap` leaves the
+plist in place but no agent loaded, even one that was loaded before: fix the cause and rerun
+`hex-sync install`.
+
+Reinstalling or uninstalling while a scheduled pass runs stops it with SIGTERM (`bootout`
+waits for it to exit). That is crash-safe: the next run restores the claims it left. A
+half-written `.hex-sync-<n>.tmp` stays in the Archive and is logged as `stale-temp`.
+
+Status: `launchctl print gui/$(id -u)/ai.stibbons.hex-sync` (run interval, runs, last exit
+code). `HEX_SYNC_LAUNCHCTL` overrides the `launchctl` program (default `/bin/launchctl`); the
+tests point it at a fake.
 
 ## Limits
 
-- Concurrent runs aren't locked against each other. A second run restores the first run's
-  claims, so the first run then fails on those files; nothing is lost.
 - These paths are covered by code review only; triggering them through the CLI would need a
   fault hook:
   - a failed verification of an Archive copy;

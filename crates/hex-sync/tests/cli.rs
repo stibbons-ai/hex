@@ -1,7 +1,9 @@
 //! Seam tests: run the real `hex-sync` binary against temporary Outbox/Archive folders.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -12,14 +14,16 @@ use std::time::{Duration, SystemTime};
 use filetime::FileTime;
 use tempfile::TempDir;
 
-/// Held while a child is spawned. A child that another test thread forks in the meantime
-/// would hold `run_with_closed_stdout`'s pipe read end until it execs, and the write the
-/// test expects to fail could then succeed. `spawn` returns only after the exec.
+/// Held while a child is spawned, and while a descriptor no child may inherit is opened or
+/// closed. A child that another test thread forks in the meantime holds every open
+/// descriptor until it execs: `run_with_closed_stdout`'s pipe read end (the write the test
+/// expects to fail could then succeed), a just-written script (its exec fails with
+/// ETXTBSY), a released run lock (still held). `spawn` returns only after the exec.
 static SPAWN: Mutex<()> = Mutex::new(());
 
-fn spawn_locked(spawn: impl FnOnce() -> Child) -> Child {
+fn spawn_locked<T>(f: impl FnOnce() -> T) -> T {
     let _guard = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
-    spawn()
+    f()
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_hex-sync");
@@ -167,7 +171,7 @@ impl Env {
         }
         let (outbox, archive) = (snapshot(&self.outbox), snapshot(&self.archive));
         let output = self.run(&[]);
-        assert_exit_2(&output, "aborted");
+        assert_exit(&output, 2, "aborted");
         assert_eq!(snapshot(&self.outbox), outbox);
         assert_eq!(snapshot(&self.archive), archive);
         if logged {
@@ -227,10 +231,22 @@ fn assert_partial_failure(output: &Output) {
     assert_eq!(output.status.code(), Some(1), "stderr: {}", stderr(output));
 }
 
-/// Exit 2 with `needle` in stderr.
-fn assert_exit_2(output: &Output, needle: &str) {
-    assert_eq!(output.status.code(), Some(2), "stderr: {}", stderr(output));
+/// Exit `code` with `needle` in stderr.
+fn assert_exit(output: &Output, code: i32, needle: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "stderr: {}",
+        stderr(output)
+    );
     assert!(stderr(output).contains(needle), "{}", stderr(output));
+}
+
+/// Spawns `command` (under `SPAWN`) and collects its output.
+fn output(mut command: Command) -> Output {
+    spawn_locked(|| command.spawn().unwrap())
+        .wait_with_output()
+        .unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -763,7 +779,7 @@ fn aborts_when_root_is_unreadable() {
     let output = env.run(&[]);
     chmod(&env.outbox, 0o755);
 
-    assert_exit_2(&output, "aborted");
+    assert_exit(&output, 2, "aborted");
     assert!(env.log_text().contains("\tabort\t"));
     assert!(env.outbox.join("a.pdf").exists());
     assert_eq!(snapshot(&env.archive).len(), 1);
@@ -830,7 +846,7 @@ fn aborts_when_log_is_inside_a_root() {
 
             let output = env.run(&[]);
 
-            assert_exit_2(&output, "inside");
+            assert_exit(&output, 2, "inside");
             assert!(!log.exists(), "{inside}");
             assert_eq!(log.parent().unwrap().exists(), logs_present, "{inside}");
             assert!(env.outbox.join("a.pdf").exists());
@@ -852,7 +868,7 @@ fn aborts_without_writing_a_log_inside_an_unreadable_root() {
         let output = env.run(&[]);
         chmod(&root, 0o755);
 
-        assert_exit_2(&output, "inside");
+        assert_exit(&output, 2, "inside");
         assert!(!log.exists(), "{inside}");
         assert_eq!(snapshot(&env.outbox), outbox);
         assert_eq!(snapshot(&env.archive), archive);
@@ -867,7 +883,7 @@ fn dry_run_abort_writes_no_log() {
 
     let output = env.run(&["--dry-run"]);
 
-    assert_exit_2(&output, "aborted");
+    assert_exit(&output, 2, "aborted");
     assert!(!env.log.exists());
 }
 
@@ -883,7 +899,7 @@ fn abort_never_creates_a_missing_root_that_holds_the_log() {
 
         let output = env.run(&[]);
 
-        assert_exit_2(&output, "not logged");
+        assert_exit(&output, 2, "not logged");
         assert!(!env.archive.exists(), "{log}");
         assert!(env.outbox.join("a.pdf").exists());
     }
@@ -900,7 +916,7 @@ fn aborts_when_log_is_a_symlink() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "symlink");
+    assert_exit(&output, 2, "symlink");
     assert!(!env.outbox.join("log.tsv").exists());
     assert!(env.outbox.join("a.pdf").exists());
 }
@@ -918,7 +934,7 @@ fn abort_reason_survives_a_log_that_cannot_be_opened() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "cannot open log");
+    assert_exit(&output, 2, "cannot open log");
     assert!(stderr(&output).contains("Archive"), "{}", stderr(&output));
     assert!(!env.archive.exists());
 }
@@ -1079,7 +1095,7 @@ fn missing_required_key_is_a_config_error() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "archive");
+    assert_exit(&output, 2, "archive");
     assert!(env.outbox.join("a.pdf").exists());
     assert!(!env.log.exists());
 }
@@ -1091,7 +1107,7 @@ fn unknown_key_is_a_config_error() {
 
     let output = env.run(&[]);
 
-    assert_exit_2(&output, "password");
+    assert_exit(&output, 2, "password");
     assert!(env.outbox.join("a.pdf").exists());
 }
 
@@ -1099,7 +1115,7 @@ fn unknown_key_is_a_config_error() {
 fn zero_interval_is_a_config_error() {
     let env = Env::with_config_tail("interval_secs = 0\n");
 
-    assert_exit_2(&env.run(&[]), "interval_secs");
+    assert_exit(&env.run(&[]), 2, "interval_secs");
 }
 
 #[test]
@@ -1107,7 +1123,7 @@ fn relative_path_is_a_config_error() {
     let env = Env::new();
     env.set_paths(Path::new("outbox"), &env.archive, &env.log);
 
-    assert_exit_2(&env.run(&[]), "absolute");
+    assert_exit(&env.run(&[]), 2, "absolute");
 }
 
 #[test]
@@ -1236,4 +1252,636 @@ fn dry_run_restores_two_claims_to_distinct_names() {
         .filter_map(|l| l.split_once(" -> ").map(|(_, t)| t))
         .collect();
     assert_eq!(targets.len(), 2, "{dry}");
+}
+
+// Scheduling (install / uninstall)
+
+const LABEL: &str = "ai.stibbons.hex-sync";
+
+/// Exit statuses of the fake launchctl.
+const OK: i32 = 0;
+const BOOTOUT_NOT_LOADED: i32 = 3;
+const BOOTOUT_NO_SUCH_SERVICE: i32 = 113;
+const UNEXPECTED_FAILURE: i32 = 1;
+const BOOTSTRAP_IO_ERROR: i32 = 5;
+
+/// A `launchctl` stand-in plus the LaunchAgents folder it pairs with, both under the Env's
+/// root, which is also `HOME`: tests never reach the real launchd or
+/// `~/Library/LaunchAgents`.
+struct Launchd {
+    home: PathBuf,
+    /// `$HOME/Library/LaunchAgents`, the default `--launch-agents-dir`.
+    dir: PathBuf,
+    plist: PathBuf,
+    calls: PathBuf,
+    script: PathBuf,
+}
+
+impl Launchd {
+    /// The fake appends its arguments as one line to `calls`, writes a line to stderr, and
+    /// exits with `$FAKE_BOOTOUT_EXIT` / `$FAKE_BOOTSTRAP_EXIT` (default 0).
+    fn new(env: &Env) -> Self {
+        let dir = env.root.join("Library/LaunchAgents");
+        let launchd = Self {
+            home: env.root.clone(),
+            plist: dir.join(format!("{LABEL}.plist")),
+            dir,
+            calls: env.root.join("launchctl.calls"),
+            script: env.root.join("launchctl"),
+        };
+        spawn_locked(|| {
+            fs::write(
+                &launchd.script,
+                "#!/bin/sh\n\
+                 echo \"$@\" >> \"$FAKE_LAUNCHCTL_CALLS\"\n\
+                 case \"$1\" in\n\
+                 bootout) echo 'Boot-out failed: 3: No such process' >&2; exit \"${FAKE_BOOTOUT_EXIT:-0}\" ;;\n\
+                 bootstrap) echo 'Bootstrap failed: 5: Input/output error' >&2; exit \"${FAKE_BOOTSTRAP_EXIT:-0}\" ;;\n\
+                 esac\n",
+            )
+            .unwrap();
+        });
+        chmod(&launchd.script, 0o755);
+        launchd
+    }
+
+    /// `hex-sync <args>` with `HOME` at the Env's root, against the fake launchctl, which
+    /// exits `bootout_exit` for `bootout` and `bootstrap_exit` for `bootstrap`.
+    fn command(&self, args: &[&OsStr], bootout_exit: i32, bootstrap_exit: i32) -> Command {
+        let mut command = Command::new(BIN);
+        command
+            .args(args)
+            .env("HOME", &self.home)
+            .env("HEX_SYNC_LAUNCHCTL", &self.script)
+            .env("FAKE_LAUNCHCTL_CALLS", &self.calls)
+            .env("FAKE_BOOTOUT_EXIT", bootout_exit.to_string())
+            .env("FAKE_BOOTSTRAP_EXIT", bootstrap_exit.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn install_command(&self, config: &Path, bootout_exit: i32, bootstrap_exit: i32) -> Command {
+        let args = [
+            OsStr::new("install"),
+            OsStr::new("--config"),
+            config.as_os_str(),
+            OsStr::new("--launch-agents-dir"),
+            self.dir.as_os_str(),
+        ];
+        self.command(&args, bootout_exit, bootstrap_exit)
+    }
+
+    fn install(&self, config: &Path, bootout_exit: i32, bootstrap_exit: i32) -> Output {
+        output(self.install_command(config, bootout_exit, bootstrap_exit))
+    }
+
+    fn uninstall_command(&self, bootout_exit: i32) -> Command {
+        let args = [
+            OsStr::new("uninstall"),
+            OsStr::new("--launch-agents-dir"),
+            self.dir.as_os_str(),
+        ];
+        self.command(&args, bootout_exit, OK)
+    }
+
+    fn uninstall(&self, bootout_exit: i32) -> Output {
+        output(self.uninstall_command(bootout_exit))
+    }
+
+    /// One line per launchctl call, its arguments space-separated.
+    fn calls(&self) -> Vec<String> {
+        match fs::read_to_string(&self.calls) {
+            Ok(text) => text.lines().map(str::to_owned).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn plist_text(&self) -> String {
+        fs::read_to_string(&self.plist).unwrap()
+    }
+}
+
+fn gui_domain() -> String {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    format!("gui/{}", unsafe { libc::getuid() })
+}
+
+#[test]
+fn install_writes_the_plist_and_loads_the_agent() {
+    let env = Env::with_config_tail("interval_secs = 1234\n");
+    // A config name that needs XML escaping.
+    let config = env.root.join("a&b <c> \"d\" 'e'.toml");
+    fs::rename(&env.config, &config).unwrap();
+    let launchd = Launchd::new(&env);
+
+    let output = launchd.install(&config, BOOTOUT_NOT_LOADED, OK);
+
+    assert_success(&output);
+    let program = fs::canonicalize(BIN).unwrap();
+    let escaped_config = env
+        .root
+        .join("a&amp;b &lt;c&gt; &quot;d&quot; &apos;e&apos;.toml");
+    let stderr_log = env.root.join("Library/Logs/hex-sync.stderr.log");
+    assert_eq!(
+        launchd.plist_text(),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.stibbons.hex-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{}</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>{}</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>1234</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>{}</string>
+</dict>
+</plist>
+"#,
+            program.display(),
+            escaped_config.display(),
+            stderr_log.display()
+        )
+    );
+    let domain = gui_domain();
+    assert_eq!(
+        launchd.calls(),
+        [
+            format!("bootout {domain}/{LABEL}"),
+            format!("bootstrap {domain} {}", launchd.plist.display()),
+        ]
+    );
+}
+
+#[test]
+fn install_again_replaces_the_plist_and_reloads() {
+    let env = Env::with_config_tail("interval_secs = 1234\n");
+    let launchd = Launchd::new(&env);
+    assert_success(&launchd.install(&env.config, BOOTOUT_NOT_LOADED, OK));
+    env.write_config(&config_text(
+        &env.outbox,
+        &env.archive,
+        &env.log,
+        "interval_secs = 60\n",
+    ));
+
+    let output = launchd.install(&env.config, OK, OK);
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("unloaded the previous"),
+        "{}",
+        stdout(&output)
+    );
+    let plist = launchd.plist_text();
+    assert!(plist.contains("<integer>60</integer>"), "{plist}");
+    assert!(!plist.contains("1234"), "{plist}");
+    let entries: Vec<_> = fs::read_dir(&launchd.dir).unwrap().collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let calls = launchd.calls();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(calls[2].starts_with("bootout ") && calls[3].starts_with("bootstrap "));
+}
+
+#[test]
+fn install_with_an_invalid_config_writes_and_loads_nothing() {
+    let env = Env::new();
+    env.write_config("outbox = \"/tmp\"\n");
+    let launchd = Launchd::new(&env);
+
+    let output = launchd.install(&env.config, OK, OK);
+
+    assert_exit(&output, 1, "invalid config");
+    assert!(!launchd.dir.exists());
+    assert!(launchd.calls().is_empty());
+}
+
+#[test]
+fn install_fails_when_bootstrap_fails_and_keeps_the_plist() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+
+    let output = launchd.install(&env.config, BOOTOUT_NOT_LOADED, BOOTSTRAP_IO_ERROR);
+
+    assert_exit(&output, 1, "Input/output error");
+    let err = stderr(&output);
+    assert!(
+        err.contains(&format!("bootstrap {}", gui_domain())),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "ai.stibbons.hex-sync is not loaded; fix the cause and rerun hex-sync install"
+        ),
+        "{err}"
+    );
+    assert!(launchd.plist.exists());
+}
+
+#[test]
+fn install_fails_on_an_unexpected_bootout_error_without_bootstrapping() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+
+    let output = launchd.install(&env.config, UNEXPECTED_FAILURE, OK);
+
+    assert_exit(&output, 1, "bootout");
+    assert_eq!(launchd.calls().len(), 1, "{:?}", launchd.calls());
+}
+
+#[test]
+fn uninstall_unloads_and_removes_the_plist_and_is_idempotent() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    assert_success(&launchd.install(&env.config, BOOTOUT_NOT_LOADED, OK));
+
+    let first = launchd.uninstall(OK);
+    let second = launchd.uninstall(BOOTOUT_NO_SUCH_SERVICE);
+
+    assert_success(&first);
+    assert!(
+        stdout(&first).contains(&format!("unloaded {LABEL}")),
+        "{}",
+        stdout(&first)
+    );
+    assert!(stdout(&first).contains("removed "), "{}", stdout(&first));
+    assert!(!launchd.plist.exists());
+    assert_success(&second);
+    assert!(
+        stdout(&second).contains("was not loaded"),
+        "{}",
+        stdout(&second)
+    );
+    assert!(
+        stdout(&second).contains("no plist at"),
+        "{}",
+        stdout(&second)
+    );
+    let target = format!("bootout {}/{LABEL}", gui_domain());
+    assert_eq!(launchd.calls()[2..], [target.clone(), target]);
+}
+
+#[test]
+fn install_writes_a_relative_config_path_as_absolute_without_resolving_symlinks() {
+    let env = Env::new();
+    fs::create_dir(env.root.join("real")).unwrap();
+    fs::rename(&env.config, env.root.join("real/sync.toml")).unwrap();
+    symlink(env.root.join("real"), env.root.join("link")).unwrap();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.install_command(Path::new("link/sync.toml"), OK, OK);
+    command.current_dir(&env.root);
+
+    let output = output(command);
+
+    assert_success(&output);
+    let expected = format!(
+        "<string>{}</string>",
+        env.root.join("link/sync.toml").display()
+    );
+    assert!(
+        launchd.plist_text().contains(&expected),
+        "{}",
+        launchd.plist_text()
+    );
+}
+
+#[test]
+fn install_and_uninstall_default_to_paths_under_home() {
+    let env = Env::new();
+    let config = env.root.join(".config/hex/sync.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::rename(&env.config, &config).unwrap();
+    let launchd = Launchd::new(&env);
+
+    let installed = output(launchd.command(&[OsStr::new("install")], OK, OK));
+
+    assert_success(&installed);
+    let expected = format!("<string>{}</string>", config.display());
+    assert!(
+        launchd.plist_text().contains(&expected),
+        "{}",
+        launchd.plist_text()
+    );
+
+    let removed = output(launchd.command(&[OsStr::new("uninstall")], OK, OK));
+
+    assert_success(&removed);
+    assert!(!launchd.plist.exists());
+}
+
+/// Makes `command` run with umask 0, so only the mode the binary asks for limits the files
+/// it creates.
+fn with_umask_0(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: umask is async-signal-safe and touches no memory.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0);
+            Ok(())
+        });
+    }
+}
+
+#[test]
+fn install_creates_a_plist_launchd_accepts_whatever_the_umask() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    with_umask_0(&mut command);
+
+    assert_success(&output(command));
+
+    let mode = fs::metadata(&launchd.plist).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644);
+}
+
+#[test]
+fn install_replaces_a_temp_left_by_a_crashed_install() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let temp = launchd.dir.join(format!(".{LABEL}.plist.tmp"));
+    write(&temp, b"half a plist");
+    chmod(&temp, 0o666);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    with_umask_0(&mut command);
+
+    assert_success(&output(command));
+
+    let mode = fs::metadata(&launchd.plist).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644);
+    assert!(launchd.plist_text().starts_with("<?xml"));
+    let entries: Vec<_> = fs::read_dir(&launchd.dir).unwrap().collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+}
+
+#[test]
+fn install_refuses_a_log_inside_a_root() {
+    for root in ["outbox", "archive"] {
+        let env = Env::new();
+        let root = env.root.join(root);
+        env.set_paths(&env.outbox, &env.archive, &root.join("logs/sync.log"));
+        let launchd = Launchd::new(&env);
+
+        let output = launchd.install(&env.config, OK, OK);
+
+        assert_exit(&output, 1, "not installed: log");
+        assert!(!launchd.dir.exists());
+        assert!(launchd.calls().is_empty());
+        assert!(!root.join("logs").exists());
+    }
+}
+
+#[test]
+fn install_fails_without_home_before_writing_anything() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.install_command(&env.config, OK, OK);
+    command.env_remove("HOME");
+
+    let output = output(command);
+
+    assert_exit(&output, 1, "HOME is not set or not absolute");
+    assert!(!launchd.dir.exists());
+    assert!(launchd.calls().is_empty());
+}
+
+#[test]
+fn uninstall_fails_without_home_before_unloading() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    assert_success(&launchd.install(&env.config, BOOTOUT_NOT_LOADED, OK));
+    let calls = launchd.calls();
+    let mut command = launchd.command(&[OsStr::new("uninstall")], OK, OK);
+    command.env_remove("HOME").current_dir(&env.root);
+
+    let output = output(command);
+
+    assert_exit(&output, 1, "HOME is not set or not absolute");
+    assert_eq!(launchd.calls(), calls);
+    assert!(launchd.plist.exists());
+}
+
+#[test]
+fn install_resolves_a_relative_launch_agents_dir() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let args = [
+        OsStr::new("install"),
+        OsStr::new("--config"),
+        env.config.as_os_str(),
+        OsStr::new("--launch-agents-dir"),
+        OsStr::new("agents/new"),
+    ];
+    let mut command = launchd.command(&args, BOOTOUT_NOT_LOADED, OK);
+    command.current_dir(&env.root);
+
+    let output = output(command);
+
+    assert_success(&output);
+    let plist = env.root.join(format!("agents/new/{LABEL}.plist"));
+    assert!(plist.exists());
+    let bootstrap = format!("bootstrap {} {}", gui_domain(), plist.display());
+    assert_eq!(launchd.calls().last(), Some(&bootstrap));
+}
+
+#[test]
+fn install_accepts_a_missing_root() {
+    let env = Env::new();
+    fs::remove_dir(&env.archive).unwrap();
+    let launchd = Launchd::new(&env);
+
+    assert_success(&launchd.install(&env.config, OK, OK));
+
+    assert!(launchd.plist.exists());
+    assert!(!env.archive.exists());
+}
+
+#[test]
+fn uninstall_fails_on_an_unexpected_bootout_error_and_keeps_the_plist() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    assert_success(&launchd.install(&env.config, BOOTOUT_NOT_LOADED, OK));
+
+    let output = launchd.uninstall(UNEXPECTED_FAILURE);
+
+    assert_exit(&output, 1, "bootout");
+    assert!(launchd.plist.exists());
+}
+
+#[test]
+fn uninstall_fails_when_launchctl_cannot_run() {
+    let env = Env::new();
+    let launchd = Launchd::new(&env);
+    let mut command = launchd.uninstall_command(OK);
+    command.env("HEX_SYNC_LAUNCHCTL", env.root.join("missing-launchctl"));
+
+    let output = output(command);
+
+    assert_exit(&output, 1, "cannot run");
+    assert!(
+        !stdout(&output).contains("not loaded"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+// Run lock
+
+impl Env {
+    fn lock_path(&self) -> PathBuf {
+        self.log.with_file_name("sync.log.lock")
+    }
+
+    /// Holds an exclusive `flock` on the run lock, as a concurrent run would, until passed to
+    /// `release`.
+    fn hold_lock(&self) -> File {
+        let path = self.lock_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = spawn_locked(|| File::create(&path).unwrap());
+        // SAFETY: `file` owns a valid open descriptor for the duration of the call.
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(locked, 0, "{}", std::io::Error::last_os_error());
+        file
+    }
+}
+
+fn release(lock: File) {
+    spawn_locked(|| drop(lock));
+}
+
+#[test]
+fn a_run_holds_the_lock_for_its_whole_pass() {
+    // Each file logs a line of over 400 bytes, echoed to a stdout pipe nobody reads: more
+    // than the 64 KiB pipe buffer, so run A blocks mid-pass until the pipe is drained.
+    const FILES: usize = 400;
+    let env = Env::new();
+    let padding = "n".repeat(200);
+    for n in 0..FILES {
+        write(&env.outbox.join(format!("{padding}{n:03}.pdf")), b"x");
+    }
+    let mut command = env.command(&["run"]);
+    command.stderr(Stdio::null());
+    let first = spawn_locked(|| command.spawn().unwrap());
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    while fs::read(&env.log).map_or(true, |log| log.is_empty()) {
+        assert!(SystemTime::now() < deadline, "run A never logged");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Not `env.run`: its Archive bookkeeping would race run A's writes.
+    let refused = output(env.command(&["run"]));
+
+    assert_exit(&refused, 3, "another run is in progress");
+    let first = first.wait_with_output().unwrap();
+    assert_success(&first);
+    assert_eq!(snapshot(&env.archive).len(), FILES);
+    assert_eq!(outbox_entries(&env), 0);
+}
+
+#[test]
+fn run_fails_when_the_log_folder_cannot_be_created() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"stays");
+    let read_only = env.root.join("read-only");
+    fs::create_dir(&read_only).unwrap();
+    chmod(&read_only, 0o555);
+    let log = read_only.join("logs/sync.log");
+    env.set_paths(&env.outbox, &env.archive, &log);
+
+    let output = env.run(&["run"]);
+
+    assert_exit(&output, 2, "cannot create log folder");
+    assert!(env.outbox.join("a.pdf").exists());
+    assert!(snapshot(&env.archive).is_empty());
+}
+
+#[test]
+fn run_aborts_when_the_lock_file_is_a_symlink() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"stays");
+    fs::create_dir_all(env.log.parent().unwrap()).unwrap();
+    let target = env.root.join("elsewhere.lock");
+    symlink(&target, env.lock_path()).unwrap();
+    let (outbox, archive) = (snapshot(&env.outbox), snapshot(&env.archive));
+
+    let output = env.run(&["run"]);
+
+    assert_exit(&output, 2, "cannot open lock");
+    assert!(!target.exists());
+    assert_eq!(snapshot(&env.outbox), outbox);
+    assert_eq!(snapshot(&env.archive), archive);
+    assert!(!env.log.exists());
+}
+
+#[test]
+fn run_is_refused_while_another_run_holds_the_lock() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"a");
+    let lock = env.hold_lock();
+    let (outbox, archive) = (snapshot(&env.outbox), snapshot(&env.archive));
+
+    let refused = env.run(&["run"]);
+
+    assert_eq!(refused.status.code(), Some(3), "{}", stderr(&refused));
+    assert_eq!(
+        stderr(&refused),
+        format!(
+            "hex-sync: another run is in progress (lock {})\n",
+            env.lock_path().display()
+        )
+    );
+    assert_eq!(stdout(&refused), "");
+    assert_eq!(snapshot(&env.outbox), outbox);
+    assert_eq!(snapshot(&env.archive), archive);
+    assert!(!env.log.exists());
+
+    release(lock);
+    let output = env.run(&["run"]);
+
+    assert_success(&output);
+    assert_eq!(fs::read(env.archive.join("a.pdf")).unwrap(), b"a");
+    assert!(
+        env.log_text().contains("\tcopy\ta.pdf"),
+        "{}",
+        env.log_text()
+    );
+}
+
+#[test]
+fn dry_run_works_while_the_lock_is_held() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"a");
+    let lock = env.hold_lock();
+    let outbox = snapshot(&env.outbox);
+
+    let output = env.run(&["--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "dry-run: copy a.pdf -> a.pdf\n");
+    assert_eq!(snapshot(&env.outbox), outbox);
+    assert!(snapshot(&env.archive).is_empty());
+    assert!(!env.log.exists());
+    release(lock);
+}
+
+#[test]
+fn dry_run_creates_no_lock_file() {
+    let env = Env::new();
+    write(&env.outbox.join("a.pdf"), b"a");
+
+    assert_success(&env.run(&["--dry-run"]));
+
+    assert!(!env.log.parent().unwrap().exists());
 }

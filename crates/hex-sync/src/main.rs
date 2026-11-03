@@ -3,6 +3,8 @@
 mod config;
 mod fsio;
 mod journal;
+mod launchd;
+mod lock;
 mod sync;
 
 use std::path::{Path, PathBuf};
@@ -13,8 +15,10 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::Config;
 use crate::journal::{Action, Journal, Outcome};
+use crate::lock::LockError;
 
 const DEFAULT_CONFIG: &str = "~/.config/hex/sync.toml";
+const DEFAULT_LAUNCH_AGENTS_DIR: &str = "~/Library/LaunchAgents";
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +38,10 @@ struct Cli {
 enum Command {
     /// Move eligible Outbox files into the Archive once (the default).
     Run(RunArgs),
+    /// Schedule `run` every `interval_secs` as the launchd agent ai.stibbons.hex-sync.
+    Install(InstallArgs),
+    /// Unload the launchd agent and remove its plist.
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Args)]
@@ -46,11 +54,61 @@ struct RunArgs {
     config: PathBuf,
 }
 
+#[derive(Args)]
+struct InstallArgs {
+    /// Config file; the agent runs with this path.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_CONFIG)]
+    config: PathBuf,
+    #[command(flatten)]
+    launch_agents: LaunchAgentsArg,
+}
+
+#[derive(Args)]
+struct UninstallArgs {
+    #[command(flatten)]
+    launch_agents: LaunchAgentsArg,
+}
+
+#[derive(Args)]
+struct LaunchAgentsArg {
+    /// Folder holding the agent's plist.
+    #[arg(long, value_name = "PATH", default_value = DEFAULT_LAUNCH_AGENTS_DIR)]
+    launch_agents_dir: PathBuf,
+}
+
+impl LaunchAgentsArg {
+    /// The folder as an absolute path. A `~` that HOME can't turn into an absolute path is
+    /// an error: resolved against the working folder instead, uninstall would miss the real
+    /// plist and still report success.
+    fn dir(&self) -> Result<PathBuf, String> {
+        let dir = config::expand_home(&self.launch_agents_dir);
+        if self.launch_agents_dir.starts_with("~") && !dir.is_absolute() {
+            return Err(format!(
+                "cannot expand {}: HOME is not set or not absolute",
+                self.launch_agents_dir.display()
+            ));
+        }
+        std::path::absolute(&dir).map_err(|e| format!("cannot resolve {}: {e}", dir.display()))
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let args = match cli.command {
         Some(Command::Run(args)) => args,
         None => cli.run,
+        Some(Command::Install(args)) => {
+            let config = config::expand_home(&args.config);
+            let result = args.launch_agents.dir();
+            return report(result.and_then(|dir| launchd::install(&config, &dir)));
+        }
+        Some(Command::Uninstall(args)) => {
+            return report(
+                args.launch_agents
+                    .dir()
+                    .and_then(|dir| launchd::uninstall(&dir)),
+            );
+        }
     };
     match run(&args) {
         Ok(code) => code,
@@ -61,9 +119,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// Exit codes of `install` and `uninstall`: 0 done, 1 failed.
+fn report(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("hex-sync: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Exit codes: 0 all done; 1 some files failed, or a log line (on a dry run, a plan line)
-/// could not be written, which stops the pass; 2 nothing done (`Err`: config error, log
-/// cannot be opened, is a symlink or lies inside a root, or a root check failed).
+/// could not be written, which stops the pass; 2 nothing done (`Err`: config error, the log's
+/// folder cannot be created, the log cannot be opened, the lock file cannot be opened or
+/// locked, the log is a symlink or lies inside a root, or a root check failed); 3 nothing
+/// done because another run holds the lock.
 fn run(args: &RunArgs) -> Result<ExitCode, String> {
     let config = Config::load(&config::expand_home(&args.config))?;
     let roots = match sync::check_roots(&config.outbox, &config.archive, &config.log) {
@@ -73,7 +144,7 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
             if abort.loggable && !args.dry_run {
                 // Never create a folder here: a missing root may be an unmounted drive the
                 // log lies under, however its path is spelled.
-                match Journal::open_existing(&config.log) {
+                match Journal::open(&config.log) {
                     Ok(mut journal) => {
                         let outcome = Outcome::Failed(reason.clone());
                         journal.record(Action::Abort, Path::new("-"), None, outcome);
@@ -87,9 +158,27 @@ fn run(args: &RunArgs) -> Result<ExitCode, String> {
             return Err(format!("aborted, nothing touched: {reason}"));
         }
     };
+    // The lock comes after the root checks, which only read, and before the run writes
+    // anything but the log's folder and the lock file: a refused run leaves no other trace.
+    // An aborting run takes no lock (it may not create the log's folder) and only appends
+    // its abort line.
+    let _lock = if args.dry_run {
+        None
+    } else {
+        match lock::lock_run(&config.log) {
+            Ok(lock) => Some(lock),
+            Err(LockError::Busy(path)) => {
+                let path = path.display();
+                eprintln!("hex-sync: another run is in progress (lock {path})");
+                return Ok(ExitCode::from(3));
+            }
+            Err(LockError::Io(message)) => return Err(message),
+        }
+    };
     let mut journal = if args.dry_run {
         Journal::dry_run()
     } else {
+        // `lock_run` has created the log's folder.
         Journal::open(&config.log)
             .map_err(|e| format!("cannot open log {}: {e}", config.log.display()))?
     };
