@@ -33,10 +33,13 @@ describe("loadChatConfig", () => {
   test("builds a socket-mode Slack adapter, the model and the allowlist from a valid file", async () => {
     const chat = await loadChatConfig(await configFile(valid), slackEnv);
     expect(chat?.model).toBe("anthropic/claude-sonnet-4-5");
-    expect(chat?.allowlists).toEqual({ slack: ["U0DANIEL"] });
-    const slack = chat?.adapters["slack"] as { name: string; isSocketMode: boolean } | undefined;
-    expect(slack?.name).toBe("slack");
-    expect(slack?.isSocketMode).toBe(true);
+    const slack = chat?.channels["slack"];
+    expect(slack?.allowlist).toEqual(["U0DANIEL"]);
+    const adapter = slack?.adapter as { name: string; isSocketMode: boolean } | undefined;
+    expect(adapter?.name).toBe("slack");
+    expect(adapter?.isSocketMode).toBe(true);
+    // Not connected yet, so Slack hasn't confirmed the bot token: the check fails.
+    expect(() => slack?.verify?.()).toThrow("Slack did not accept SLACK_BOT_TOKEN");
   });
 
   test("no channels means no chat", async () => {
@@ -53,6 +56,19 @@ describe("loadChatConfig", () => {
       );
     },
   );
+
+  test.each([
+    ["SLACK_APP_TOKEN", "xoxb-swapped", "xapp-"],
+    ["SLACK_BOT_TOKEN", "xapp-swapped", "xoxb-"],
+    ["SLACK_BOT_TOKEN", " xoxb-padded", "xoxb-"],
+  ])("%s=%j fails on its prefix without echoing the value", async (name, value, prefix) => {
+    const path = await configFile(valid);
+    const loading = loadChatConfig(path, { ...slackEnv, [name]: value });
+    await expect(loading).rejects.toThrow(
+      `hex config ${path}: channel "slack": environment variable ${name} must start with "${prefix}"`,
+    );
+    await expect(loading).rejects.not.toThrow(value.trim());
+  });
 
   test("an unknown adapter fails, listing the known ones", async () => {
     const path = await configFile({

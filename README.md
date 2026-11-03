@@ -62,16 +62,24 @@ routes don't work against this entrypoint.
 
 ## Chat (Slack)
 
-hex answers direct messages and @-mentions in Slack through Mastra Channels, in Slack's socket
-mode: the server opens an outbound WebSocket to Slack, so nothing is exposed publicly and no
-webhook route is served. Only senders on a channel's allowlist get an answer; anyone else is
-ignored (no reply, nothing stored) and logged once per message with channel and sender ID, never
-the text. Every allowlisted conversation, on every channel, shares the memory resource `daniel`
-(working memory on), with one memory thread per conversation (a DM, or a channel thread).
+hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it already
+replied in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
+WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. Only senders on
+a channel's allowlist get an answer. Anyone else's DM, @-mention, reply in such a thread or button
+click is ignored (no reply, nothing stored) and logged as one line with platform and sender ID,
+never the text; other channel messages never reach hex at all. Earlier messages of a channel
+thread are not read into memory. Slash commands are not answered. Every allowlisted conversation,
+on every channel, shares the memory resource `daniel` (working memory on, scoped to the
+resource), with one memory thread per conversation: a DM, a thread inside a DM, or a channel
+thread. A failed reply posts "Something went wrong; see the hex log." and logs the detail. No
+typing indicator is shown (Slack's needs the `assistant:write` scope and works only in its
+assistant threads).
 
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
-says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing
-secret fails startup with the file and the problem; so does a channel that can't connect.
+says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
+malformed secret fails startup with the file and the problem. So does a channel that fails to
+connect, doesn't connect within 30 seconds, or connects but can't work (Slack rejected the bot
+token); the server then closes everything again.
 
 ```json
 {
@@ -89,15 +97,16 @@ secret fails startup with the file and the problem; so does a channel that can't
 - `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
   An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
   package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
-- `allowlist`: exact sender IDs (case and whitespace count); an empty list answers no one.
+- `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
+  empty list answers no one and is logged once at startup.
 
 Secrets live only in the environment, never in the file:
 
 | Variable          | Holds                                                         |
 | ----------------- | ------------------------------------------------------------- |
 | `HEX_CONFIG`      | Path of the config file                                       |
-| `SLACK_APP_TOKEN` | App-level token (`xapp-…`) with `connections:write`           |
-| `SLACK_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`)                               |
+| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write` |
+| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                     |
 | `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one |
 
 ### Slack app for socket mode

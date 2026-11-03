@@ -31,6 +31,8 @@ export class FakeChatAdapter implements Adapter {
   disconnects = 0;
   /** While set, every connect fails with it. */
   connectError: Error | undefined;
+  /** While set, connecting waits for it (a platform that never answers). */
+  connectWait: Promise<void> | undefined;
   #chat: ChatInstance | undefined;
   #ids = 0;
   #waiters: { count: number; resolve: () => void }[] = [];
@@ -44,6 +46,7 @@ export class FakeChatAdapter implements Adapter {
   }
 
   async initialize(chat: ChatInstance): Promise<void> {
+    await this.connectWait;
     if (this.connectError) throw this.connectError;
     this.#chat = chat;
     this.connected = true;
@@ -54,13 +57,14 @@ export class FakeChatAdapter implements Adapter {
     this.disconnects++;
   }
 
-  /** Delivers a message and resolves once the Chat SDK's handler for it has returned. */
-  async receive({ conversation, sender, text, mention = false }: Incoming): Promise<void> {
-    if (!this.#chat) throw new Error("fake adapter not connected");
-    const threadId = `fake:${conversation}`;
-    const message = new Message({
+  /** Earlier platform messages per conversation, as `fetchMessages` would return them. */
+  readonly history = new Map<string, Message[]>();
+
+  /** A message as this platform would deliver it. */
+  message({ conversation, sender, text, mention = false }: Incoming): Message {
+    return new Message({
       id: `in-${++this.#ids}`,
-      threadId,
+      threadId: `fake:${conversation}`,
       text,
       formatted: parseMarkdown(text),
       author: { userId: sender, userName: sender, fullName: sender, isBot: false, isMe: false },
@@ -69,10 +73,61 @@ export class FakeChatAdapter implements Adapter {
       isMention: mention,
       raw: {},
     });
+  }
+
+  /** Delivers a message and resolves once the Chat SDK's handler for it has returned. */
+  async receive(incoming: Incoming): Promise<void> {
+    const message = this.message(incoming);
+    await this.#handled((options) =>
+      this.#connected().processMessage(this, message.threadId, message, options),
+    );
+  }
+
+  /** A button click (e.g. a tool approval) by `sender` on a message in `conversation`. */
+  async click(conversation: string, sender: string, actionId: string): Promise<void> {
+    await this.#handled((options) =>
+      this.#connected().processAction(
+        {
+          adapter: this,
+          actionId,
+          messageId: "out-0",
+          threadId: `fake:${conversation}`,
+          user: this.message({ conversation, sender, text: "" }).author,
+          raw: {},
+        },
+        options,
+      ),
+    );
+  }
+
+  /** A slash command such as `/hex hi` by `sender` in `conversation`. */
+  async slash(conversation: string, sender: string, command: string, text: string): Promise<void> {
+    await this.#handled((options) =>
+      this.#connected().processSlashCommand(
+        {
+          adapter: this,
+          channelId: `fake:${conversation}`,
+          command,
+          text,
+          user: this.message({ conversation, sender, text }).author,
+          raw: {},
+        },
+        options,
+      ),
+    );
+  }
+
+  #connected(): ChatInstance {
+    if (!this.#chat) throw new Error("fake adapter not connected");
+    return this.#chat;
+  }
+
+  /** Runs `process` and waits for every task it hands to `waitUntil`. */
+  async #handled(
+    process: (options: { waitUntil: (task: Promise<unknown>) => void }) => unknown,
+  ): Promise<void> {
     const tasks: Promise<unknown>[] = [];
-    await this.#chat.processMessage(this, threadId, message, {
-      waitUntil: (task) => void tasks.push(task),
-    });
+    await process({ waitUntil: (task) => void tasks.push(task) });
     await Promise.all(tasks);
   }
 
@@ -111,8 +166,8 @@ export class FakeChatAdapter implements Adapter {
   async removeReaction(): Promise<void> {}
   async startTyping(): Promise<void> {}
 
-  async fetchMessages(): Promise<FetchResult> {
-    return { messages: [] };
+  async fetchMessages(threadId: string): Promise<FetchResult> {
+    return { messages: this.history.get(threadId.replace(/^fake:/, "")) ?? [] };
   }
 
   async fetchThread(threadId: string): Promise<ThreadInfo> {

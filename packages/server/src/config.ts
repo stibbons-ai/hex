@@ -1,13 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { createSlackAdapter } from "@chat-adapter/slack";
-import type { Adapter } from "chat";
 import { Result, Schema } from "effect";
-import type { ChatOptions } from "./chat";
+import type { ChatChannel, ChatOptions } from "./chat";
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
-/** Builds one platform's chat adapter from its config `options`; secrets come from env only. */
-export type AdapterFactory = (options: unknown, env: Env) => Adapter;
+/**
+ * Builds one platform's channel from its config `options`; secrets come from `env` only. An
+ * adapter package may still read `process.env` itself for options left unset (the Slack adapter
+ * does for e.g. `SLACK_API_URL`), so a test that must not see the real environment sets them.
+ */
+export type AdapterFactory = (options: unknown, env: Env) => Omit<ChatChannel, "allowlist">;
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 
@@ -21,30 +24,44 @@ function decodeOrThrow<S extends Schema.ConstraintDecoder<unknown>>(
   return result.success;
 }
 
-function requireEnv(env: Env, name: string): string {
+/** The variable's value; the error names the variable and the expected prefix, never the value. */
+function requireToken(env: Env, name: string, prefix: string): string {
   const value = env[name];
   if (!value) throw new Error(`environment variable ${name} is not set`);
+  if (!value.startsWith(prefix)) {
+    throw new Error(`environment variable ${name} must start with "${prefix}"`);
+  }
   return value;
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
 
-/** Chat adapters by platform key. Adding a channel: install its adapter package, add it here. */
+/** Channels by platform key. Adding a channel: install its adapter package, add it here. */
 export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
   slack(options, env) {
     const { mode } = decodeOrThrow(SlackOptions, options, "options");
     const apiUrl = env["SLACK_API_URL"];
-    return createSlackAdapter({
+    const adapter = createSlackAdapter({
       mode,
-      appToken: requireEnv(env, "SLACK_APP_TOKEN"),
-      botToken: requireEnv(env, "SLACK_BOT_TOKEN"),
+      appToken: requireToken(env, "SLACK_APP_TOKEN", "xapp-"),
+      botToken: requireToken(env, "SLACK_BOT_TOKEN", "xoxb-"),
       // Optional: another Slack Web API base URL (tests point it at a fake Slack).
       ...(apiUrl ? { apiUrl } : {}),
     });
+    return {
+      adapter,
+      // The adapter only warns when auth.test fails; without a bot user ID no reply would work.
+      verify() {
+        if (!adapter.botUserId) {
+          throw new Error("Slack did not accept SLACK_BOT_TOKEN (auth.test failed; see the log)");
+        }
+      },
+    };
   },
 };
 
+// Whitespace is rejected here; case is kept, and the allowlist compares IDs exactly.
 const SenderId = Schema.String.check(Schema.isPattern(/^\S+$/));
 
 const ConfigFile = Schema.Struct({
@@ -64,7 +81,7 @@ const ConfigFile = Schema.Struct({
 /**
  * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings, or `undefined` when it
  * configures no channels. Throws an error naming the file and the problem on unreadable or
- * malformed JSON, a shape mismatch, an unknown adapter, or a missing secret.
+ * malformed JSON, a shape mismatch, an unknown adapter, or a missing or malformed secret.
  */
 export async function loadChatConfig(path: string, env: Env): Promise<ChatOptions | undefined> {
   const fail = (problem: string, cause?: unknown): never => {
@@ -80,11 +97,10 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
     return fail(`not valid JSON (${(error as Error).message})`, error);
   }
   const { chat } = decodeOrThrow(ConfigFile, json, `hex config ${path}: invalid config`);
-  const channels = Object.entries(chat.channels);
-  if (channels.length === 0) return undefined;
-  const adapters: Record<string, Adapter> = {};
-  const allowlists: Record<string, readonly string[]> = {};
-  for (const [platform, { options, allowlist }] of channels) {
+  const entries = Object.entries(chat.channels);
+  if (entries.length === 0) return undefined;
+  const channels: Record<string, ChatChannel> = {};
+  for (const [platform, { options, allowlist }] of entries) {
     const factory = Object.hasOwn(adapterFactories, platform)
       ? adapterFactories[platform]
       : undefined;
@@ -93,18 +109,11 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
         `channel "${platform}": unknown adapter; known: ${Object.keys(adapterFactories).join(", ")}`,
       );
     }
-    let adapter: Adapter;
     try {
-      adapter = factory(options, env);
+      channels[platform] = { ...factory(options, env), allowlist };
     } catch (error) {
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }
-    // The allowlist is looked up by the adapter's own name, so the two must agree.
-    if (adapter.name !== platform) {
-      return fail(`channel "${platform}": adapter reports platform "${adapter.name}"`);
-    }
-    adapters[platform] = adapter;
-    allowlists[platform] = allowlist;
   }
-  return { model: chat.model, adapters, allowlists };
+  return { model: chat.model, channels };
 }
