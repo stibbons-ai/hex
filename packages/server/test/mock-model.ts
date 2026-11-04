@@ -38,11 +38,10 @@ export function mockModel({
 const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
 
 /**
- * A model whose first step calls `toolName` with `args`, and whose second answers {@link REPLY}.
- * `before` runs before each step streams, as for {@link mockModel}.
+ * A model whose first step calls hex's one tool, `updateWorkingMemory`, with `args`, and whose
+ * second answers {@link REPLY}. `before` runs before each step streams, as for {@link mockModel}.
  */
 export function toolCallingModel(
-  toolName: string,
   args: Record<string, unknown>,
   { before }: { before?: (options: unknown) => Promise<void> } = {},
 ): MastraModelConfig {
@@ -52,7 +51,12 @@ export function toolCallingModel(
   const model = new MastraLanguageModelV2Mock({
     doStream: [
       step([
-        { type: "tool-call", toolCallId: "call-1", toolName, input: JSON.stringify(args) },
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "updateWorkingMemory",
+          input: JSON.stringify(args),
+        },
         { type: "finish", finishReason: "tool-calls", usage: USAGE },
       ]),
       step([

@@ -74,9 +74,10 @@ function logIgnored(ctx: ChannelHandlerContext, reason: string, platform: string
  * Why a finished tool call failed, by kind only: the failure's text can quote the call's args,
  * and hex's are working-memory content. `undefined` when it succeeded.
  */
-function toolFailure(part: StepContent[number]): string | undefined {
+function toolFailure(
+  part: Extract<StepContent[number], { type: "tool-result" | "tool-error" }>,
+): string | undefined {
   if (part.type === "tool-error") return "error";
-  if (part.type !== "tool-result") return undefined;
   // Mastra hands the model a thrown error or an unknown tool as error text, and input that failed
   // validation as a JSON result with `error: true`.
   const output = part.output as { type?: string; value?: unknown } | undefined;
