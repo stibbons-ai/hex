@@ -8,7 +8,7 @@ import { LibSQLStore } from "@mastra/libsql";
 import { type ChatOptions, type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
 import { FakeChatAdapter } from "./fake-chat-adapter";
-import { REPLY, mockModel } from "./mock-model";
+import { REPLY, mockModel, toolCallingModel } from "./mock-model";
 import { freePort, within } from "./timeouts";
 
 const DANIEL = "U0DANIEL";
@@ -125,6 +125,21 @@ describe("chat channels (fake adapter)", () => {
     // Channel messages reach the agent as signals.
     expect(messages.map((message) => message.role)).toEqual(["signal", "assistant"]);
     expect(messages.every((message) => message.resourceId === CHAT_RESOURCE_ID)).toBe(true);
+  });
+
+  test("a run that calls a tool posts only the final answer: no tool name, args or result", async () => {
+    const memory = "# User Information\n- First Name: Daniel";
+    const { server, adapter } = await start(toolCallingModel("updateWorkingMemory", { memory }));
+    await adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" });
+    await adapter.posts(1);
+    expect(adapter.posted).toEqual([{ threadId: "fake:dm-daniel", text: REPLY }]);
+    // The tool did run: the working memory holds what the model wrote.
+    const resource = await (
+      await memoryStore(server)
+    ).getResourceById({
+      resourceId: CHAT_RESOURCE_ID,
+    });
+    expect(resource?.workingMemory).toContain("First Name: Daniel");
   });
 
   test("two conversations are two threads of the same resource; a follow-up stays in its thread", async () => {

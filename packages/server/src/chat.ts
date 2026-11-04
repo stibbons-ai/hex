@@ -90,6 +90,9 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
       // Off: Slack's typing status (assistant.threads.setStatus) targets its assistant threads,
       // not the DMs and channel threads hex answers in.
       typingStatus: false,
+      // Hidden: a tool card posts the call's args and result, working memory included, which a
+      // channel thread makes public.
+      toolDisplay: "hidden",
     };
   }
   // Handler promises cover the whole run: core awaits the agent's stream before returning.

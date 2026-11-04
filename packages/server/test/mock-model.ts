@@ -1,5 +1,9 @@
 import type { MastraModelConfig } from "@mastra/core/llm";
-import { createMockModel } from "@mastra/core/test-utils/llm-mock";
+import {
+  MastraLanguageModelV2Mock,
+  createMockModel,
+  simulateReadableStream,
+} from "@mastra/core/test-utils/llm-mock";
 
 export const REPLY = "hello from hex";
 
@@ -24,5 +28,33 @@ export function mockModel({
       return doStream(options);
     };
   }
+  return model as MastraModelConfig;
+}
+
+const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
+
+/** A model whose first step calls `toolName` with `args`, and whose second answers {@link REPLY}. */
+export function toolCallingModel(
+  toolName: string,
+  args: Record<string, unknown>,
+): MastraModelConfig {
+  const step = (chunks: unknown[]) => ({
+    stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
+  });
+  const model = new MastraLanguageModelV2Mock({
+    doStream: [
+      step([
+        { type: "tool-call", toolCallId: "call-1", toolName, input: JSON.stringify(args) },
+        { type: "finish", finishReason: "tool-calls", usage: USAGE },
+      ]),
+      step([
+        { type: "text-start", id: "text-1" },
+        { type: "text-delta", id: "text-1", delta: REPLY },
+        { type: "text-end", id: "text-1" },
+        { type: "finish", finishReason: "stop", usage: USAGE },
+      ]),
+    ],
+  } as ConstructorParameters<typeof MastraLanguageModelV2Mock>[0]);
+  // Mastra's mock and its model type disagree under exactOptionalPropertyTypes.
   return model as MastraModelConfig;
 }
