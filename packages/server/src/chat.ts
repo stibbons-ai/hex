@@ -1,5 +1,6 @@
 import { decideSender } from "@hex/domain";
 import { Agent } from "@mastra/core/agent";
+import type { AgentExecutionOptions } from "@mastra/core/agent";
 import type {
   ChannelAdapterConfig,
   ChannelHandler,
@@ -31,9 +32,16 @@ export interface ChatChannel {
   verify?: () => void;
 }
 
+/** Provider-keyed options passed unchanged to the model, e.g. `{ anthropic: { effort: "low" } }`. */
+export type ProviderOptions = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+
+type AgentProviderOptions = NonNullable<AgentExecutionOptions["providerOptions"]>;
+
 export interface ChatOptions {
-  /** A Mastra model-router string such as `anthropic/claude-sonnet-4-5`; tests pass a mock model. */
+  /** A Mastra model-router string such as `anthropic/claude-opus-5-5`; tests pass a mock model. */
   model: MastraModelConfig;
+  /** Passed to every model call of the chat agent; omitted uses the provider's defaults. */
+  providerOptions?: ProviderOptions;
   /** Channels keyed by platform; each key must equal its adapter's `name`. */
   channels: Readonly<Record<string, ChatChannel>>;
 }
@@ -66,7 +74,7 @@ function logIgnored(ctx: ChannelHandlerContext, reason: string, platform: string
  * stored. Throws when there are no channels, or when a channel's key differs from its adapter's
  * name, since the allowlist is looked up by that name.
  */
-export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
+export function createChatAgent({ model, providerOptions, channels }: ChatOptions): ChatAgent {
   const entries = Object.entries(channels);
   if (entries.length === 0) throw new Error("chat needs at least one channel");
   const allowlists: Record<string, readonly string[]> = {};
@@ -114,6 +122,11 @@ export function createChatAgent({ model, channels }: ChatOptions): ChatAgent {
     name: CHAT_AGENT_ID,
     instructions: INSTRUCTIONS,
     model,
+    // Every run, the Channels-triggered ones included, merges these defaults into its options.
+    // Mastra types the known providers' options; ours come from the config as data.
+    ...(providerOptions
+      ? { defaultOptions: { providerOptions: providerOptions as AgentProviderOptions } }
+      : {}),
     // Storage comes from the Mastra instance (the LibSQL store).
     memory: new Memory({ options: { workingMemory: { enabled: true, scope: "resource" } } }),
     channels: {

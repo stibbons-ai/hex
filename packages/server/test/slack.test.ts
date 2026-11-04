@@ -129,7 +129,7 @@ beforeAll(async () => {
   configPath = join(directory, "hex.json");
   const config = {
     chat: {
-      model: "anthropic/claude-sonnet-4-5",
+      model: "anthropic/claude-opus-5-5",
       channels: { slack: { options: { mode: "socket" }, allowlist: [DANIEL] } },
     },
   };

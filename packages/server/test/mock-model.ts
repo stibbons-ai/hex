@@ -9,16 +9,18 @@ interface Streaming {
 }
 
 /**
- * A model that answers {@link REPLY}. `before` runs before each answer streams: await something to
- * hold the run open, or throw to fail it.
+ * A model that answers {@link REPLY}. `before` runs before each answer streams, with the call's
+ * options: await something to hold the run open, or throw to fail it.
  */
-export function mockModel({ before }: { before?: () => Promise<void> } = {}): MastraModelConfig {
+export function mockModel({
+  before,
+}: { before?: (options: unknown) => Promise<void> } = {}): MastraModelConfig {
   const model = createMockModel({ mockText: REPLY, version: "v2" });
   if (before) {
     const streaming = model as unknown as Streaming;
     const doStream = streaming.doStream.bind(model);
     streaming.doStream = async (options) => {
-      await before();
+      await before(options);
       return doStream(options);
     };
   }

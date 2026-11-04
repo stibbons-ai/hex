@@ -68,6 +68,10 @@ const ConfigFile = Schema.Struct({
   chat: Schema.Struct({
     /** Mastra model-router id, `provider/model`. */
     model: Schema.String.check(Schema.isPattern(/^[^/\s]+\/\S+$/)),
+    /** Passed through to the model call, keyed by provider, e.g. `{ anthropic: { effort: "low" } }`. */
+    providerOptions: Schema.optionalKey(
+      Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
+    ),
     channels: Schema.Record(
       Schema.String,
       Schema.Struct({
@@ -115,5 +119,6 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }
   }
-  return { model: chat.model, channels };
+  const { model, providerOptions } = chat;
+  return { model, ...(providerOptions ? { providerOptions } : {}), channels };
 }

@@ -89,7 +89,8 @@ process exits.
 ```json
 {
   "chat": {
-    "model": "anthropic/claude-sonnet-4-5",
+    "model": "anthropic/claude-opus-5-5",
+    "providerOptions": { "anthropic": { "effort": "low" } },
     "channels": {
       "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] }
     }
@@ -99,6 +100,9 @@ process exits.
 
 - `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
   environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+- `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
+  provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
+  and cost. Omitted, the provider's defaults apply.
 - `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
   An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
   package and adding it to `adapterFactories` in `packages/server/src/config.ts`.

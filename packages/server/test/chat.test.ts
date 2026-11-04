@@ -223,6 +223,23 @@ describe("chat channels (fake adapter)", () => {
     expect(JSON.stringify(errors)).toContain("provider exploded, request req_123");
   });
 
+  test("configured provider options reach the model call of a channel run", async () => {
+    const calls: unknown[] = [];
+    const model = mockModel({ before: async (options) => void calls.push(options) });
+    const adapter = new FakeChatAdapter();
+    const server = await startServer(
+      serverOptions({
+        ...chatOptions(adapter, model),
+        providerOptions: { anthropic: { effort: "low" } },
+      }),
+    );
+    servers.push(server);
+    await adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
+    await adapter.posts(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ providerOptions: { anthropic: { effort: "low" } } });
+  });
+
   test("the agent's memory has working memory on, scoped to the resource", async () => {
     const { agent } = createChatAgent(chatOptions(new FakeChatAdapter()));
     const memory = await agent.getMemory();

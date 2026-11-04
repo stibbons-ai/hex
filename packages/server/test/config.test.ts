@@ -7,7 +7,7 @@ import { loadChatConfig } from "../src/config";
 const slackEnv = { SLACK_APP_TOKEN: "xapp-test", SLACK_BOT_TOKEN: "xoxb-test" };
 const valid = {
   chat: {
-    model: "anthropic/claude-sonnet-4-5",
+    model: "anthropic/claude-opus-5-5",
     channels: { slack: { options: { mode: "socket" }, allowlist: ["U0DANIEL"] } },
   },
 };
@@ -32,7 +32,9 @@ async function configFile(content: unknown): Promise<string> {
 describe("loadChatConfig", () => {
   test("builds a socket-mode Slack adapter, the model and the allowlist from a valid file", async () => {
     const chat = await loadChatConfig(await configFile(valid), slackEnv);
-    expect(chat?.model).toBe("anthropic/claude-sonnet-4-5");
+    expect(chat?.model).toBe("anthropic/claude-opus-5-5");
+    // Not set: the provider's defaults apply.
+    expect(chat).not.toHaveProperty("providerOptions");
     const slack = chat?.channels["slack"];
     expect(slack?.allowlist).toEqual(["U0DANIEL"]);
     const adapter = slack?.adapter as { name: string; isSocketMode: boolean } | undefined;
@@ -40,6 +42,22 @@ describe("loadChatConfig", () => {
     expect(adapter?.isSocketMode).toBe(true);
     // Not connected yet, so Slack hasn't confirmed the bot token: the check fails.
     expect(() => slack?.verify?.()).toThrow("Slack did not accept SLACK_BOT_TOKEN");
+  });
+
+  test("carries providerOptions through unchanged", async () => {
+    const providerOptions = { anthropic: { effort: "low", thinking: { type: "adaptive" } } };
+    const path = await configFile({ chat: { ...valid.chat, providerOptions } });
+    expect((await loadChatConfig(path, slackEnv))?.providerOptions).toEqual(providerOptions);
+  });
+
+  test.each([
+    ["a provider's options that aren't an object", { anthropic: "low" }, '["anthropic"]'],
+    ["providerOptions that aren't an object", ["anthropic"], ""],
+  ])("%s fail with the path", async (_case, providerOptions, at) => {
+    const path = await configFile({ chat: { ...valid.chat, providerOptions } });
+    await expect(loadChatConfig(path, slackEnv)).rejects.toThrow(
+      `at ["chat"]["providerOptions"]${at}`,
+    );
   });
 
   test("no channels means no chat", async () => {
