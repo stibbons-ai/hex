@@ -157,7 +157,7 @@ describe("loadChatConfig", () => {
   });
 
   describe("signal", () => {
-    test("builds a Signal adapter and the allowlist from env and an empty options object", async () => {
+    test("builds a Signal adapter and the allowlist from env and empty options", async () => {
       const chat = await loadChatConfig(await configFile(signalConfig), signalEnv);
       const signal = chat?.channels["signal"];
       expect(signal?.adapter.name).toBe("signal");
@@ -207,13 +207,43 @@ describe("loadChatConfig", () => {
     test.each([
       ["a transport in the file", { transport: { type: "spawn" } }],
       ["the account in the file", { account: BOT_ACCOUNT }],
-    ])("%s fails on the channel's options", async (_case, options) => {
+    ])("%s fails: Signal takes no options", async (_case, options) => {
       const path = await configFile({
         chat: { ...signalConfig.chat, channels: { signal: { options, allowlist: [] } } },
       });
       await expect(loadChatConfig(path, signalEnv)).rejects.toThrow(
-        `hex config ${path}: channel "signal": options: `,
+        `hex config ${path}: channel "signal": options: signal takes no options; the account and the URL come from SIGNAL_ACCOUNT and SIGNAL_CLI_URL`,
       );
+    });
+
+    test.each([
+      ["a phone number", "+15555550199"],
+      ["an uppercase ACI", DANIEL_ACI.toUpperCase()],
+      ["an ACI without dashes", DANIEL_ACI.replaceAll("-", "")],
+    ])("%s in the allowlist fails, naming its position, not its value", async (_case, entry) => {
+      const path = await configFile({
+        chat: {
+          ...signalConfig.chat,
+          channels: { signal: { options: {}, allowlist: [DANIEL_ACI, entry] } },
+        },
+      });
+      const loading = loadChatConfig(path, signalEnv);
+      await expect(loading).rejects.toThrow(
+        `hex config ${path}: channel "signal": allowlist entry 2 must be a Signal ACI (a lowercase UUID with dashes), not a phone number`,
+      );
+      await expect(loading).rejects.not.toThrow(entry);
+    });
+
+    test("Slack allowlist entries keep any form", async () => {
+      const path = await configFile({
+        chat: {
+          ...valid.chat,
+          channels: { slack: { options: { mode: "socket" }, allowlist: ["anything-goes"] } },
+        },
+      });
+      expect((await loadChatConfig(path, slackEnv))?.channels["slack"]?.allowlist).toEqual([
+        "anything-goes",
+      ]);
     });
   });
 });

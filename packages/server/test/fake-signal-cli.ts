@@ -16,13 +16,21 @@ export interface RpcCall {
 }
 
 export interface FakeSignalCliOptions {
-  /** Accounts the daemon serves, as `listAccounts` returns them; default: the bot account. */
+  /** Accounts the daemon serves; default: the bot account. */
   accounts?: { number: string; uuid: string }[];
+  /**
+   * Act like a daemon started with `-a <account>`: `listAccounts` is not implemented, and
+   * `listContacts` finds the account itself (signal-cli 0.14.9).
+   */
+  singleAccount?: boolean;
   /** `/api/v1/check` answers only once this settles (a slow daemon). */
   checkHold?: Promise<void>;
   /** The event stream opens (sends its headers) only once this settles. */
   eventsHold?: Promise<void>;
 }
+
+/** A Groups v2 ID (32 bytes) in standard base64, as signal-cli prints it. */
+export const GROUP_ID = Buffer.alloc(32, 7).toString("base64");
 
 export interface FakeSignalCli {
   server: Server<undefined>;
@@ -31,8 +39,16 @@ export interface FakeSignalCli {
   paths: string[];
   /** JSON-RPC calls, in order. */
   calls: RpcCall[];
-  /** Sends one receive event (a 1:1 text message) to every open event stream. */
-  receive(message: { aci: string; text: string; number?: string }): void;
+  /**
+   * Sends one receive event, a text message, to every open event stream: 1:1, or in the Group
+   * {@link GROUP_ID} with `group`, there with a native @mention of the bot when `mention` is set.
+   */
+  receive(message: {
+    aci: string;
+    text: string;
+    number?: string;
+    group?: { mention: boolean };
+  }): void;
   /** Open event streams right now. */
   openStreams(): number;
   /** Each waits at most 2 s. */
@@ -46,6 +62,7 @@ export interface FakeSignalCli {
 
 export function fakeSignalCli({
   accounts = [{ number: BOT_ACCOUNT, uuid: BOT_ACI }],
+  singleAccount = false,
   checkHold,
   eventsHold,
 }: FakeSignalCliOptions = {}): FakeSignalCli {
@@ -75,14 +92,21 @@ export function fakeSignalCli({
     }
   };
 
-  const result = (method: string): unknown => {
+  const result = (method: string, params: Record<string, unknown>): unknown => {
     switch (method) {
       case "version":
         return { version: "0.14.9" };
       case "listAccounts":
-        return accounts;
-      case "listContacts":
-        return [];
+        return singleAccount ? undefined : accounts;
+      case "listContacts": {
+        // Only the daemon's own accounts are known contacts here.
+        const wanted = (params["recipient"] as string[] | undefined) ?? [];
+        return accounts
+          .filter(({ number, uuid }) => wanted.includes(number) || wanted.includes(uuid))
+          .map(({ number, uuid }) => ({ number, uuid, username: null, name: "" }));
+      }
+      case "listGroups":
+        return [{ id: GROUP_ID, name: "Family", isMember: true, members: [] }];
       case "send":
       case "sendTyping":
       case "sendReceipt":
@@ -137,7 +161,7 @@ export function fakeSignalCli({
         };
         calls.push({ method, params });
         changed();
-        const value = result(method);
+        const value = result(method, params);
         return Response.json(
           value === undefined
             ? { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not implemented" } }
@@ -154,9 +178,16 @@ export function fakeSignalCli({
     url: `http://127.0.0.1:${server.port}`,
     paths,
     calls,
-    receive({ aci, text, number }) {
+    receive({ aci, text, number, group }) {
       const timestamp = receiveTimestamp++;
-      // A 1:1 text envelope as signal-cli 0.14.9 emits it (`JsonMessageEnvelope`).
+      // A text envelope as signal-cli 0.14.9 emits it (`JsonMessageEnvelope`): a mention is
+      // U+FFFC in the text plus a `mentions` entry.
+      const groupFields = group && {
+        groupInfo: { groupId: GROUP_ID, groupName: "Family", revision: 3, type: "DELIVER" },
+        ...(group.mention && {
+          mentions: [{ name: BOT_ACI, number: null, uuid: BOT_ACI, start: 0, length: 1 }],
+        }),
+      };
       const envelope = {
         source: number ?? aci,
         sourceNumber: number ?? null,
@@ -166,7 +197,13 @@ export function fakeSignalCli({
         timestamp,
         serverReceivedTimestamp: timestamp + 50,
         serverDeliveredTimestamp: timestamp + 60,
-        dataMessage: { timestamp, message: text, expiresInSeconds: 0, viewOnce: false },
+        dataMessage: {
+          timestamp,
+          message: group?.mention ? `\uFFFC ${text}` : text,
+          expiresInSeconds: 0,
+          viewOnce: false,
+          ...groupFields,
+        },
       };
       const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
       const event = encoder.encode(`id:run-${++eventId}\nevent:receive\ndata:${data}\n\n`);

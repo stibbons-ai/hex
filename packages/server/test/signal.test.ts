@@ -5,19 +5,25 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLocalStore } from "@hex/adapters";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import type { Adapter } from "chat";
-import { type RunningServer, type ServerOptions, startServer } from "../src";
+import { type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
 import { loadChatConfig } from "../src/config";
 import { BOT_ACCOUNT, DANIEL, type FakeSignalCli, fakeSignalCli } from "./fake-signal-cli";
 import { DANIEL as DANIEL_SLACK, directMessage, fakeSlack, slackEnv } from "./fake-slack";
-import { REPLY, mockModel, toolCallingModel } from "./mock-model";
+import { REPLY, mockModel, numberedModel, toolCallingModel } from "./mock-model";
+import { serverOptions, stored, warnings } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 const STRANGER = "5e5e5e5e-0000-4000-8000-00000000057a";
 const IGNORED = "hex: ignored message from a sender not on the allowlist";
+const NOT_DIRECT = "hex: ignored message outside a direct message";
+/** A daemon serving several accounts (`listAccounts`), and one started with `-a <account>`. */
+const DAEMONS = [
+  ["a multi-account daemon", false],
+  ["a single-account daemon (-a)", true],
+] as const;
 
 let directory: string;
 let configPath: string;
@@ -48,38 +54,7 @@ async function chatFor(fake: { url: string }, model: MastraModelConfig = mockMod
 }
 
 function options(name: string, rest: Partial<ServerOptions>): ServerOptions {
-  return { databasePath: join(directory, name, "mastra.db"), port: 0, logger: false, ...rest };
-}
-
-/** What the stopped server at `databasePath` stored: its memory threads and their messages. */
-async function stored(databasePath: string) {
-  const storage = await createLocalStore(databasePath);
-  try {
-    await storage.init();
-    const store = await storage.getStore("memory");
-    if (!store) throw new Error("no memory store");
-    const { threads } = await store.listThreads({ perPage: false });
-    const lists = await Promise.all(
-      threads.map(({ id }) => store.listMessages({ threadId: id, perPage: false })),
-    );
-    const messages = lists.flatMap((list) => list.messages);
-    const resource = await store.getResourceById({ resourceId: CHAT_RESOURCE_ID });
-    return { threads, messages, workingMemory: resource?.workingMemory };
-  } finally {
-    await storage.close();
-  }
-}
-
-/** Resolves once the server's logger warned `message`, with that call's arguments. */
-function warned(server: RunningServer, message: string) {
-  const seen = Promise.withResolvers<unknown[]>();
-  const logger = server.mastra.getLogger();
-  const warn = logger.warn.bind(logger);
-  spyOn(logger, "warn").mockImplementation((...args: Parameters<typeof logger.warn>) => {
-    if (args[0] === message) seen.resolve(args);
-    warn(...args);
-  });
-  return within(seen.promise, `the warning "${message}"`);
+  return serverOptions(directory, name, rest);
 }
 
 async function withFake<T>(fake: FakeSignalCli, run: (fake: FakeSignalCli) => Promise<T>) {
@@ -90,42 +65,89 @@ async function withFake<T>(fake: FakeSignalCli, run: (fake: FakeSignalCli) => Pr
   }
 }
 
-test("answers an allowlisted Signal DM under resource daniel and closes the event stream on stop()", async () => {
-  await withFake(fakeSignalCli(), async (fake) => {
-    const settings = options("dm", { chat: await chatFor(fake) });
-    const server = await startServer(settings);
-    try {
-      await fake.streamOpened();
-      fake.receive({ aci: DANIEL, text: "hi hex" });
-      const [reply] = await fake.sends(1);
-      expect(reply?.params).toEqual({ account: BOT_ACCOUNT, recipient: [DANIEL], message: REPLY });
-    } finally {
-      // stop() lets the run finish storing before it closes the store.
-      await server.stop();
-    }
-    expect(fake.openStreams()).toBe(0);
-    const { threads, messages } = await stored(settings.databasePath);
-    expect(threads.map((thread) => thread.resourceId)).toEqual([CHAT_RESOURCE_ID]);
-    expect(messages.map((message) => message.role)).toEqual(["signal", "assistant"]);
-  });
-});
+const sent = (fake: FakeSignalCli) =>
+  fake.calls.filter((call) => call.method === "send").map((call) => call.params["message"]);
 
-test("a stranger's Signal DM gets no reply, nothing is stored, and the log has no text", async () => {
+test.each(DAEMONS)(
+  "on %s, answers an allowlisted Signal DM under resource daniel and closes the stream on stop()",
+  async (name, singleAccount) => {
+    await withFake(fakeSignalCli({ singleAccount }), async (fake) => {
+      const settings = options(`dm-${singleAccount}`, { chat: await chatFor(fake) });
+      const server = await startServer(settings);
+      try {
+        await fake.streamOpened();
+        fake.receive({ aci: DANIEL, text: "hi hex" });
+        const [reply] = await fake.sends(1);
+        expect(reply?.params).toEqual({
+          account: BOT_ACCOUNT,
+          recipient: [DANIEL],
+          message: REPLY,
+        });
+      } finally {
+        // stop() lets the run finish storing before it closes the store.
+        await server.stop();
+      }
+      await fake.streamsClosed();
+      const lookup = singleAccount ? "listContacts" : "listAccounts";
+      expect(fake.calls.map((call) => call.method)).toContain(lookup);
+      const { threads, messages } = await stored(settings.databasePath);
+      expect(
+        threads.map((thread) => thread.resourceId),
+        name,
+      ).toEqual([CHAT_RESOURCE_ID]);
+      expect(messages.map((message) => message.role)).toEqual(["signal", "assistant"]);
+    });
+  },
+);
+
+test("a stranger's Signal DM gets no reply, nothing is persisted, and the log has no text", async () => {
   await withFake(fakeSignalCli(), async (fake) => {
     const settings = options("stranger", { chat: await chatFor(fake) });
     const server = await startServer(settings);
     try {
       await fake.streamOpened();
-      const ignored = warned(server, IGNORED);
+      const ignored = warnings(server, IGNORED);
       fake.receive({ aci: STRANGER, number: "+15555550199", text: "secret plans" });
-      const warning = await ignored;
+      const [warning] = await ignored;
       expect(warning).toEqual([IGNORED, { platform: "signal", sender: STRANGER }]);
       expect(JSON.stringify(warning)).not.toContain("secret plans");
     } finally {
       await server.stop();
     }
-    expect(fake.calls.filter((call) => call.method === "send")).toEqual([]);
+    expect(sent(fake)).toEqual([]);
     expect((await stored(settings.databasePath)).threads).toEqual([]);
+  });
+});
+
+test("Daniel's Signal Group messages, an @mention of hex included, are ignored", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("group", { chat: await chatFor(fake) });
+    const server = await startServer(settings);
+    try {
+      await fake.streamOpened();
+      const ignored = warnings(server, NOT_DIRECT);
+      // An @mention would make Mastra subscribe to the Group and answer it there.
+      fake.receive({ aci: DANIEL, text: "what's in my working memory?", group: { mention: true } });
+      const [line] = await ignored;
+      expect(line).toEqual([NOT_DIRECT, { platform: "signal", sender: DANIEL }]);
+      expect(JSON.stringify(line)).not.toContain("working memory");
+      // Unsubscribed, a plain Group message reaches no handler at all; subscribed, it would be
+      // answered. The DM after it is dispatched after it, and stop() waits for both.
+      fake.receive({ aci: DANIEL, text: "and now?", group: { mention: false } });
+      fake.receive({ aci: DANIEL, text: "hi hex" });
+      await fake.sends(1);
+    } finally {
+      await server.stop();
+    }
+    expect(fake.calls.filter((call) => call.method === "send").map((call) => call.params)).toEqual([
+      { account: BOT_ACCOUNT, recipient: [DANIEL], message: REPLY },
+    ]);
+    // Only the DM has a memory thread, so the Group has no subscription either (Mastra keeps
+    // that in the thread's metadata).
+    const { threads } = await stored(settings.databasePath);
+    expect(threads.map((thread) => thread.metadata?.["channel_externalThreadId"])).toEqual([
+      `signal:dm:${DANIEL}`,
+    ]);
   });
 });
 
@@ -133,13 +155,13 @@ test("a stranger's Signal DM gets no reply, nothing is stored, and the log has n
 // channels), not Chat's default "drop": a message that arrives while its conversation's run is
 // busy is delivered into that run, whose next model call sees it, so it is not dropped.
 test("a Signal message arriving while its conversation's run is busy is answered too", async () => {
-  // The answer to FIRST (model call 2) is held until SECOND has been accepted by the agent.
+  // Model call 2 (the answer to FIRST) is held until SECOND has been accepted by the agent.
   const FIRST = "first message";
   const SECOND = "second message";
   const answering = Promise.withResolvers<void>();
   const secondAccepted = Promise.withResolvers<void>();
   const prompts: string[] = [];
-  const model = mockModel({
+  const model = numberedModel({
     before: async (call) => {
       prompts.push(JSON.stringify(call));
       if (prompts.length === 2) {
@@ -149,8 +171,7 @@ test("a Signal message arriving while its conversation's run is busy is answered
     },
   });
   await withFake(fakeSignalCli(), async (fake) => {
-    const settings = options("busy", { chat: await chatFor(fake, model) });
-    const server = await startServer(settings);
+    const server = await startServer(options("busy", { chat: await chatFor(fake, model) }));
     try {
       await fake.streamOpened();
       // The conversation exists already, as it does after Daniel's first message ever.
@@ -159,25 +180,25 @@ test("a Signal message arriving while its conversation's run is busy is answered
       const agent = server.mastra.getAgent(CHAT_AGENT_ID);
       const sendMessage = agent.sendMessage.bind(agent);
       spyOn(agent, "sendMessage").mockImplementation((...args) => {
-        const sent = sendMessage(...args);
+        const sending = sendMessage(...args);
         const [input] = args;
         if (typeof input === "object" && "contents" in input && input.contents === SECOND) {
-          void sent.accepted.then(() => secondAccepted.resolve());
+          void sending.accepted.then(() => secondAccepted.resolve());
         }
-        return sent;
+        return sending;
       });
       fake.receive({ aci: DANIEL, text: FIRST });
       await within(answering.promise, "the answer to the first message to start");
       fake.receive({ aci: DANIEL, text: SECOND });
-      const [, reply] = await fake.sends(2);
-      expect(reply?.params["message"]).toBe(REPLY);
+      await fake.sends(2);
     } finally {
       await server.stop();
     }
-    // The run went on with one more model call that saw both messages, and answered.
+    // The run went on with model call 3, which saw both messages; its answer is the one sent.
     expect(prompts).toHaveLength(3);
     expect(prompts[2]).toContain(FIRST);
     expect(prompts[2]).toContain(SECOND);
+    expect(sent(fake)).toEqual(["reply 1", "reply 3"]);
   });
 });
 
@@ -185,7 +206,7 @@ test("Slack and Signal share Daniel's working memory: told on Slack, known on Si
   const prompts: string[] = [];
   const model = toolCallingModel(
     { memory: "# User Information\n- First Name: Daniel" },
-    { laterRuns: 1, before: async (call) => void prompts.push(JSON.stringify(call)) },
+    { laterCalls: 1, before: async (call) => void prompts.push(JSON.stringify(call)) },
   );
   const slack = fakeSlack();
   try {
@@ -231,15 +252,38 @@ test("an unreachable signal-cli fails startup and leaves nothing open", async ()
   await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
 });
 
-test("a signal-cli that doesn't serve the bot account fails startup and opens no event stream", async () => {
-  await withFake(fakeSignalCli({ accounts: [] }), async (fake) => {
-    const port = await freePort();
-    const failed = startServer(options("not-registered", { port, chat: await chatFor(fake) }));
-    await expect(within(failed, "the start to fail")).rejects.toThrow(/not registered or linked/);
-    expect(fake.paths).not.toContain("/api/v1/events");
-    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
-  });
-});
+test.each(DAEMONS)(
+  "%s that doesn't serve the bot account fails startup without naming its number",
+  async (_name, singleAccount) => {
+    await withFake(fakeSignalCli({ accounts: [], singleAccount }), async (fake) => {
+      const port = await freePort();
+      const printed: unknown[] = [];
+      const consoles = (["log", "info", "warn", "error"] as const).map((level) =>
+        spyOn(console, level).mockImplementation((...args) => void printed.push(args)),
+      );
+      let failure: unknown;
+      try {
+        const chat = await chatFor(fake);
+        failure = await within(
+          startServer(options(`unserved-${singleAccount}`, { port, chat })),
+          "the start to fail",
+        ).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      } finally {
+        for (const spy of consoles) spy.mockRestore();
+      }
+      expect(String(failure)).toMatch(/not registered or linked/);
+      expect(String(failure)).toContain("SIGNAL_ACCOUNT");
+      const everything = `${String(failure)} ${(failure as Error).stack} ${Bun.inspect(printed)}`;
+      expect(everything).not.toContain(BOT_ACCOUNT);
+      expect(everything).not.toContain(encodeURIComponent(BOT_ACCOUNT));
+      expect(fake.paths).not.toContain("/api/v1/events");
+      await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+    });
+  },
+);
 
 /**
  * The adapter's disconnect, spied on: resolves once it has been called `count` times and every
@@ -263,7 +307,7 @@ test.each([
   ["its health check", "checkHold"],
   ["its event stream", "eventsHold"],
 ] as const)(
-  "a signal-cli holding %s fails startup at the deadline and never opens the stream",
+  "a signal-cli holding %s fails startup at the deadline and closes any stream it opened late",
   async (_case, hold) => {
     const answer = Promise.withResolvers<void>();
     await withFake(fakeSignalCli({ [hold]: answer.promise }), async (fake) => {
@@ -277,9 +321,13 @@ test.each([
       // signal-cli answers late: the cancelled start goes no further.
       answer.resolve();
       await disconnected;
-      // A stream the fake opened after the client gave up is closed from the client's side.
-      await fake.streamsClosed();
-      if (hold === "checkHold") expect(fake.calls).toEqual([]);
+      if (hold === "checkHold") {
+        expect(fake.calls).toEqual([]);
+      } else {
+        // The start got as far as the stream; the fake opens it late, the client closes it.
+        expect(fake.paths).toContain("/api/v1/events");
+        await fake.streamsClosed();
+      }
     });
   },
 );
@@ -300,9 +348,9 @@ test("stop() closes the event stream at once and bounds the wait for a running r
     await fake.streamOpened();
     fake.receive({ aci: DANIEL, text: "think hard" });
     await within(running.promise, "the run to start");
-    const stopping = warned(server, "hex: stop: chat channels did not disconnect within 100 ms");
+    const stopping = warnings(server, "hex: stop: chat channels did not disconnect within 100 ms");
     await within(server.stop(), "stop()");
     await stopping;
-    expect(fake.openStreams()).toBe(0);
+    await fake.streamsClosed();
   });
 });

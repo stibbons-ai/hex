@@ -10,8 +10,12 @@ export type Env = Readonly<Record<string, string | undefined>>;
  * Builds one platform's channel from its config `options`; secrets come from `env` only. An
  * adapter package may still read `process.env` itself for options left unset (the Slack adapter
  * does for e.g. `SLACK_API_URL`), so a test that must not see the real environment sets them.
+ * `senderIds`, when set, is the form every allowlist entry must have on this channel.
  */
-export type AdapterFactory = (options: unknown, env: Env) => Omit<ChatChannel, "allowlist">;
+export type AdapterFactory = (
+  options: unknown,
+  env: Env,
+) => Omit<ChatChannel, "allowlist"> & { senderIds?: { pattern: RegExp; expected: string } };
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 
@@ -45,12 +49,22 @@ function requireToken(env: Env, name: string, prefix: string): string {
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
 
-// Nothing to choose: the account and signal-cli's URL are deployment data, so they come from env.
-// (An empty Struct would accept any object, so: a record that admits no key.)
-const SignalOptions = Schema.Record(Schema.String, Schema.Never);
-
 // signal-cli takes the bot account as an E.164 number or as its ACI.
 const BOT_ACCOUNT_FORMAT = /^(\+[1-9]\d{6,14}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
+
+/**
+ * Replaces `secret`, as written and as it appears lowercased or URL-encoded, with `name` in the
+ * messages and stacks of `error` and its causes. Mutates them, so the error keeps its class.
+ */
+function redact(error: unknown, secret: string, name: string): unknown {
+  const forms = [...new Set([secret, secret.toLowerCase(), encodeURIComponent(secret)])];
+  const scrub = (text: string) => forms.reduce((out, form) => out.replaceAll(form, name), text);
+  for (let current = error; current instanceof Error; current = current.cause) {
+    current.message = scrub(current.message);
+    if (current.stack) current.stack = scrub(current.stack);
+  }
+  return error;
+}
 
 /** Channels by platform key. Adding a channel: install its adapter package, add it here. */
 export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
@@ -75,15 +89,20 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
     };
   },
   signal(options, env) {
-    decodeOrThrow(SignalOptions, options, "options");
+    if (typeof options !== "object" || options === null || Object.keys(options).length > 0) {
+      throw new Error(
+        "options: signal takes no options; the account and the URL come from SIGNAL_ACCOUNT and SIGNAL_CLI_URL",
+      );
+    }
+    const account = requireEnv(
+      env,
+      "SIGNAL_ACCOUNT",
+      "be the bot account's number (+ and digits) or ACI",
+      (value) => BOT_ACCOUNT_FORMAT.test(value),
+    );
     // Both passed explicitly, so the adapter never falls back to process.env.
     const adapter = createSignalAdapter({
-      account: requireEnv(
-        env,
-        "SIGNAL_ACCOUNT",
-        "be the bot account's number (+ and digits) or ACI",
-        (value) => BOT_ACCOUNT_FORMAT.test(value),
-      ),
+      account,
       transport: {
         type: "http",
         url: requireEnv(env, "SIGNAL_CLI_URL", "be an http(s) URL", (value) =>
@@ -91,8 +110,29 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
         ),
       },
     });
-    // No verify: initialize() rejects when signal-cli is unreachable or doesn't serve the account.
-    return { adapter };
+    // A failed start names the bot account's number (e.g. "Bot Account +1… is not registered");
+    // Mastra logs that error and hex fails startup with it, so the number is taken out first.
+    const initialize = adapter.initialize.bind(adapter);
+    adapter.initialize = async (chat) => {
+      try {
+        await initialize(chat);
+      } catch (error) {
+        throw redact(error, account, "SIGNAL_ACCOUNT");
+      }
+    };
+    // No verify: initialize() rejects when signal-cli is unreachable, and when it lists the
+    // daemon's accounts (or the account's own contact entry) without this one.
+    return {
+      adapter,
+      // A Group is one conversation with all its members: one @mention would subscribe hex to
+      // it, and every later message from Daniel there would be answered to the whole Group.
+      directMessagesOnly: true,
+      // The adapter keys senders by ACI, as signal-cli prints it; a number would match no one.
+      senderIds: {
+        pattern: /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+        expected: "a Signal ACI (a lowercase UUID with dashes), not a phone number",
+      },
+    };
   },
 };
 
@@ -149,7 +189,13 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
       );
     }
     try {
-      channels[platform] = { ...factory(options, env), allowlist };
+      const { senderIds, ...channel } = factory(options, env);
+      // The entry's position, not its value: a misplaced phone number is personal data.
+      const bad = senderIds ? allowlist.findIndex((id) => !senderIds.pattern.test(id)) : -1;
+      if (senderIds && bad !== -1) {
+        throw new Error(`allowlist entry ${bad + 1} must be ${senderIds.expected}`);
+      }
+      channels[platform] = { ...channel, allowlist };
     } catch (error) {
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }

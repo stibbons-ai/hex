@@ -66,10 +66,11 @@ routes don't work against this entrypoint.
 hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it was asked
 in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
 WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. On Signal it
-answers 1:1 messages through a signal-cli daemon Daniel runs himself (see [Signal](#signal)). Only senders on
-a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such a thread (and
-button click, should interactivity ever be enabled) is ignored (no reply, nothing stored) and
-logged as one line with platform and sender ID, never the text; other channel messages never
+answers 1:1 messages only, through a signal-cli daemon Daniel runs himself (see [Signal](#signal)).
+Only senders on a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such
+a thread (and button click, should interactivity ever be enabled) is ignored (no reply, nothing
+persisted; Chat SDK holds the message in its in-memory thread history only) and logged as one line
+with platform and sender ID, never the text; other channel messages never
 reach hex at all. Messages arriving while hex shuts down are dropped and logged the same way.
 Earlier messages of a channel thread are not read into memory. Slash commands are not answered.
 Every allowlisted conversation, on every channel, shares the memory resource `daniel` (working
@@ -93,13 +94,14 @@ working-memory calls; their effect is the working memory of resource `daniel` in
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
-start, doesn't start within 30 seconds (Slack: bot-token check and socket connect; Signal:
-signal-cli health check, version, bot account lookup and event stream), or starts but can't work
-(Slack rejected the bot token; Signal: signal-cli doesn't serve the bot account); the server then
-closes what it started and `bun run start` exits with code 1. A Slack start that only finishes
-after the deadline is disconnected again if it was still checking the bot token; one still
-connecting its socket stays open until the process exits. A Signal start cut off by the deadline
-stops where it is and opens no event stream.
+start (Signal: signal-cli unreachable, or it doesn't serve the bot account), doesn't start within
+30 seconds (Slack: bot-token check and socket connect; Signal: signal-cli health check, version,
+bot account lookup and event stream), or starts but can't work (Slack rejected the bot token); the
+server then closes what it started and `bun run start` exits with code 1. A Slack start that only
+finishes after the deadline is disconnected again if it was still checking the bot token; one
+still connecting its socket stays open until the process exits. A Signal start cut off by the
+deadline goes no further, and closes any event stream it opened late. A Signal start error names
+`SIGNAL_ACCOUNT` where the adapter would print the bot account's number.
 
 ```json
 {
@@ -195,29 +197,51 @@ over signal-cli's HTTP daemon (`signal-cli daemon --http`, version 0.14.9 or new
 transport the adapter recommends. Installing signal-cli and registering or linking the bot account
 are signal-cli's job, not hex's: follow the adapter's
 [Provisioning the Bot Account](https://github.com/stibbons-ai/chat-adapter-signal#provisioning-the-bot-account)
-and [Security](https://github.com/stibbons-ai/chat-adapter-signal#security) sections. The daemon has
-no authentication: whoever reaches it reads the bot's messages and sends as the bot, so keep it on
-loopback or a private network, and start it with `-a <account>` once the account is provisioned.
+and [Security](https://github.com/stibbons-ai/chat-adapter-signal#security) sections. Start the
+daemon with `-a <account>` once the account is provisioned, plus `--receive-mode on-connection`
+(nothing is received before hex connects) and `--no-receive-stdout` (message texts stay out of the
+daemon's log).
+
+The daemon has no authentication: whoever reaches it reads the bot's messages and sends as the
+bot. Safe setups: hex in a container on the same Docker network as signal-cli, with no port
+published; or signal-cli installed natively and bound to loopback (`daemon --http
+127.0.0.1:8080`), where it also accepts only a loopback `Host` header, against DNS rebinding
+([HttpServerHandler.java](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L85-L92),
+[`:330-342`](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L330-L342)).
+Unsafe: publishing a signal-cli container's port, even on `127.0.0.1`: inside the container it is
+bound to `0.0.0.0`, where signal-cli checks no `Host` header, so any web page you open could reach
+it.
 
 - `SIGNAL_ACCOUNT` and `SIGNAL_CLI_URL` are the adapter's own variable names; hex reads them from
   its environment and passes both to the adapter. The bot account's number never goes into the
-  config file or the repository.
+  config file or the repository. `options` must be `{}`.
 - Allowlist IDs are ACIs (the account's UUID, lowercase with dashes, as signal-cli prints it),
   never phone numbers: the adapter keys every sender by ACI (its `message.author.userId`), which
-  stays the same when the number changes and is there also for senders who hide their number. A
-  number in the allowlist matches no one. To find yours, DM the bot before you are on the
+  stays the same when the number changes and is there also for senders who hide their number. Any
+  other entry fails startup, naming its position. To find yours, DM the bot before you are on the
   allowlist: hex logs `hex: ignored message from a sender not on the allowlist` with
   `sender: <your ACI>`.
-- The allowlist applies in Signal Groups as in Slack channels; hex is meant for 1:1 messages. No
-  typing indicator is shown (hex turns Mastra's typing status off on every channel).
+- 1:1 messages only: an @-mention of hex in a Group, even from an allowlisted sender, is ignored and
+  logged as `hex: ignored message outside a direct message`; other Group messages never reach hex.
+  A Group is one conversation with all its members, so an answer there, working memory included,
+  would go to all of them. No typing indicator is shown (hex turns Mastra's typing status off on
+  every channel). Messages the adapter doesn't support (stickers, view-once messages) are ignored
+  and logged only at debug level.
 - Messages sent in a row are not dropped. Mastra creates the Chat SDK instance for all channels
   with `concurrency: { strategy: "concurrent" }`, not Chat's default `"drop"`, against which the
   adapter warns: a message that arrives while hex is still answering the same conversation goes
-  into that run, whose next model call sees it, and one answer covers both. The setting is one per
-  Chat instance, so a Signal-only `"queue"` is not possible; hex keeps Mastra's default.
-- The adapter keeps its receive cursor in Mastra's store, so events signal-cli buffered while hex
-  was restarting are replayed (signal-cli keeps the last 1 000 of its current run; start it with
-  `--receive-mode on-connection` so nothing is received before hex connects).
+  into that run, whose next model call sees it, and one answer covers both. A `"queue"` would be
+  possible through `channels.chatOptions`, but it is one setting for the whole Chat instance and so
+  would change Slack too; hex keeps Mastra's default.
+- The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
+  subscriptions), so a restart starts at live events. Lost are messages hex had received but not
+  yet answered when it stopped or crashed, and messages signal-cli took off Signal after hex was
+  gone (it notices only at its next keep-alive, within about 15-30 s, longer when the host itself
+  is gone). Messages sent while no event stream was connected stay at Signal and arrive once hex
+  connects (with `--receive-mode on-connection`).
+- If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
+  30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
+  does while Slack's socket reconnects.
 
 Run it against a daemon on loopback:
 

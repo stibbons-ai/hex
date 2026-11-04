@@ -9,6 +9,7 @@ import type { ServerOptions } from "../src";
 import { loadChatConfig } from "../src/config";
 import { DANIEL, type FakeSlack, directMessage, fakeSlack, slackEnv } from "./fake-slack";
 import { REPLY, mockModel } from "./mock-model";
+import { serverOptions } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 let directory: string;
@@ -37,7 +38,7 @@ async function chatFor(slack: FakeSlack) {
 }
 
 function options(name: string, rest: Partial<ServerOptions>): ServerOptions {
-  return { databasePath: join(directory, name, "mastra.db"), port: 0, logger: false, ...rest };
+  return serverOptions(directory, name, rest);
 }
 
 test("answers a Slack DM over socket mode and closes the socket on stop()", async () => {
