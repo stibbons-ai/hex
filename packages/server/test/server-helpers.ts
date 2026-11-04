@@ -47,7 +47,7 @@ export function warnings(server: RunningServer, message: string, count = 1) {
   const logger = server.mastra.getLogger();
   const warn = logger.warn.bind(logger);
   spyOn(logger, "warn").mockImplementation((...args: Parameters<typeof logger.warn>) => {
-    if (args[0] === message && seen.push(args) === count) enough.resolve(seen);
+    if (args[0] === message && seen.push(args) === count) enough.resolve(seen.slice());
     warn(...args);
   });
   return within(enough.promise, `${count} warning(s) "${message}"`);

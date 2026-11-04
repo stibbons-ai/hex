@@ -94,14 +94,14 @@ working-memory calls; their effect is the working memory of resource `daniel` in
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
-start (Signal: signal-cli unreachable, or it doesn't serve the bot account), doesn't start within
+start (Signal: signal-cli unreachable, or it lists its accounts, or on a `-a` daemon the account's own contact entry, without the bot account), doesn't start within
 30 seconds (Slack: bot-token check and socket connect; Signal: signal-cli health check, version,
 bot account lookup and event stream), or starts but can't work (Slack rejected the bot token); the
 server then closes what it started and `bun run start` exits with code 1. A Slack start that only
 finishes after the deadline is disconnected again if it was still checking the bot token; one
 still connecting its socket stays open until the process exits. A Signal start cut off by the
 deadline goes no further, and closes any event stream it opened late. A Signal start error names
-`SIGNAL_ACCOUNT` where the adapter would print the bot account's number.
+`SIGNAL_ACCOUNT` where the adapter would name the bot account.
 
 ```json
 {
@@ -206,8 +206,9 @@ The daemon has no authentication: whoever reaches it reads the bot's messages an
 bot. Safe setups: hex in a container on the same Docker network as signal-cli, with no port
 published; or signal-cli installed natively and bound to loopback (`daemon --http
 127.0.0.1:8080`), where it also accepts only a loopback `Host` header, against DNS rebinding
-([HttpServerHandler.java](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L85-L92),
-[`:330-342`](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L330-L342)).
+([HttpServerHandler.java](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L317-L327)
+`buildAllowedHosts`, and the [check](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L329-L381)
+that answers 421 otherwise, signal-cli v0.14.9).
 Unsafe: publishing a signal-cli container's port, even on `127.0.0.1`: inside the container it is
 bound to `0.0.0.0`, where signal-cli checks no `Host` header, so any web page you open could reach
 it.
@@ -235,7 +236,7 @@ it.
   would change Slack too; hex keeps Mastra's default.
 - The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
   subscriptions), so a restart starts at live events. Lost are messages hex had received but not
-  yet answered when it stopped or crashed, and messages signal-cli took off Signal after hex was
+  answered within the stop grace, or when it crashed, and messages signal-cli took off Signal after hex was
   gone (it notices only at its next keep-alive, within about 15-30 s, longer when the host itself
   is gone). Messages sent while no event stream was connected stay at Signal and arrive once hex
   connects (with `--receive-mode on-connection`).

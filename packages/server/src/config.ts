@@ -15,7 +15,9 @@ export type Env = Readonly<Record<string, string | undefined>>;
 export type AdapterFactory = (
   options: unknown,
   env: Env,
-) => Omit<ChatChannel, "allowlist"> & { senderIds?: { pattern: RegExp; expected: string } };
+) => Omit<ChatChannel, "allowlist"> & {
+  senderIds?: { valid: (id: string) => boolean; expected: string };
+};
 
 const strict = { errors: "all", onExcessProperty: "error" } as const;
 
@@ -49,21 +51,37 @@ function requireToken(env: Env, name: string, prefix: string): string {
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
 
-// signal-cli takes the bot account as an E.164 number or as its ACI.
-const BOT_ACCOUNT_FORMAT = /^(\+[1-9]\d{6,14}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
+/** A Signal ACI as signal-cli prints it: a lowercase UUID with dashes. */
+const ACI = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+/** signal-cli takes the bot account as an E.164 number or as its ACI (any case). */
+function isBotAccount(value: string): boolean {
+  return /^\+[1-9]\d{6,14}$/.test(value) || ACI.test(value.toLowerCase());
+}
 
 /**
- * Replaces `secret`, as written and as it appears lowercased or URL-encoded, with `name` in the
- * messages and stacks of `error` and its causes. Mutates them, so the error keeps its class.
+ * A copy of `error` with every form of `secret` in `forms` replaced by `name`: same prototype (so
+ * `instanceof` holds), same `name`, scrubbed `message` and `stack`, and its own primitive fields
+ * (such as `code`), strings scrubbed. Object fields (the `cause`, an adapter's `originalError`)
+ * are dropped: they can carry the secret anywhere, e.g. Bun's fetch error in its own `path`.
  */
-function redact(error: unknown, secret: string, name: string): unknown {
-  const forms = [...new Set([secret, secret.toLowerCase(), encodeURIComponent(secret)])];
+function redacted(error: unknown, forms: readonly string[], name: string): Error {
   const scrub = (text: string) => forms.reduce((out, form) => out.replaceAll(form, name), text);
-  for (let current = error; current instanceof Error; current = current.cause) {
-    current.message = scrub(current.message);
-    if (current.stack) current.stack = scrub(current.stack);
+  if (!(error instanceof Error)) return new Error(scrub(String(error)));
+  const copy = Object.create(Object.getPrototypeOf(error) as object) as Error;
+  for (const [key, value] of Object.entries(error)) {
+    if (typeof value === "string") Object.assign(copy, { [key]: scrub(value) });
+    else if (typeof value === "number" || typeof value === "boolean") {
+      Object.assign(copy, { [key]: value });
+    }
   }
-  return error;
+  const hidden = (value: string) => ({ value: scrub(value), writable: true, configurable: true });
+  Object.defineProperties(copy, {
+    name: hidden(error.name),
+    message: hidden(error.message),
+    stack: hidden(error.stack ?? `${error.name}: ${error.message}`),
+  });
+  return copy;
 }
 
 /** Channels by platform key. Adding a channel: install its adapter package, add it here. */
@@ -98,8 +116,13 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
       env,
       "SIGNAL_ACCOUNT",
       "be the bot account's number (+ and digits) or ACI",
-      (value) => BOT_ACCOUNT_FORMAT.test(value),
+      isBotAccount,
     );
+    // As given, and as the adapter normalises an ACI (lowercase), each also URL-encoded.
+    const accountForms = [...new Set([account, account.toLowerCase()])].flatMap((form) => [
+      form,
+      encodeURIComponent(form),
+    ]);
     // Both passed explicitly, so the adapter never falls back to process.env.
     const adapter = createSignalAdapter({
       account,
@@ -110,14 +133,15 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
         ),
       },
     });
-    // A failed start names the bot account's number (e.g. "Bot Account +1… is not registered");
-    // Mastra logs that error and hex fails startup with it, so the number is taken out first.
+    // A failed start can name the bot account (e.g. "Bot Account +1… is not registered", or the
+    // event-stream URL's `?account=`); Mastra logs that error and hex fails startup with it, so
+    // it is replaced first.
     const initialize = adapter.initialize.bind(adapter);
     adapter.initialize = async (chat) => {
       try {
         await initialize(chat);
       } catch (error) {
-        throw redact(error, account, "SIGNAL_ACCOUNT");
+        throw redacted(error, accountForms, "SIGNAL_ACCOUNT");
       }
     };
     // No verify: initialize() rejects when signal-cli is unreachable, and when it lists the
@@ -129,7 +153,7 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
       directMessagesOnly: true,
       // The adapter keys senders by ACI, as signal-cli prints it; a number would match no one.
       senderIds: {
-        pattern: /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+        valid: (id) => ACI.test(id),
         expected: "a Signal ACI (a lowercase UUID with dashes), not a phone number",
       },
     };
@@ -191,7 +215,7 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
     try {
       const { senderIds, ...channel } = factory(options, env);
       // The entry's position, not its value: a misplaced phone number is personal data.
-      const bad = senderIds ? allowlist.findIndex((id) => !senderIds.pattern.test(id)) : -1;
+      const bad = senderIds ? allowlist.findIndex((id) => !senderIds.valid(id)) : -1;
       if (senderIds && bad !== -1) {
         throw new Error(`allowlist entry ${bad + 1} must be ${senderIds.expected}`);
       }

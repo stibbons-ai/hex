@@ -13,6 +13,8 @@ export const DANIEL = "d0d0d0d0-0000-4000-8000-00000000da11";
 export interface RpcCall {
   method: string;
   params: Record<string, unknown>;
+  /** The JSON-RPC error code the fake answered with, if it answered with an error. */
+  error?: number;
 }
 
 export interface FakeSignalCliOptions {
@@ -27,6 +29,8 @@ export interface FakeSignalCliOptions {
   checkHold?: Promise<void>;
   /** The event stream opens (sends its headers) only once this settles. */
   eventsHold?: Promise<void>;
+  /** Drop every event-stream connection before its response headers, as a crashing daemon would. */
+  eventsReset?: boolean;
 }
 
 /** A Groups v2 ID (32 bytes) in standard base64, as signal-cli prints it. */
@@ -51,11 +55,13 @@ export interface FakeSignalCli {
   }): void;
   /** Open event streams right now. */
   openStreams(): number;
-  /** Each waits at most 2 s. */
+  /** Event streams opened so far, closed ones included. */
+  streamsOpenedEver(): number;
+  /** Resolves once an event stream has been opened (it may be closed again by then). */
   streamOpened(): Promise<void>;
   /** Resolves once no event stream is open, the client having closed them all. */
   streamsClosed(): Promise<void>;
-  /** Resolves with the first `count` `send` calls. */
+  /** Resolves with the first `count` `send` calls. Every wait here gives up after 2 s. */
   sends(count: number): Promise<RpcCall[]>;
   stop(): Promise<void>;
 }
@@ -65,11 +71,13 @@ export function fakeSignalCli({
   singleAccount = false,
   checkHold,
   eventsHold,
+  eventsReset = false,
 }: FakeSignalCliOptions = {}): FakeSignalCli {
   const paths: string[] = [];
   const calls: RpcCall[] = [];
   const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const encoder = new TextEncoder();
+  let opened = 0;
   let eventId = 0;
   let sendTimestamp = 1_700_000_000_000;
   let receiveTimestamp = 1_700_000_100_000;
@@ -138,10 +146,15 @@ export function fakeSignalCli({
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
             self = controller;
+            if (eventsReset) {
+              controller.error(new Error("fake signal-cli dropped the connection"));
+              return;
+            }
             // Bun sends the headers with the first chunk; signal-cli sends them at once. A comment
             // line (as signal-cli's keep-alive) gets them out without an event.
             controller.enqueue(encoder.encode(":\n\n"));
             streams.add(controller);
+            opened++;
             changed();
           },
           cancel: close,
@@ -159,9 +172,9 @@ export function fakeSignalCli({
           method: string;
           params?: Record<string, unknown>;
         };
-        calls.push({ method, params });
-        changed();
         const value = result(method, params);
+        calls.push(value === undefined ? { method, params, error: -32601 } : { method, params });
+        changed();
         return Response.json(
           value === undefined
             ? { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not implemented" } }
@@ -178,6 +191,7 @@ export function fakeSignalCli({
     url: `http://127.0.0.1:${server.port}`,
     paths,
     calls,
+    streamsOpenedEver: () => opened,
     receive({ aci, text, number, group }) {
       const timestamp = receiveTimestamp++;
       // A text envelope as signal-cli 0.14.9 emits it (`JsonMessageEnvelope`): a mention is
@@ -210,7 +224,7 @@ export function fakeSignalCli({
       for (const stream of streams) stream.enqueue(event);
     },
     openStreams: () => streams.size,
-    streamOpened: () => until(() => streams.size > 0, "the Signal event stream to open"),
+    streamOpened: () => until(() => opened > 0, "the Signal event stream to open"),
     streamsClosed: () => until(() => streams.size === 0, "the Signal event streams to close"),
     async sends(count) {
       await until(() => sendCalls().length >= count, `${count} signal-cli send call(s)`);

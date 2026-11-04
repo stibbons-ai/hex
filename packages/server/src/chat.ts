@@ -31,7 +31,10 @@ export interface ChatChannel {
    * adapter that only warns on an auth failure must supply it (Slack: the bot token was rejected).
    */
   verify?: () => void;
-  /** Answer direct messages only: a message in any other conversation is ignored and logged. */
+  /**
+   * Answer direct messages only: a message in any other conversation is ignored and logged.
+   * Messages only; button clicks are not checked (no hex tool posts buttons).
+   */
   directMessagesOnly?: boolean;
 }
 
