@@ -38,17 +38,32 @@ export function mockModel({ before }: { before?: Before } = {}): MastraModelConf
 
 const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
 
+function step(chunks: unknown[]) {
+  return {
+    stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
+  };
+}
+
+function answer(text: string) {
+  return step([
+    { type: "text-start", id: "text-1" },
+    { type: "text-delta", id: "text-1", delta: text },
+    { type: "text-end", id: "text-1" },
+    { type: "finish", finishReason: "stop", usage: USAGE },
+  ]);
+}
+
+type MockOptions = ConstructorParameters<typeof MastraLanguageModelV2Mock>[0];
+
 /**
  * A model whose first step calls hex's `updateWorkingMemory` tool with `args`, and whose
- * second answers {@link REPLY}. `before` runs before each step streams, as for {@link mockModel}.
+ * second answers {@link REPLY}; each of `laterCalls` more model calls answers {@link REPLY} too.
+ * `before` runs before each step streams, as for {@link mockModel}.
  */
 export function toolCallingModel(
   args: Record<string, unknown>,
-  { before }: { before?: Before } = {},
+  { before, laterCalls = 0 }: { before?: Before; laterCalls?: number } = {},
 ): MastraModelConfig {
-  const step = (chunks: unknown[]) => ({
-    stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
-  });
   const model = new MastraLanguageModelV2Mock({
     doStream: [
       step([
@@ -60,15 +75,21 @@ export function toolCallingModel(
         },
         { type: "finish", finishReason: "tool-calls", usage: USAGE },
       ]),
-      step([
-        { type: "text-start", id: "text-1" },
-        { type: "text-delta", id: "text-1", delta: REPLY },
-        { type: "text-end", id: "text-1" },
-        { type: "finish", finishReason: "stop", usage: USAGE },
-      ]),
+      answer(REPLY),
+      ...Array.from({ length: laterCalls }, () => answer(REPLY)),
     ],
-  } as ConstructorParameters<typeof MastraLanguageModelV2Mock>[0]);
+  } as MockOptions);
   withBefore(model, before);
   // Mastra's mock and its model type disagree under exactOptionalPropertyTypes.
+  return model as MastraModelConfig;
+}
+
+/** A model whose n-th call (from 1) answers `reply n`, so a reply names the call that wrote it. */
+export function numberedModel({ before }: { before?: Before } = {}): MastraModelConfig {
+  let calls = 0;
+  const model = new MastraLanguageModelV2Mock({
+    doStream: async () => answer(`reply ${++calls}`),
+  } as MockOptions);
+  withBefore(model, before);
   return model as MastraModelConfig;
 }

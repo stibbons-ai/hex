@@ -61,14 +61,16 @@ await hex.workflows.list();
 Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
 routes don't work against this entrypoint.
 
-## Chat (Slack)
+## Chat (Slack, Signal)
 
 hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it was asked
 in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
-WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. Only senders on
-a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such a thread (and
-button click, should interactivity ever be enabled) is ignored (no reply, nothing stored) and
-logged as one line with platform and sender ID, never the text; other channel messages never
+WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. On Signal it
+answers 1:1 messages only, through a signal-cli daemon Daniel runs himself (see [Signal](#signal)).
+Only senders on a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such
+a thread (and button click, should interactivity ever be enabled) is ignored (no reply, nothing
+persisted; Chat SDK holds the message in its in-memory thread history only) and logged as one line
+with platform and sender ID, never the text; other channel messages never
 reach hex at all. Messages arriving while hex shuts down are dropped and logged the same way.
 Earlier messages of a channel thread are not read into memory. Slash commands are not answered.
 Every allowlisted conversation, on every channel, shares the memory resource `daniel` (working
@@ -92,11 +94,15 @@ working-memory calls; their effect is the working memory of resource `daniel` in
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
-start, doesn't start within 30 seconds (Slack: bot-token check and socket connect), or starts but
-can't work (Slack rejected the bot token); the server then closes what it started and `bun run
-start` exits with code 1. A Slack start that only finishes after the deadline is disconnected again
-if it was still checking the bot token; one still connecting its socket stays open until the
-process exits.
+start (Signal: signal-cli unreachable, or it lists its accounts, or on a `-a` daemon the
+account's own contact entry, without the bot account), doesn't start within 30 seconds (Slack:
+bot-token check and socket connect; Signal: signal-cli health check, version, bot account lookup
+and event stream), or starts but can't work (Slack rejected the bot token); the server then
+closes what it started and `bun run start` exits with code 1. A Slack start that only
+finishes after the deadline is disconnected again if it was still checking the bot token; one
+still connecting its socket stays open until the process exits. A Signal start cut off by the
+deadline goes no further, and closes any event stream it opened late. A Signal start error names
+`SIGNAL_ACCOUNT` where the adapter would name the bot account.
 
 ```json
 {
@@ -104,7 +110,8 @@ process exits.
     "model": "anthropic/claude-opus-5-5",
     "providerOptions": { "anthropic": { "effort": "low" } },
     "channels": {
-      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] }
+      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] },
+      "signal": { "options": {}, "allowlist": ["01234567-89ab-4cde-8f01-23456789abcd"] }
     }
   }
 }
@@ -116,20 +123,22 @@ process exits.
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
   and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
   fails every reply (the cause is in the log), and an unknown provider key is ignored.
-- `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
-  An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
-  package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
+- `channels`: keyed by platform: `slack` (only `"mode": "socket"`) and `signal` (no options; an
+  empty object). An empty `channels` object runs without chat. Adding a platform means installing
+  its chat adapter package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
 - `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
   empty list answers no one and is logged once at startup.
 
 Secrets live only in the environment, never in the file:
 
-| Variable          | Holds                                                         |
-| ----------------- | ------------------------------------------------------------- |
-| `HEX_CONFIG`      | Path of the config file                                       |
-| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write` |
-| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                     |
-| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one |
+| Variable          | Holds                                                              |
+| ----------------- | ------------------------------------------------------------------ |
+| `HEX_CONFIG`      | Path of the config file                                            |
+| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write`      |
+| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                          |
+| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one      |
+| `SIGNAL_ACCOUNT`  | The Signal bot account: its number (`+15555550100`) or ACI         |
+| `SIGNAL_CLI_URL`  | Base URL of the signal-cli HTTP daemon (`http://…` or `https://…`) |
 
 ### Slack app for socket mode
 
@@ -180,6 +189,70 @@ Run it, then DM the app in Slack (App Home → **Messages**):
 ```sh
 export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…
 HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
+```
+
+### Signal
+
+hex uses [`@stibbons/chat-adapter-signal`](https://www.npmjs.com/package/@stibbons/chat-adapter-signal)
+over signal-cli's HTTP daemon (`signal-cli daemon --http`, version 0.14.9 or newer), the
+transport the adapter recommends. Installing signal-cli and registering or linking the bot account
+are signal-cli's job, not hex's: follow the adapter's
+[Provisioning the Bot Account](https://github.com/stibbons-ai/chat-adapter-signal#provisioning-the-bot-account)
+and [Security](https://github.com/stibbons-ai/chat-adapter-signal#security) sections. Start the
+daemon with `-a <account>` once the account is provisioned, plus `--receive-mode on-connection`
+(nothing is received before hex connects) and `--no-receive-stdout` (message texts stay out of the
+daemon's log).
+
+The daemon has no authentication: whoever reaches it reads the bot's messages and sends as the
+bot. Safe setups: hex in a container on the same Docker network as signal-cli, with no port
+published; or signal-cli installed natively and bound to loopback (`daemon --http
+127.0.0.1:8080`), where it also accepts only a loopback `Host` header, against DNS rebinding:
+signal-cli v0.14.9 builds the allowed hosts in
+[`buildAllowedHosts`](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L317-L327),
+[`isHostAllowed`](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L329-L381)
+compares the `Host` header, and its callers answer 421 when it doesn't match
+([L126-130](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L126-L130),
+[L180-184](https://github.com/AsamK/signal-cli/blob/v0.14.9/src/main/java/org/asamk/signal/http/HttpServerHandler.java#L180-L184)).
+Unsafe: publishing a signal-cli container's port, even on `127.0.0.1`: inside the container it is
+bound to `0.0.0.0`, where signal-cli checks no `Host` header, so any web page you open could reach
+it.
+
+- `SIGNAL_ACCOUNT` and `SIGNAL_CLI_URL` are the adapter's own variable names; hex reads them from
+  its environment and passes both to the adapter. The bot account never goes into the config
+  file or the repository. `options` must be `{}`.
+- Allowlist IDs are ACIs (the account's UUID, lowercase with dashes, as signal-cli prints it),
+  never phone numbers: the adapter keys every sender by ACI (its `message.author.userId`), which
+  stays the same when the number changes and is there also for senders who hide their number. Any
+  other entry fails startup, naming its position. To find yours, DM the bot before you are on the
+  allowlist: hex logs `hex: ignored message from a sender not on the allowlist` with
+  `sender: <your ACI>`.
+- 1:1 messages only: an @-mention of hex in a Group, even from an allowlisted sender, is ignored and
+  logged as `hex: ignored message outside a direct message`; other Group messages never reach hex.
+  A Group is one conversation with all its members, so an answer there, working memory included,
+  would go to all of them. No typing indicator is shown (hex turns Mastra's typing status off on
+  every channel). Messages the adapter doesn't support (stickers, view-once messages) are ignored
+  and logged only at debug level.
+- Messages sent in a row are not dropped. Mastra creates the Chat SDK instance for all channels
+  with `concurrency: { strategy: "concurrent" }`, not Chat's default `"drop"`, against which the
+  adapter warns: a message that arrives while hex is still answering the same conversation goes
+  into that run, whose next model call sees it, and one answer covers both. A `"queue"` would be
+  possible through `channels.chatOptions`, but it is one setting for the whole Chat instance and so
+  would change Slack too; hex keeps Mastra's default.
+- The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
+  subscriptions), so a restart starts at live events. Lost are messages hex had received but not
+  answered within the 5-second stop grace, or when it crashed, and messages signal-cli took off
+  Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s, longer
+  when the host itself is gone). Messages sent while no event stream was connected stay at Signal
+  and arrive once hex connects (with `--receive-mode on-connection`).
+- If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
+  30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
+  does while Slack's socket reconnects.
+
+Run it against a daemon on loopback:
+
+```sh
+export SIGNAL_ACCOUNT=+15555550100 SIGNAL_CLI_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=…
+HEX_CONFIG=hex.json bun run start   # "Chat instance initialized", then "hex listening on …"
 ```
 
 ## Check

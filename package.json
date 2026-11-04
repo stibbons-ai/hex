@@ -22,6 +22,7 @@
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run manifests && bun run licenses && bun run test"
   },
   "catalog": {
+    "@chat-adapter/shared": "4.43.0",
     "@chat-adapter/slack": "4.43.0",
     "@mastra/core": "1.80.0",
     "@mastra/libsql": "1.27.1",
@@ -29,6 +30,7 @@
     "@orpc/client": "1.16.1",
     "@orpc/contract": "1.16.1",
     "@orpc/server": "1.16.1",
+    "@stibbons/chat-adapter-signal": "0.1.0",
     "@types/bun": "1.4.4",
     "@types/spdx-expression-parse": "4.0.0",
     "chat": "4.43.0",

@@ -31,6 +31,11 @@ export interface ChatChannel {
    * adapter that only warns on an auth failure must supply it (Slack: the bot token was rejected).
    */
   verify?: () => void;
+  /**
+   * Answer direct messages only: a message in any other conversation is ignored and logged.
+   * Messages only; button clicks are not checked (no hex tool posts buttons).
+   */
+  directMessagesOnly?: boolean;
 }
 
 /** Provider-keyed options passed unchanged to the model, e.g. `{ anthropic: { effort: "low" } }`. */
@@ -101,19 +106,22 @@ function logToolCalls(logger: IMastraLogger | undefined, content: StepContent) {
  * The chat agent: answers allowlisted senders on every configured channel, with one memory thread
  * per channel conversation under resource {@link CHAT_RESOURCE_ID} and resource-scoped working
  * memory. A sender not on its channel's allowlist never reaches the agent: no reply, nothing
- * stored. Throws when there are no channels, or when a channel's key differs from its adapter's
- * name, since the allowlist is looked up by that name.
+ * persisted. Neither does a message outside a direct message on a `directMessagesOnly` channel.
+ * Throws when there are no channels, or when a channel's key differs from its adapter's name,
+ * since the allowlist is looked up by that name.
  */
 export function createChatAgent({ model, providerOptions, channels }: ChatOptions): ChatAgent {
   const entries = Object.entries(channels);
   if (entries.length === 0) throw new Error("chat needs at least one channel");
   const allowlists: Record<string, readonly string[]> = {};
+  const directOnly = new Set<string>();
   const adapters: Record<string, ChannelAdapterConfig> = {};
-  for (const [platform, { adapter, allowlist }] of entries) {
+  for (const [platform, { adapter, allowlist, directMessagesOnly }] of entries) {
     if (adapter.name !== platform) {
       throw new Error(`chat channel "${platform}": its adapter reports platform "${adapter.name}"`);
     }
     allowlists[platform] = allowlist;
+    if (directMessagesOnly) directOnly.add(platform);
     adapters[platform] = {
       adapter,
       formatError: () => CHAT_ERROR_REPLY,
@@ -146,7 +154,12 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
     return handling;
   };
   const guard: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
-    if (admits(ctx, thread.adapter.name, message.author.userId)) {
+    const platform = thread.adapter.name;
+    if (directOnly.has(platform) && !thread.isDM) {
+      logIgnored(ctx, "outside a direct message", platform, message.author.userId);
+      return;
+    }
+    if (admits(ctx, platform, message.author.userId)) {
       await track(defaultHandler(thread, message));
     }
   };
