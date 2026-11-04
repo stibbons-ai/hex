@@ -77,6 +77,18 @@ inside a DM, or a channel thread. A failed reply posts "Something went wrong; se
 and logs the detail. No typing indicator is shown: Slack's (`assistant.threads.setStatus`)
 targets its assistant threads, not the DMs and channel threads hex answers in.
 
+Tool calls, such as working-memory updates, are not posted to the conversation: a tool card would
+show the call's arguments and result, the working memory's content, which a channel thread makes
+public. Only a tool that needs approval would still post its card with approval buttons; no hex
+tool needs one. The operator sees each finished call in the hex log as one `hex: tool call` line
+with the tool's name and call ID, never its arguments or result: at info level when the tool ran
+without error (`ok: true`; a skipped working-memory update counts as ran), at warn level when it
+failed (`ok: false`, `error`: `invalid input` or `error`).
+Info lines show at Mastra's default level, which `bun run start` keeps; under
+`NODE_ENV=production` Mastra logs only warnings and up, so only failures show. Mastra's own
+warning for invalid tool input quotes the arguments. The memory thread doesn't keep the
+working-memory calls; their effect is the working memory of resource `daniel` in `mastra.db`.
+
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
