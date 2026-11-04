@@ -102,7 +102,8 @@ process exits.
   environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 - `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
-  and cost. Omitted, the provider's defaults apply.
+  and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
+  fails every reply (the cause is in the log), and an unknown provider key is ignored.
 - `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
   An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
   package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
