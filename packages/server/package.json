@@ -17,6 +17,7 @@
     "effect": "catalog:"
   },
   "devDependencies": {
+    "@chat-adapter/shared": "catalog:",
     "@mastra/libsql": "catalog:",
     "@orpc/client": "catalog:"
   }

@@ -60,25 +60,33 @@ function isBotAccount(value: string): boolean {
 }
 
 /**
- * A copy of `error` with every form of `secret` in `forms` replaced by `name`: same prototype (so
- * `instanceof` holds), same `name`, scrubbed `message` and `stack`, and its own primitive fields
- * (such as `code`), strings scrubbed. Object fields (the `cause`, an adapter's `originalError`)
- * are dropped: they can carry the secret anywhere, e.g. Bun's fetch error in its own `path`.
+ * A copy of `error` with every form of `secret` in `forms` replaced by `name`: a native Error
+ * (so it prints and nests as one) with the original's prototype (so `instanceof` holds), its
+ * `name`, scrubbed `message` and `stack`, and its own primitive fields (such as `code`), strings
+ * scrubbed. Object fields (the `cause`, an adapter's `originalError`) are dropped: they can carry
+ * the secret anywhere, e.g. Bun's fetch error in its own `path`.
  */
 function redacted(error: unknown, forms: readonly string[], name: string): Error {
   const scrub = (text: string) => forms.reduce((out, form) => out.replaceAll(form, name), text);
   if (!(error instanceof Error)) return new Error(scrub(String(error)));
-  const copy = Object.create(Object.getPrototypeOf(error) as object) as Error;
+  const copy = new Error(scrub(error.message));
+  Object.setPrototypeOf(copy, Object.getPrototypeOf(error) as object);
+  // Own data properties, so a getter-only accessor on the prototype can't make a write throw.
+  const field = (value: unknown) => ({
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
   for (const [key, value] of Object.entries(error)) {
-    if (typeof value === "string") Object.assign(copy, { [key]: scrub(value) });
+    if (typeof value === "string") Object.defineProperty(copy, key, field(scrub(value)));
     else if (typeof value === "number" || typeof value === "boolean") {
-      Object.assign(copy, { [key]: value });
+      Object.defineProperty(copy, key, field(value));
     }
   }
   const hidden = (value: string) => ({ value: scrub(value), writable: true, configurable: true });
   Object.defineProperties(copy, {
     name: hidden(error.name),
-    message: hidden(error.message),
     stack: hidden(error.stack ?? `${error.name}: ${error.message}`),
   });
   return copy;
@@ -133,9 +141,10 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
         ),
       },
     });
-    // A failed start can name the bot account (e.g. "Bot Account +1… is not registered", or the
-    // event-stream URL's `?account=`); Mastra logs that error and hex fails startup with it, so
-    // it is replaced first.
+    // A failed start can name the bot account: in the message ("Bot Account +1… is not
+    // registered") and in the event-stream URL's `?account=` inside `originalError`. Mastra logs
+    // that error and hex fails startup with it, so it is replaced by a copy: the account
+    // replaced in its message and stack, `originalError` dropped.
     const initialize = adapter.initialize.bind(adapter);
     adapter.initialize = async (chat) => {
       try {

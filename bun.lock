@@ -50,12 +50,14 @@
         "effect": "catalog:",
       },
       "devDependencies": {
+        "@chat-adapter/shared": "catalog:",
         "@mastra/libsql": "catalog:",
         "@orpc/client": "catalog:",
       },
     },
   },
   "catalog": {
+    "@chat-adapter/shared": "4.43.0",
     "@chat-adapter/slack": "4.43.0",
     "@mastra/core": "1.80.0",
     "@mastra/libsql": "1.27.1",

@@ -5,6 +5,7 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { NetworkError } from "@chat-adapter/shared";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { ConsoleLogger } from "@mastra/core/logger";
 import type { Adapter } from "chat";
@@ -13,7 +14,6 @@ import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
 import { loadChatConfig } from "../src/config";
 import {
   BOT_ACCOUNT,
-  BOT_ACI,
   DANIEL,
   type FakeSignalCli,
   GROUP_ID,
@@ -376,19 +376,26 @@ test.each(DAEMONS)(
 );
 
 test("a bot account given as an uppercase ACI is redacted as the adapter normalises it", async () => {
+  // Hex letters, so the adapter's lowercase form differs from the configured one.
+  const account = "ABCDEF01-0000-4000-8000-00000000000B";
+  expect(account).not.toBe(account.toLowerCase());
   await withFake(fakeSignalCli({ accounts: [] }), async (fake) => {
-    const { failure, output } = await failedStart(fake, BOT_ACI.toUpperCase(), "unserved-aci");
+    const { failure, output } = await failedStart(fake, account, "unserved-aci");
     expect(String(failure)).toMatch(/not registered or linked/);
-    for (const form of forms(BOT_ACI.toUpperCase())) expect(output).not.toContain(form);
+    for (const form of forms(account)) expect(output).not.toContain(form);
   });
 });
 
 test("an event stream signal-cli drops at once fails startup without naming the account", async () => {
   // The adapter's error carries Bun's fetch error, whose `path` has `?account=<URL-encoded>`.
   await withFake(fakeSignalCli({ eventsReset: true }), async (fake) => {
-    const { output } = await failedStart(fake, BOT_ACCOUNT, "events-reset");
+    const { failure, output } = await failedStart(fake, BOT_ACCOUNT, "events-reset");
     expect(fake.paths).toContain("/api/v1/events");
     for (const form of forms(BOT_ACCOUNT)) expect(output).not.toContain(form);
+    // Still the adapter's error, as code that checks its class or code expects.
+    expect(failure).toBeInstanceOf(NetworkError);
+    expect(failure).toMatchObject({ code: "NETWORK_ERROR", adapter: "signal" });
+    expect(Error.isError(failure)).toBe(true);
   });
 });
 

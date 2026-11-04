@@ -147,7 +147,9 @@ export function fakeSignalCli({
           start(controller) {
             self = controller;
             if (eventsReset) {
-              controller.error(new Error("fake signal-cli dropped the connection"));
+              // Without a reason, Bun drops the connection (the client sees ECONNRESET) without
+              // printing an error with its stack.
+              controller.error();
               return;
             }
             // Bun sends the headers with the first chunk; signal-cli sends them at once. A comment
