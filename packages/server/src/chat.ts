@@ -121,7 +121,7 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
       // not the DMs and channel threads hex answers in.
       typingStatus: false,
       // Hidden: a tool card posts the call's args and result, working memory included, which a
-      // channel thread makes public.
+      // channel thread makes public. Approvals would still post as cards; no hex tool needs one.
       toolDisplay: "hidden",
     };
   }

@@ -148,6 +148,17 @@ describe("chat channels (fake adapter)", () => {
     expect(resource?.workingMemory).toContain("First Name: Daniel");
   });
 
+  test("in a channel thread, the public case, a tool-calling run posts only the final answer", async () => {
+    const { adapter } = await start(toolCallingModel({ memory: MEMORY }));
+    await adapter.receive({
+      conversation: "general",
+      sender: DANIEL,
+      text: "@hex I'm Daniel",
+      mention: true,
+    });
+    expect(adapter.posted).toEqual([{ threadId: "fake:general", text: REPLY }]);
+  });
+
   test("a tool call is logged as one line with the tool's name, never its args or result", async () => {
     const calls: unknown[] = [];
     const model = toolCallingModel(
@@ -196,7 +207,7 @@ describe("chat channels (fake adapter)", () => {
     const warnings = await logged(server, "warn", () =>
       adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" }),
     );
-    // Only hex's line: Mastra's own "Tool input validation failed" warning quotes the args.
+    // Checks hex's line only: Mastra's own "Tool input validation failed" warning quotes the args.
     expect(toolCallLines(warnings)).toEqual([
       [
         TOOL_CALL,

@@ -39,7 +39,7 @@ export function mockModel({ before }: { before?: Before } = {}): MastraModelConf
 const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
 
 /**
- * A model whose first step calls hex's one tool, `updateWorkingMemory`, with `args`, and whose
+ * A model whose first step calls hex's `updateWorkingMemory` tool with `args`, and whose
  * second answers {@link REPLY}. `before` runs before each step streams, as for {@link mockModel}.
  */
 export function toolCallingModel(
