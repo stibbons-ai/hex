@@ -19,32 +19,36 @@ afterAll(async () => {
 function spawnMain(env: Record<string, string>) {
   return Bun.spawn(["bun", main], {
     cwd: directory,
-    env: { ...process.env, ...telemetryOff, ...env },
+    // HEX_CONFIG cleared so a developer's own config can't leak in; tests that need one set it.
+    env: { ...process.env, ...telemetryOff, HEX_CONFIG: "", ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
 }
 
-/** Reads stdout until the "listening on" line and returns its URL. */
-async function listeningUrl(stdout: ReadableStream<Uint8Array>): Promise<URL> {
+/** Reads stdout until the "listening on" line; returns its URL and everything read so far. */
+async function listeningUrl(
+  stdout: ReadableStream<Uint8Array>,
+): Promise<{ url: URL; output: string }> {
   const decoder = new TextDecoder();
   let output = "";
   for await (const chunk of stdout) {
     output += decoder.decode(chunk, { stream: true });
     const match = /hex listening on (\S+)/.exec(output);
-    if (match) return new URL(match[1]!);
+    if (match) return { url: new URL(match[1]!), output };
   }
   throw new Error(`Server exited before listening:\n${output}`);
 }
 
 describe("bun packages/server/src/main.ts", () => {
   test.each(["SIGTERM", "SIGINT"] as const)(
-    "serves health from HEX_DATA_DIR and exits 0 on %s",
+    "serves health from HEX_DATA_DIR, says chat is off once, and exits 0 on %s",
     async (signal) => {
       const dataDirectory = join(directory, signal, "data");
       const child = spawnMain({ HEX_PORT: "0", HEX_DATA_DIR: dataDirectory });
       try {
-        const url = await listeningUrl(child.stdout);
+        const { url, output } = await listeningUrl(child.stdout);
+        expect(output.match(/hex: chat off: HEX_CONFIG is not set/g)).toHaveLength(1);
         expect(url.hostname).toBe("127.0.0.1");
         const health = await fetch(new URL("/health", url));
         expect(health.status).toBe(200);
@@ -105,4 +109,48 @@ describe("bun packages/server/src/main.ts", () => {
       );
     },
   );
+
+  test("a config that can't be used fails startup with the file and the problem", async () => {
+    const config = join(directory, "hex.json");
+    await Bun.write(
+      config,
+      JSON.stringify({
+        chat: {
+          model: "anthropic/claude-opus-5-5",
+          channels: { slack: { options: { mode: "socket" }, allowlist: ["U0DANIEL"] } },
+        },
+      }),
+    );
+    const child = spawnMain({
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "bad-config"),
+      HEX_CONFIG: config,
+      SLACK_APP_TOKEN: "",
+    });
+    try {
+      expect(await child.exited).toBe(1);
+    } finally {
+      child.kill();
+    }
+    expect(await new Response(child.stderr).text()).toContain(
+      `hex config ${config}: channel "slack": environment variable SLACK_APP_TOKEN is not set`,
+    );
+  });
+
+  test("a config with no channels runs without chat, saying so", async () => {
+    const config = join(directory, "no-channels.json");
+    await Bun.write(config, JSON.stringify({ chat: { model: "openai/gpt-5", channels: {} } }));
+    const child = spawnMain({
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "no-channels"),
+      HEX_CONFIG: config,
+    });
+    try {
+      const { output } = await listeningUrl(child.stdout);
+      expect(output).toContain(`hex: chat off: ${config} configures no channels`);
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await child.exited).toBe(0);
+  });
 });

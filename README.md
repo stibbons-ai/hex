@@ -30,8 +30,10 @@ answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<p
 `<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
-SIGINT or SIGTERM stops it: requests in flight, open streams included, get 5 seconds before
-they are closed, then Mastra shuts down. A second signal of the same kind kills it at once.
+SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first, then
+requests in flight, open streams and chat replies included, get 5 seconds before they are closed
+(the cut-off is logged), then Mastra shuts down. A second signal of the same kind kills it at
+once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -59,6 +61,115 @@ await hex.workflows.list();
 Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
 routes don't work against this entrypoint.
 
+## Chat (Slack)
+
+hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it was asked
+in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
+WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. Only senders on
+a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such a thread (and
+button click, should interactivity ever be enabled) is ignored (no reply, nothing stored) and
+logged as one line with platform and sender ID, never the text; other channel messages never
+reach hex at all. Messages arriving while hex shuts down are dropped and logged the same way.
+Earlier messages of a channel thread are not read into memory. Slash commands are not answered.
+Every allowlisted conversation, on every channel, shares the memory resource `daniel` (working
+memory on, scoped to the resource), with one memory thread per conversation: a DM, a thread
+inside a DM, or a channel thread. A failed reply posts "Something went wrong; see the hex log."
+and logs the detail. No typing indicator is shown: Slack's (`assistant.threads.setStatus`)
+targets its assistant threads, not the DMs and channel threads hex answers in.
+
+Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
+says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
+malformed secret fails startup with the file and the problem. So does a channel that fails to
+start, doesn't start within 30 seconds (Slack: bot-token check and socket connect), or starts but
+can't work (Slack rejected the bot token); the server then closes what it started and `bun run
+start` exits with code 1. A Slack start that only finishes after the deadline is disconnected again
+if it was still checking the bot token; one still connecting its socket stays open until the
+process exits.
+
+```json
+{
+  "chat": {
+    "model": "anthropic/claude-opus-5-5",
+    "providerOptions": { "anthropic": { "effort": "low" } },
+    "channels": {
+      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] }
+    }
+  }
+}
+```
+
+- `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
+  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+- `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
+  provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
+  and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
+  fails every reply (the cause is in the log), and an unknown provider key is ignored.
+- `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
+  An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
+  package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
+- `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
+  empty list answers no one and is logged once at startup.
+
+Secrets live only in the environment, never in the file:
+
+| Variable          | Holds                                                         |
+| ----------------- | ------------------------------------------------------------- |
+| `HEX_CONFIG`      | Path of the config file                                       |
+| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write` |
+| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                     |
+| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one |
+
+### Slack app for socket mode
+
+1. At [api.slack.com/apps](https://api.slack.com/apps): **Create New App** → **From an app
+   manifest**, pick the workspace, paste:
+
+   ```yaml
+   display_information:
+     name: hex
+   features:
+     app_home:
+       messages_tab_enabled: true
+       messages_tab_read_only_enabled: false
+     bot_user:
+       display_name: hex
+       always_online: true
+   oauth_config:
+     scopes:
+       bot:
+         - app_mentions:read
+         - channels:history
+         - chat:write
+         - groups:history
+         - im:history
+         - im:read
+         - mpim:history
+         - users:read
+   settings:
+     event_subscriptions:
+       bot_events:
+         - app_mention
+         - message.channels
+         - message.groups
+         - message.im
+         - message.mpim
+     socket_mode_enabled: true
+   ```
+
+2. **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**, scope
+   `connections:write`: that `xapp-…` token is `SLACK_APP_TOKEN`.
+3. **Install App** → install to the workspace: the **Bot User OAuth Token** (`xoxb-…`) is
+   `SLACK_BOT_TOKEN`.
+4. Your Slack user ID for the allowlist: in Slack, open your profile → **⋮** → **Copy member ID**
+   (`U…`).
+
+Run it, then DM the app in Slack (App Home → **Messages**):
+
+```sh
+export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…
+HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
+```
+
 ## Check
 
 ```sh
@@ -77,7 +188,7 @@ bun run test          # bun test
 | ------------------- | ------------------------------------------------------------------------------ |
 | `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health` and the oRPC API (`contract`) over Mastra    |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels |
 | `@hex/eval-harness` | Empty until the evaluation slice                                               |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency

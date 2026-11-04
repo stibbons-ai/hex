@@ -4,11 +4,14 @@ import { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
 import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
+import { createChatAgent } from "./chat";
+import type { ChatAgent, ChatOptions } from "./chat";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
 import { router } from "./router";
 
 export { contract } from "./contract";
+export type { ChatOptions } from "./chat";
 
 /**
  * Loopback only: other machines can't connect. Local browsers still can, so requests are also
@@ -28,11 +31,36 @@ export interface ServerOptions {
   logger?: IMastraLogger | false;
   /** Workflows to register with Mastra. */
   workflows?: Record<string, AnyWorkflow>;
-  /** How long stop() lets in-flight requests and open streams finish before closing them. */
+  /**
+   * How long stop() lets in-flight requests, open streams and chat replies finish before closing
+   * them.
+   */
   stopGraceMs?: number;
+  /**
+   * The chat agent and its channels; omitted runs without chat. The server owns the adapters: it
+   * connects them on start and disconnects them in stop() or after a failed start.
+   */
+  chat?: ChatOptions;
+  /** How long the chat channels get to connect before startup fails. */
+  chatStartTimeoutMs?: number;
 }
 
 const DEFAULT_STOP_GRACE_MS = 5000;
+const DEFAULT_CHAT_START_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether `promise` settled within `ms`: true when it resolved in time, false on timeout; a
+ * rejection in time is rethrown.
+ */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  const timeout = Promise.withResolvers<boolean>();
+  const timer = setTimeout(() => timeout.resolve(false), ms);
+  try {
+    return await Promise.race([promise.then(() => true), timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface RunningServer {
   url: URL;
@@ -40,17 +68,23 @@ export interface RunningServer {
   hostname: string;
   mastra: Mastra;
   /**
-   * Stops accepting requests and gives in-flight ones (open streams included) `stopGraceMs` before
-   * closing them, then shuts Mastra down (which closes the store) and closes the store again as a
-   * fallback. Each step runs even if an earlier one fails. LibSQL's file handles may stay open
-   * until GC.
+   * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
+   * accepting requests and gives in-flight ones (open streams and chat replies included)
+   * `stopGraceMs` before closing them, then shuts Mastra down (which closes the store) and closes
+   * the store again as a fallback. Each step runs even if an earlier one fails; a step cut short
+   * is logged. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
 }
 
 /**
  * Our own Bun.serve entrypoint: `GET`/`HEAD /health` plus the oRPC API under /rpc (ADR 0004), both
- * behind the Host allow-list.
+ * behind the Host allow-list, and the chat channels when configured. Channels connect out (Slack
+ * socket mode); no webhook route is served. Startup fails, with everything closed again, when a
+ * channel doesn't start within `chatStartTimeoutMs`, fails to start, or starts but can't work (its
+ * `verify` throws, e.g. Slack rejected the bot token). A start that finishes after the deadline
+ * is disconnected again when the adapter allows it (Slack: only while it is still checking the
+ * bot token); otherwise the caller is expected to exit, as `main.ts` does.
  */
 export async function startServer({
   databasePath,
@@ -58,15 +92,82 @@ export async function startServer({
   logger,
   workflows,
   stopGraceMs = DEFAULT_STOP_GRACE_MS,
+  chat,
+  chatStartTimeoutMs = DEFAULT_CHAT_START_TIMEOUT_MS,
 }: ServerOptions): Promise<RunningServer> {
   const storage = await createLocalStore(databasePath);
+  // Slack: closes the socket (and stops its reconnect loop). Every adapter is disconnected even
+  // if another fails. Safe to run more than once.
+  const disconnectChat = () =>
+    closeInOrder(
+      Object.values(chat?.channels ?? {}).map(
+        ({ adapter }) =>
+          async () =>
+            adapter.disconnect?.(),
+      ),
+    );
+  /**
+   * `disconnectChat`, bounded by `stopGraceMs`: a disconnect that hangs is logged and left behind,
+   * one that fails after the bound is logged when it does, one that fails in time rejects. `when`
+   * names the phase in the log lines.
+   */
+  const disconnectChatWithin = async (
+    when: string,
+    log: (message: string, cause?: unknown) => void,
+  ) => {
+    const disconnecting = disconnectChat();
+    let late = false;
+    disconnecting.catch((error: unknown) => {
+      if (late) log(`hex: ${when}: disconnecting chat channels failed late`, error);
+    });
+    if (!(await settlesWithin(disconnecting, stopGraceMs))) {
+      late = true;
+      log(`hex: ${when}: chat channels did not disconnect within ${stopGraceMs} ms`);
+    }
+  };
+  let chatAgent: ChatAgent | undefined;
   try {
     await storage.init();
+    chatAgent = chat ? createChatAgent(chat) : undefined;
     const mastra = new Mastra({
       storage,
       ...(logger === undefined ? {} : { logger }),
       ...(workflows ? { workflows } : {}),
+      ...(chatAgent ? { agents: { [chatAgent.agent.id]: chatAgent.agent } } : {}),
     });
+    if (chat && chatAgent) {
+      // Mastra starts the channels without awaiting them and only logs a failure (so a failed
+      // start is logged twice: by Mastra and as our startup error); awaiting the same start here
+      // makes a channel that can't start fail startup. Starting covers Slack's bot-token check and
+      // its socket connect, whose client retries some failures forever, hence the deadline.
+      const starting = chatAgent.agent.getChannels()!.initialize(mastra);
+      if (!(await settlesWithin(starting, chatStartTimeoutMs))) {
+        // The start goes on in the background. Disconnecting once it settles (either way: with
+        // several channels, one may have connected before another failed) catches a late finish
+        // in Slack's bot-token check. It can't catch one inside the socket connect: the adapter
+        // drops its socket client on disconnect, and @slack/socket-mode's start() doesn't re-check
+        // `shuttingDown` after retrieveWSSURL, so that socket opens unowned until the process
+        // exits.
+        void starting.then(disconnectChat, disconnectChat).catch((error: unknown) => {
+          console.error("hex: disconnecting chat channels after a late start failed", error);
+        });
+        throw new Error(`hex: chat channels did not start within ${chatStartTimeoutMs} ms`);
+      }
+      for (const [platform, { allowlist, verify }] of Object.entries(chat.channels)) {
+        try {
+          verify?.();
+        } catch (error) {
+          throw new Error(`chat channel "${platform}": ${(error as Error).message}`, {
+            cause: error,
+          });
+        }
+        if (allowlist.length === 0) {
+          mastra
+            .getLogger()
+            .warn(`hex: chat channel "${platform}": empty allowlist, nobody will be answered`);
+        }
+      }
+    }
     // Server faults only: client errors such as NOT_FOUND are the caller's to handle.
     const logFault = (error: unknown) => {
       if (error instanceof ORPCError && error.status < 500) return;
@@ -124,21 +225,48 @@ export async function startServer({
       stop: () =>
         closeInOrder([
           async () => {
-            // Graceful stop never resolves while a client holds a stream open, so bound it.
-            const grace = Promise.withResolvers<void>();
-            const timer = setTimeout(grace.resolve, stopGraceMs);
-            await Promise.race([server.stop(), grace.promise]);
-            clearTimeout(timer);
-            await server.stop(true);
+            chatAgent?.close();
+            await disconnectChatWithin("stop", (message, cause) =>
+              mastra.getLogger().warn(message, ...(cause === undefined ? [] : [cause])),
+            );
+          },
+          async () => {
+            let drained = false;
+            try {
+              // Graceful stop never resolves while a client holds a stream open, so bound it.
+              drained = await settlesWithin(
+                Promise.all([server.stop(), chatAgent?.settled()]),
+                stopGraceMs,
+              );
+            } finally {
+              if (!drained) {
+                const cutOff = chatAgent?.pending() ?? 0;
+                mastra
+                  .getLogger()
+                  .warn(
+                    `hex: stop: requests and chat replies still running after ${stopGraceMs} ms were cut off` +
+                      (cutOff > 0 ? ` (${cutOff} chat replies)` : ""),
+                  );
+              }
+              await server.stop(true);
+            }
           },
           () => mastra.shutdown(),
           () => storage.close(),
         ]),
     };
   } catch (error) {
-    // Keep the startup error; a failure to close the half-built store is only logged.
-    await storage.close().catch((closeError: unknown) => {
-      console.error("hex: closing storage after a failed start also failed", closeError);
+    // Keep the startup error; a failure to close what was half-built is only logged. No new chat
+    // message is admitted while the channels disconnect.
+    chatAgent?.close();
+    await closeInOrder([
+      () =>
+        disconnectChatWithin("after a failed start", (message, cause) =>
+          console.error(message, ...(cause === undefined ? [] : [cause])),
+        ),
+      () => storage.close(),
+    ]).catch((closeError: unknown) => {
+      console.error("hex: cleaning up after a failed start also failed", closeError);
     });
     throw error;
   }
