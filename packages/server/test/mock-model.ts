@@ -40,15 +40,23 @@ const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
 
 /**
  * A model whose first step calls hex's `updateWorkingMemory` tool with `args`, and whose
- * second answers {@link REPLY}. `before` runs before each step streams, as for {@link mockModel}.
+ * second answers {@link REPLY}; each of `laterRuns` more calls answers {@link REPLY} too.
+ * `before` runs before each step streams, as for {@link mockModel}.
  */
 export function toolCallingModel(
   args: Record<string, unknown>,
-  { before }: { before?: Before } = {},
+  { before, laterRuns = 0 }: { before?: Before; laterRuns?: number } = {},
 ): MastraModelConfig {
   const step = (chunks: unknown[]) => ({
     stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
   });
+  const answer = () =>
+    step([
+      { type: "text-start", id: "text-1" },
+      { type: "text-delta", id: "text-1", delta: REPLY },
+      { type: "text-end", id: "text-1" },
+      { type: "finish", finishReason: "stop", usage: USAGE },
+    ]);
   const model = new MastraLanguageModelV2Mock({
     doStream: [
       step([
@@ -60,12 +68,8 @@ export function toolCallingModel(
         },
         { type: "finish", finishReason: "tool-calls", usage: USAGE },
       ]),
-      step([
-        { type: "text-start", id: "text-1" },
-        { type: "text-delta", id: "text-1", delta: REPLY },
-        { type: "text-end", id: "text-1" },
-        { type: "finish", finishReason: "stop", usage: USAGE },
-      ]),
+      answer(),
+      ...Array.from({ length: laterRuns }, answer),
     ],
   } as ConstructorParameters<typeof MastraLanguageModelV2Mock>[0]);
   withBefore(model, before);

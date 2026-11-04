@@ -12,6 +12,7 @@
     "@mastra/memory": "catalog:",
     "@orpc/contract": "catalog:",
     "@orpc/server": "catalog:",
+    "@stibbons/chat-adapter-signal": "catalog:",
     "chat": "catalog:",
     "effect": "catalog:"
   },

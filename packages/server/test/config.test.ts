@@ -3,6 +3,15 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadChatConfig } from "../src/config";
+import { BOT_ACCOUNT, BOT_ACI, DANIEL as DANIEL_ACI } from "./fake-signal-cli";
+
+const signalEnv = { SIGNAL_ACCOUNT: BOT_ACCOUNT, SIGNAL_CLI_URL: "http://127.0.0.1:8080" };
+const signalConfig = {
+  chat: {
+    model: "anthropic/claude-opus-5-5",
+    channels: { signal: { options: {}, allowlist: [DANIEL_ACI] } },
+  },
+};
 
 const slackEnv = { SLACK_APP_TOKEN: "xapp-test", SLACK_BOT_TOKEN: "xoxb-test" };
 const valid = {
@@ -93,7 +102,7 @@ describe("loadChatConfig", () => {
       chat: { ...valid.chat, channels: { toString: { options: {}, allowlist: [] } } },
     });
     await expect(loadChatConfig(path, slackEnv)).rejects.toThrow(
-      `hex config ${path}: channel "toString": unknown adapter; known: slack`,
+      `hex config ${path}: channel "toString": unknown adapter; known: slack, signal`,
     );
   });
 
@@ -145,5 +154,66 @@ describe("loadChatConfig", () => {
     await expect(loadChatConfig(path, slackEnv)).rejects.toThrow(
       `hex config ${path}: invalid config: `,
     );
+  });
+
+  describe("signal", () => {
+    test("builds a Signal adapter and the allowlist from env and an empty options object", async () => {
+      const chat = await loadChatConfig(await configFile(signalConfig), signalEnv);
+      const signal = chat?.channels["signal"];
+      expect(signal?.adapter.name).toBe("signal");
+      expect(signal?.allowlist).toEqual([DANIEL_ACI]);
+      // initialize() itself rejects when signal-cli can't serve the account.
+      expect(signal?.verify).toBeUndefined();
+    });
+
+    test("an ACI works as the bot account", async () => {
+      const env = { ...signalEnv, SIGNAL_ACCOUNT: BOT_ACI };
+      const chat = await loadChatConfig(await configFile(signalConfig), env);
+      expect(chat?.channels["signal"]?.adapter.name).toBe("signal");
+    });
+
+    test.each(["SIGNAL_ACCOUNT", "SIGNAL_CLI_URL"])(
+      "a missing %s fails, naming it, even when process.env has it",
+      async (name) => {
+        const path = await configFile(signalConfig);
+        const saved = process.env[name];
+        // The adapter would fall back to process.env; hex passes both, so it must not.
+        process.env[name] = signalEnv[name as keyof typeof signalEnv];
+        try {
+          await expect(loadChatConfig(path, { ...signalEnv, [name]: undefined })).rejects.toThrow(
+            `hex config ${path}: channel "signal": environment variable ${name} is not set`,
+          );
+        } finally {
+          if (saved === undefined) delete process.env[name];
+          else process.env[name] = saved;
+        }
+      },
+    );
+
+    test.each([
+      ["SIGNAL_ACCOUNT", "15555550100", "be the bot account's number (+ and digits) or ACI"],
+      ["SIGNAL_ACCOUNT", "+1 555 555 0100", "be the bot account's number (+ and digits) or ACI"],
+      ["SIGNAL_CLI_URL", "127.0.0.1:8080", "be an http(s) URL"],
+      ["SIGNAL_CLI_URL", "file:///tmp/signal.sock", "be an http(s) URL"],
+    ])("%s=%j fails without echoing the value", async (name, value, must) => {
+      const path = await configFile(signalConfig);
+      const loading = loadChatConfig(path, { ...signalEnv, [name]: value });
+      await expect(loading).rejects.toThrow(
+        `hex config ${path}: channel "signal": environment variable ${name} must ${must}`,
+      );
+      await expect(loading).rejects.not.toThrow(value);
+    });
+
+    test.each([
+      ["a transport in the file", { transport: { type: "spawn" } }],
+      ["the account in the file", { account: BOT_ACCOUNT }],
+    ])("%s fails on the channel's options", async (_case, options) => {
+      const path = await configFile({
+        chat: { ...signalConfig.chat, channels: { signal: { options, allowlist: [] } } },
+      });
+      await expect(loadChatConfig(path, signalEnv)).rejects.toThrow(
+        `hex config ${path}: channel "signal": options: `,
+      );
+    });
   });
 });

@@ -61,11 +61,12 @@ await hex.workflows.list();
 Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
 routes don't work against this entrypoint.
 
-## Chat (Slack)
+## Chat (Slack, Signal)
 
 hex answers direct messages, @-mentions, and Daniel's follow-ups in channel threads it was asked
 in, in Slack through Mastra Channels in Slack's socket mode: the server opens an outbound
-WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. Only senders on
+WebSocket to Slack, so nothing is exposed publicly and no webhook route is served. On Signal it
+answers 1:1 messages through a signal-cli daemon Daniel runs himself (see [Signal](#signal)). Only senders on
 a channel's allowlist get an answer. Anyone else's DM, @-mention or reply in such a thread (and
 button click, should interactivity ever be enabled) is ignored (no reply, nothing stored) and
 logged as one line with platform and sender ID, never the text; other channel messages never
@@ -92,11 +93,13 @@ working-memory calls; their effect is the working memory of resource `daniel` in
 Chat is configured by a JSON file named by `HEX_CONFIG`. Unset, the server runs without chat and
 says so once at startup. A file that can't be read or decoded, an unknown channel, or a missing or
 malformed secret fails startup with the file and the problem. So does a channel that fails to
-start, doesn't start within 30 seconds (Slack: bot-token check and socket connect), or starts but
-can't work (Slack rejected the bot token); the server then closes what it started and `bun run
-start` exits with code 1. A Slack start that only finishes after the deadline is disconnected again
-if it was still checking the bot token; one still connecting its socket stays open until the
-process exits.
+start, doesn't start within 30 seconds (Slack: bot-token check and socket connect; Signal:
+signal-cli health check, version, bot account lookup and event stream), or starts but can't work
+(Slack rejected the bot token; Signal: signal-cli doesn't serve the bot account); the server then
+closes what it started and `bun run start` exits with code 1. A Slack start that only finishes
+after the deadline is disconnected again if it was still checking the bot token; one still
+connecting its socket stays open until the process exits. A Signal start cut off by the deadline
+stops where it is and opens no event stream.
 
 ```json
 {
@@ -104,7 +107,8 @@ process exits.
     "model": "anthropic/claude-opus-5-5",
     "providerOptions": { "anthropic": { "effort": "low" } },
     "channels": {
-      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] }
+      "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] },
+      "signal": { "options": {}, "allowlist": ["01234567-89ab-4cde-8f01-23456789abcd"] }
     }
   }
 }
@@ -116,20 +120,22 @@ process exits.
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
   and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
   fails every reply (the cause is in the log), and an unknown provider key is ignored.
-- `channels`: keyed by platform. `slack` is the only adapter so far, and only `"mode": "socket"`.
-  An empty `channels` object runs without chat. Adding a platform means installing its chat adapter
-  package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
+- `channels`: keyed by platform: `slack` (only `"mode": "socket"`) and `signal` (no options; an
+  empty object). An empty `channels` object runs without chat. Adding a platform means installing
+  its chat adapter package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
 - `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
   empty list answers no one and is logged once at startup.
 
 Secrets live only in the environment, never in the file:
 
-| Variable          | Holds                                                         |
-| ----------------- | ------------------------------------------------------------- |
-| `HEX_CONFIG`      | Path of the config file                                       |
-| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write` |
-| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                     |
-| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one |
+| Variable          | Holds                                                              |
+| ----------------- | ------------------------------------------------------------------ |
+| `HEX_CONFIG`      | Path of the config file                                            |
+| `SLACK_APP_TOKEN` | App-level token (must start `xapp-`) with `connections:write`      |
+| `SLACK_BOT_TOKEN` | Bot user OAuth token (must start `xoxb-`)                          |
+| `SLACK_API_URL`   | Optional Slack Web API base URL; tests point it at a fake one      |
+| `SIGNAL_ACCOUNT`  | The Signal bot account: its number (`+15555550100`) or ACI         |
+| `SIGNAL_CLI_URL`  | Base URL of the signal-cli HTTP daemon (`http://…` or `https://…`) |
 
 ### Slack app for socket mode
 
@@ -180,6 +186,44 @@ Run it, then DM the app in Slack (App Home → **Messages**):
 ```sh
 export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…
 HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
+```
+
+### Signal
+
+hex uses [`@stibbons/chat-adapter-signal`](https://www.npmjs.com/package/@stibbons/chat-adapter-signal)
+over signal-cli's HTTP daemon (`signal-cli daemon --http`, version 0.14.9 or newer), the
+transport the adapter recommends. Installing signal-cli and registering or linking the bot account
+are signal-cli's job, not hex's: follow the adapter's
+[Provisioning the Bot Account](https://github.com/stibbons-ai/chat-adapter-signal#provisioning-the-bot-account)
+and [Security](https://github.com/stibbons-ai/chat-adapter-signal#security) sections. The daemon has
+no authentication: whoever reaches it reads the bot's messages and sends as the bot, so keep it on
+loopback or a private network, and start it with `-a <account>` once the account is provisioned.
+
+- `SIGNAL_ACCOUNT` and `SIGNAL_CLI_URL` are the adapter's own variable names; hex reads them from
+  its environment and passes both to the adapter. The bot account's number never goes into the
+  config file or the repository.
+- Allowlist IDs are ACIs (the account's UUID, lowercase with dashes, as signal-cli prints it),
+  never phone numbers: the adapter keys every sender by ACI (its `message.author.userId`), which
+  stays the same when the number changes and is there also for senders who hide their number. A
+  number in the allowlist matches no one. To find yours, DM the bot before you are on the
+  allowlist: hex logs `hex: ignored message from a sender not on the allowlist` with
+  `sender: <your ACI>`.
+- The allowlist applies in Signal Groups as in Slack channels; hex is meant for 1:1 messages. No
+  typing indicator is shown (hex turns Mastra's typing status off on every channel).
+- Messages sent in a row are not dropped. Mastra creates the Chat SDK instance for all channels
+  with `concurrency: { strategy: "concurrent" }`, not Chat's default `"drop"`, against which the
+  adapter warns: a message that arrives while hex is still answering the same conversation goes
+  into that run, whose next model call sees it, and one answer covers both. The setting is one per
+  Chat instance, so a Signal-only `"queue"` is not possible; hex keeps Mastra's default.
+- The adapter keeps its receive cursor in Mastra's store, so events signal-cli buffered while hex
+  was restarting are replayed (signal-cli keeps the last 1 000 of its current run; start it with
+  `--receive-mode on-connection` so nothing is received before hex connects).
+
+Run it against a daemon on loopback:
+
+```sh
+export SIGNAL_ACCOUNT=+15555550100 SIGNAL_CLI_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=…
+HEX_CONFIG=hex.json bun run start   # "Chat instance initialized", then "hex listening on …"
 ```
 
 ## Check

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createSlackAdapter } from "@chat-adapter/slack";
+import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
 import { Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
 
@@ -24,18 +25,32 @@ function decodeOrThrow<S extends Schema.ConstraintDecoder<unknown>>(
   return result.success;
 }
 
-/** The variable's value; the error names the variable and the expected prefix, never the value. */
-function requireToken(env: Env, name: string, prefix: string): string {
+/** The variable's value; the error names the variable and what it must be, never the value. */
+function requireEnv(
+  env: Env,
+  name: string,
+  must: string,
+  valid: (value: string) => boolean,
+): string {
   const value = env[name];
   if (!value) throw new Error(`environment variable ${name} is not set`);
-  if (!value.startsWith(prefix)) {
-    throw new Error(`environment variable ${name} must start with "${prefix}"`);
-  }
+  if (!valid(value)) throw new Error(`environment variable ${name} must ${must}`);
   return value;
+}
+
+function requireToken(env: Env, name: string, prefix: string): string {
+  return requireEnv(env, name, `start with "${prefix}"`, (value) => value.startsWith(prefix));
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
+
+// Nothing to choose: the account and signal-cli's URL are deployment data, so they come from env.
+// (An empty Struct would accept any object, so: a record that admits no key.)
+const SignalOptions = Schema.Record(Schema.String, Schema.Never);
+
+// signal-cli takes the bot account as an E.164 number or as its ACI.
+const BOT_ACCOUNT_FORMAT = /^(\+[1-9]\d{6,14}|[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 
 /** Channels by platform key. Adding a channel: install its adapter package, add it here. */
 export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
@@ -58,6 +73,26 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
         }
       },
     };
+  },
+  signal(options, env) {
+    decodeOrThrow(SignalOptions, options, "options");
+    // Both passed explicitly, so the adapter never falls back to process.env.
+    const adapter = createSignalAdapter({
+      account: requireEnv(
+        env,
+        "SIGNAL_ACCOUNT",
+        "be the bot account's number (+ and digits) or ACI",
+        (value) => BOT_ACCOUNT_FORMAT.test(value),
+      ),
+      transport: {
+        type: "http",
+        url: requireEnv(env, "SIGNAL_CLI_URL", "be an http(s) URL", (value) =>
+          ["http:", "https:"].includes(URL.parse(value)?.protocol ?? ""),
+        ),
+      },
+    });
+    // No verify: initialize() rejects when signal-cli is unreachable or doesn't serve the account.
+    return { adapter };
   },
 };
 
