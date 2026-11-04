@@ -6,7 +6,7 @@ import { ConsoleLogger } from "@mastra/core/logger";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { LibSQLStore } from "@mastra/libsql";
 import { type ChatOptions, type RunningServer, type ServerOptions, startServer } from "../src";
-import { CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
+import { CHAT_AGENT_ID, CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 import { REPLY, mockModel, toolCallingModel } from "./mock-model";
 import { freePort, within } from "./timeouts";
@@ -14,6 +14,8 @@ import { freePort, within } from "./timeouts";
 const DANIEL = "U0DANIEL";
 const STRANGER = "U0STRANGER";
 const IGNORED = "hex: ignored message from a sender not on the allowlist";
+const TOOL_CALL = "hex: tool call";
+const MEMORY = "# User Information\n- First Name: Daniel";
 
 let directory: string;
 let databases = 0;
@@ -71,7 +73,7 @@ async function allMessages(server: RunningServer) {
 /** Runs `act` with the server's logger method spied on; returns the calls. */
 async function logged(
   server: RunningServer,
-  level: "warn" | "error",
+  level: "info" | "warn" | "error",
   act: () => Promise<void>,
 ): Promise<unknown[][]> {
   const spy = spyOn(server.mastra.getLogger(), level);
@@ -81,6 +83,11 @@ async function logged(
   } finally {
     spy.mockRestore();
   }
+}
+
+/** The tool-call lines among a logger method's calls. */
+function toolCallLines(calls: unknown[][]) {
+  return calls.filter(([message]) => message === TOOL_CALL);
 }
 
 describe("chat channels (fake adapter)", () => {
@@ -128,8 +135,9 @@ describe("chat channels (fake adapter)", () => {
   });
 
   test("a run that calls a tool posts only the final answer: no tool name, args or result", async () => {
-    const memory = "# User Information\n- First Name: Daniel";
-    const { server, adapter } = await start(toolCallingModel("updateWorkingMemory", { memory }));
+    const { server, adapter } = await start(
+      toolCallingModel("updateWorkingMemory", { memory: MEMORY }),
+    );
     await adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" });
     await adapter.posts(1);
     expect(adapter.posted).toEqual([{ threadId: "fake:dm-daniel", text: REPLY }]);
@@ -140,6 +148,70 @@ describe("chat channels (fake adapter)", () => {
       resourceId: CHAT_RESOURCE_ID,
     });
     expect(resource?.workingMemory).toContain("First Name: Daniel");
+  });
+
+  test("a tool call is logged as one line with the tool's name, never its args or result", async () => {
+    const calls: unknown[] = [];
+    const model = toolCallingModel(
+      "updateWorkingMemory",
+      { memory: MEMORY },
+      { before: async (options) => void calls.push(options) },
+    );
+    const adapter = new FakeChatAdapter();
+    // Provider options are run defaults too: both must reach a channel run.
+    const server = await startServer(
+      serverOptions({
+        ...chatOptions(adapter, model),
+        providerOptions: { anthropic: { effort: "low" } },
+      }),
+    );
+    servers.push(server);
+    const lines = await logged(server, "info", () =>
+      adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" }),
+    );
+    expect(toolCallLines(lines)).toEqual([
+      [TOOL_CALL, { tool: "updateWorkingMemory", toolCallId: "call-1", ok: true }],
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("First Name");
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call).toMatchObject({ providerOptions: { anthropic: { effort: "low" } } });
+    }
+  });
+
+  test("a tool that throws is logged as a warning with its kind, not its message", async () => {
+    const { server, adapter } = await start(
+      toolCallingModel("updateWorkingMemory", { memory: MEMORY }),
+    );
+    const memory = await server.mastra.getAgent(CHAT_AGENT_ID).getMemory();
+    if (!memory) throw new Error("no memory");
+    spyOn(memory, "updateWorkingMemory").mockRejectedValue(new TypeError(`can't store ${MEMORY}`));
+    const warnings = await logged(server, "warn", () =>
+      adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" }),
+    );
+    expect(toolCallLines(warnings)).toEqual([
+      [TOOL_CALL, { tool: "updateWorkingMemory", toolCallId: "call-1", ok: false, error: "error" }],
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain("First Name");
+    expect(adapter.posted).toEqual([{ threadId: "fake:dm-daniel", text: REPLY }]);
+  });
+
+  test("a tool call with invalid input is logged as a warning without the input", async () => {
+    const { server, adapter } = await start(
+      toolCallingModel("updateWorkingMemory", { memory: { text: MEMORY } }),
+    );
+    const warnings = await logged(server, "warn", () =>
+      adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "I'm Daniel" }),
+    );
+    // Only hex's line: Mastra's own "Tool input validation failed" warning quotes the args.
+    const lines = toolCallLines(warnings);
+    expect(lines).toEqual([
+      [
+        TOOL_CALL,
+        { tool: "updateWorkingMemory", toolCallId: "call-1", ok: false, error: "invalid input" },
+      ],
+    ]);
+    expect(JSON.stringify(lines)).not.toContain("First Name");
   });
 
   test("two conversations are two threads of the same resource; a follow-up stays in its thread", async () => {

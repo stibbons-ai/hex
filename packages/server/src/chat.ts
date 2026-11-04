@@ -7,6 +7,7 @@ import type {
   ChannelHandlerContext,
 } from "@mastra/core/channels";
 import type { MastraModelConfig } from "@mastra/core/llm";
+import type { IMastraLogger } from "@mastra/core/logger";
 import { Memory } from "@mastra/memory";
 import type { Adapter } from "chat";
 
@@ -37,6 +38,8 @@ export type ProviderOptions = Readonly<Record<string, Readonly<Record<string, un
 
 type AgentProviderOptions = NonNullable<AgentExecutionOptions["providerOptions"]>;
 
+type StepContent = Parameters<NonNullable<AgentExecutionOptions["onStepFinish"]>>[0]["content"];
+
 export interface ChatOptions {
   /** A Mastra model-router string such as `anthropic/claude-opus-5-5`; tests pass a mock model. */
   model: MastraModelConfig;
@@ -65,6 +68,32 @@ function logIgnored(ctx: ChannelHandlerContext, reason: string, platform: string
     platform,
     sender: sender ?? null,
   });
+}
+
+/**
+ * Why a finished tool call failed, by kind only: the failure's text can quote the call's args,
+ * and hex's are working-memory content. `undefined` when it succeeded.
+ */
+function toolFailure(part: StepContent[number]): string | undefined {
+  if (part.type === "tool-error") return "error";
+  if (part.type !== "tool-result") return undefined;
+  // Mastra hands the model a thrown error or an unknown tool as error text, and input that failed
+  // validation as a JSON result with `error: true`.
+  const output = part.output as { type?: string; value?: unknown } | undefined;
+  if (output?.type?.startsWith("error-")) return "error";
+  const value = output?.value as { error?: unknown } | null | undefined;
+  return output?.type === "json" && value?.error === true ? "invalid input" : undefined;
+}
+
+/** One line per finished tool call, never its args or result: tool cards are hidden in chat. */
+function logToolCalls(logger: IMastraLogger | undefined, content: StepContent) {
+  for (const part of content) {
+    if (part.type !== "tool-result" && part.type !== "tool-error") continue;
+    const call = { tool: part.toolName, toolCallId: part.toolCallId };
+    const error = toolFailure(part);
+    if (error === undefined) logger?.info("hex: tool call", { ...call, ok: true });
+    else logger?.warn("hex: tool call", { ...call, ok: false, error });
+  }
 }
 
 /**
@@ -120,16 +149,17 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
       await track(defaultHandler(thread, message));
     }
   };
-  const agent = new Agent({
+  const agent: Agent = new Agent({
     id: CHAT_AGENT_ID,
     name: CHAT_AGENT_ID,
     instructions: INSTRUCTIONS,
     model,
     // Every run, the Channels-triggered ones included, merges these defaults into its options.
-    // Mastra types the known providers' options; ours come from the config as data.
-    ...(providerOptions
-      ? { defaultOptions: { providerOptions: providerOptions as AgentProviderOptions } }
-      : {}),
+    defaultOptions: {
+      onStepFinish: ({ content }) => logToolCalls(agent.getMastraInstance()?.getLogger(), content),
+      // Mastra types the known providers' options; ours come from the config as data.
+      ...(providerOptions ? { providerOptions: providerOptions as AgentProviderOptions } : {}),
+    },
     // Storage comes from the Mastra instance (the LibSQL store).
     memory: new Memory({ options: { workingMemory: { enabled: true, scope: "resource" } } }),
     channels: {

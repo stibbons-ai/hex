@@ -12,6 +12,17 @@ interface Streaming {
   doStream(options: unknown): Promise<unknown>;
 }
 
+/** Runs `before` with each model call's options before its answer streams. */
+function withBefore(model: object, before?: (options: unknown) => Promise<void>) {
+  if (!before) return;
+  const streaming = model as Streaming;
+  const doStream = streaming.doStream.bind(model);
+  streaming.doStream = async (options) => {
+    await before(options);
+    return doStream(options);
+  };
+}
+
 /**
  * A model that answers {@link REPLY}. `before` runs before each answer streams, with the call's
  * options: await something to hold the run open, or throw to fail it.
@@ -20,23 +31,20 @@ export function mockModel({
   before,
 }: { before?: (options: unknown) => Promise<void> } = {}): MastraModelConfig {
   const model = createMockModel({ mockText: REPLY, version: "v2" });
-  if (before) {
-    const streaming = model as unknown as Streaming;
-    const doStream = streaming.doStream.bind(model);
-    streaming.doStream = async (options) => {
-      await before(options);
-      return doStream(options);
-    };
-  }
+  withBefore(model, before);
   return model as MastraModelConfig;
 }
 
 const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
 
-/** A model whose first step calls `toolName` with `args`, and whose second answers {@link REPLY}. */
+/**
+ * A model whose first step calls `toolName` with `args`, and whose second answers {@link REPLY}.
+ * `before` runs before each step streams, as for {@link mockModel}.
+ */
 export function toolCallingModel(
   toolName: string,
   args: Record<string, unknown>,
+  { before }: { before?: (options: unknown) => Promise<void> } = {},
 ): MastraModelConfig {
   const step = (chunks: unknown[]) => ({
     stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
@@ -55,6 +63,7 @@ export function toolCallingModel(
       ]),
     ],
   } as ConstructorParameters<typeof MastraLanguageModelV2Mock>[0]);
+  withBefore(model, before);
   // Mastra's mock and its model type disagree under exactOptionalPropertyTypes.
   return model as MastraModelConfig;
 }
