@@ -12,8 +12,11 @@ interface Streaming {
   doStream(options: unknown): Promise<unknown>;
 }
 
+/** Runs with a model call's options before its answer streams. */
+type Before = (options: unknown) => Promise<void>;
+
 /** Runs `before` with each model call's options before its answer streams. */
-function withBefore(model: object, before?: (options: unknown) => Promise<void>) {
+function withBefore(model: object, before?: Before) {
   if (!before) return;
   const streaming = model as Streaming;
   const doStream = streaming.doStream.bind(model);
@@ -27,9 +30,7 @@ function withBefore(model: object, before?: (options: unknown) => Promise<void>)
  * A model that answers {@link REPLY}. `before` runs before each answer streams, with the call's
  * options: await something to hold the run open, or throw to fail it.
  */
-export function mockModel({
-  before,
-}: { before?: (options: unknown) => Promise<void> } = {}): MastraModelConfig {
+export function mockModel({ before }: { before?: Before } = {}): MastraModelConfig {
   const model = createMockModel({ mockText: REPLY, version: "v2" });
   withBefore(model, before);
   return model as MastraModelConfig;
@@ -43,7 +44,7 @@ const USAGE = { inputTokens: 1, outputTokens: 1, totalTokens: 2 };
  */
 export function toolCallingModel(
   args: Record<string, unknown>,
-  { before }: { before?: (options: unknown) => Promise<void> } = {},
+  { before }: { before?: Before } = {},
 ): MastraModelConfig {
   const step = (chunks: unknown[]) => ({
     stream: simulateReadableStream({ chunks: [{ type: "stream-start", warnings: [] }, ...chunks] }),
