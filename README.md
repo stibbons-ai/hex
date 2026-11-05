@@ -482,8 +482,8 @@ it.
     crashes: its handling counts as finished once it is queued, and the queue lives in memory;
   - lost: until hex has finished its first event and every one before it (on a new database, or
     the first start after this upgrade), there is no cursor, so a restart replays nothing;
-  - lost, during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message
-    arriving after hex began stopping is dropped and the cursor moves past it;
+  - lost, during shutdown: a message arriving after hex began stopping is dropped and the cursor
+    moves past it;
   - answered twice: a message whose reply went out just before a crash, before its handling
     finished and the cursor was written; and, during shutdown, one whose reply and last cursor
     write didn't finish within the 10 seconds of both stop graces.
