@@ -33,8 +33,21 @@ const model = fakeOpenAI((request) =>
     : '{"year":null,"month":null,"day":null}',
 );
 
+/**
+ * The model every run here names: an `openai/` one, so it reaches the fake OpenAI (the default
+ * model is Anthropic's).
+ */
+const MODEL = "openai/gpt-5.4-mini";
+/** A config file naming only {@link MODEL}: what a run without its own config uses. */
+let modelConfig: string;
+
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "hex-intake-command-"));
+  modelConfig = join(directory, "model.json");
+  await writeFile(
+    modelConfig,
+    JSON.stringify({ chat: { model: "openai/gpt-5", channels: {} }, intake: { model: MODEL } }),
+  );
 });
 
 afterAll(async () => {
@@ -45,15 +58,15 @@ afterAll(async () => {
 const API_KEY = "sk-hex-walkthrough-0123456789";
 
 /**
- * `bun run intake <args>` from the repository root; HEX_* come only from `env`, and the model is
- * the fake OpenAI `openai`.
+ * `bun run intake <args>` from the repository root; HEX_* come only from `env`, the config file
+ * is {@link modelConfig} unless `env` names one, and the model is the fake OpenAI `openai`.
  */
 async function intake(args: string[], env: Record<string, string>, openai: FakeOpenAI = model) {
   const child = Bun.spawn(["bun", "run", "--silent", "intake", ...args], {
     cwd: repository,
     env: {
       ...process.env,
-      HEX_CONFIG: "",
+      HEX_CONFIG: modelConfig,
       HEX_DATA_DIR: "",
       HEX_OUTBOX_DIR: "",
       HEX_SMTP_HOST: "",
@@ -107,7 +120,7 @@ describe("bun run intake", () => {
       config,
       JSON.stringify({
         chat: { model: "openai/gpt-5", channels: {} },
-        intake: { category: "ER" },
+        intake: { category: "ER", model: MODEL },
       }),
     );
     const eml = await writeMail("invoice.eml", {
@@ -138,12 +151,9 @@ describe("bun run intake", () => {
         "",
       ].join("\n"),
     );
-    // Each Document went to the default model natively, as a PDF file part with its bytes.
+    // Each Document went to the configured model natively, as a PDF file part with its bytes.
     const requests = model.requests.slice(asked);
-    expect(requests.map(({ model: id }) => id)).toEqual([
-      "gpt-5.1-codex-mini",
-      "gpt-5.1-codex-mini",
-    ]);
+    expect(requests.map(({ model: id }) => id)).toEqual(["gpt-5.4-mini", "gpt-5.4-mini"]);
     expect(requests.map(inputFiles)).toEqual([[dataUrl(DATED_PDF)], [dataUrl(UNDATED_PDF)]]);
 
     expect(await readFile(join(outbox, "2026-09/ER/Rechnung 4711.pdf"))).toEqual(
@@ -358,6 +368,7 @@ describe("bun run intake", () => {
         path,
         JSON.stringify({
           chat: { model: "openai/gpt-5", channels: {} },
+          intake: { model: MODEL },
           forwarding: {
             from: "hex@example.com",
             targets: {

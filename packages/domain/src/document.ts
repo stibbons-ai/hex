@@ -83,7 +83,7 @@ export function documentExtension(mimeType: string): string {
  * starts with: a stricter subset of the signatures Mastra checks before it sends an image
  * (`isValidInlineContent`, which also passes BMP, TIFF, AVIF and HEIF). They are the types OpenAI
  * and Anthropic both document as image input (GIF only static: OpenAI takes non-animated GIFs,
- * Anthropic reads the first frame). The default model is OpenAI's; Google's Gemini documents PNG,
+ * Anthropic reads the first frame). The default model is Anthropic's; Google's Gemini documents PNG,
  * JPEG, WebP, HEIC and HEIF, so GIF is unverified there. Other images (HEIC, HEIF, TIFF, BMP)
  * OpenAI and Anthropic reject, which would fail every run of the Intake.
  */

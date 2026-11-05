@@ -251,9 +251,9 @@ describe("loadChatConfig", () => {
 });
 
 describe("loadIntakeConfig", () => {
-  const defaults = { category: "ER", model: "openai/gpt-5.1-codex-mini" } as const;
+  const defaults = { category: "ER", model: "anthropic/claude-haiku-5-5" } as const;
 
-  test("without a config file: Category ER, model openai/gpt-5.1-codex-mini", async () => {
+  test("without a config file: Category ER, model anthropic/claude-haiku-5-5", async () => {
     expect(await loadIntakeConfig(undefined)).toEqual(defaults);
   });
 
@@ -281,7 +281,7 @@ describe("loadIntakeConfig", () => {
     ["another Category", { category: "AR" }, '["intake"]["category"]'],
     ["a lowercase er", { category: "er" }, '["intake"]["category"]'],
     ["an unknown intake key", { category: "ER", folder: "x" }, '["intake"]["folder"]'],
-    ["a model without provider", { model: "gpt-5.1-codex-mini" }, '["intake"]["model"]'],
+    ["a model without provider", { model: "claude-haiku-5-5" }, '["intake"]["model"]'],
     ["a model with whitespace", { model: "openai/gpt 5" }, '["intake"]["model"]'],
     ["an empty provider", { model: "/gpt-5" }, '["intake"]["model"]'],
     ["a model that is no string", { model: 5 }, '["intake"]["model"]'],
@@ -309,15 +309,15 @@ describe("loadEvalConfig", () => {
     ] as const;
     const path = await configFile({
       ...valid,
-      intake: { model: "openai/gpt-5.1-codex-mini" },
+      intake: { model: "anthropic/claude-haiku-5-5" },
       eval: { models },
     });
     expect(await loadEvalConfig(path)).toEqual({ models });
   });
 
   test.each([
-    ["without a config file", undefined, "openai/gpt-5.1-codex-mini"],
-    ["without an eval section", { ...valid }, "openai/gpt-5.1-codex-mini"],
+    ["without a config file", undefined, "anthropic/claude-haiku-5-5"],
+    ["without an eval section", { ...valid }, "anthropic/claude-haiku-5-5"],
     [
       "without an eval section, with intake.model",
       { intake: { model: "openai/gpt-5.4-nano" } },
@@ -356,6 +356,20 @@ describe("loadEvalConfig", () => {
     const loading = loadEvalConfig(path);
     await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
     await expect(loadEvalConfig(path)).rejects.toThrow(`at ${at}`);
+  });
+
+  test("the server's loaders read a full config that has an eval section too", async () => {
+    const path = await configFile({
+      ...valid,
+      intake: { model: "anthropic/claude-haiku-4-5" },
+      eval: { models: ["openai/gpt-5-mini", "anthropic/claude-haiku-4-5"] },
+    });
+    expect(await loadIntakeConfig(path)).toEqual({
+      category: "ER",
+      model: "anthropic/claude-haiku-4-5",
+    });
+    expect((await loadChatConfig(path, slackEnv))?.model).toBe("anthropic/claude-opus-5-5");
+    expect(await loadForwardingConfig(path, {})).toBeUndefined();
   });
 
   test("the server's loaders still need the chat section", async () => {

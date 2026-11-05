@@ -24,18 +24,25 @@ const openaiEntry = {
   supports_pdf_input: true,
 };
 const prices = fakePrices({
-  "gpt-5.1-codex-mini": openaiEntry,
   "gpt-5.4-mini": openaiEntry,
   "gpt-5.4-nano": { ...openaiEntry, supports_pdf_input: undefined },
   "gpt-4o-mini-tts": { litellm_provider: "openai", supports_pdf_input: false },
+  "claude-haiku-5-5": { ...openaiEntry, litellm_provider: "anthropic" },
 });
 let directory: string;
 let fixtures: string;
+/**
+ * A config file naming `openai/gpt-5.4-mini` as `intake.model`, so a run without `eval.models`
+ * reaches the fake OpenAI (the default model is Anthropic's).
+ */
+let intakeModelConfig: string;
 
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "hex-eval-command-"));
   fixtures = join(directory, "fixtures");
   await cp(syntheticFolder, fixtures, { recursive: true });
+  intakeModelConfig = join(directory, "intake-model.json");
+  await writeFile(intakeModelConfig, JSON.stringify({ intake: { model: "openai/gpt-5.4-mini" } }));
 });
 
 afterAll(async () => {
@@ -50,8 +57,8 @@ let runs = 0;
  * `bun run eval` from `cwd` (default the repository root), as from a person's shell: `CI`,
  * `INIT_CWD` and `npm_config_local_prefix` are removed from the inherited environment (an outer
  * `bun run test` sets the last, and Bun 1.4.2 keeps an inherited one instead of the caller's
- * directory). `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank, `HEX_EVAL_RESULTS` a fresh temp folder
- * and `HEX_EVAL_PRICES_URL` the loopback price data unless `env` sets them.
+ * directory). `HEX_CONFIG` {@link intakeModelConfig}, `HEX_EVAL_FIXTURES` blank, `HEX_EVAL_RESULTS`
+ * a fresh temp folder and `HEX_EVAL_PRICES_URL` the loopback price data unless `env` sets them.
  */
 async function evalCommand(
   env: Record<string, string>,
@@ -67,7 +74,7 @@ async function evalCommand(
     cwd,
     env: {
       ...inherited,
-      HEX_CONFIG: "",
+      HEX_CONFIG: intakeModelConfig,
       HEX_EVAL_FIXTURES: "",
       HEX_EVAL_RESULTS: results,
       HEX_EVAL_PRICES_URL: priceData.url,
@@ -106,7 +113,7 @@ async function snapshot(folder: string) {
 }
 
 describe("bun run eval", () => {
-  test("evaluates the fixture folder, prints the figures and writes both reports", async () => {
+  test("evaluates intake.model on the fixture folder, prints the figures and writes both reports", async () => {
     const before = await snapshot(fixtures);
     const requests = model.requests.length;
     const fetches = prices.fetches;
@@ -117,11 +124,11 @@ describe("bun run eval", () => {
     expect(stdout.match(latency)).toHaveLength(1);
     expect(stdout.replace(latency, "latency median <n> ms, max <n> ms")).toBe(
       [
-        `hex eval: openai/gpt-5.1-codex-mini on ${fixtures}`,
+        `hex eval: openai/gpt-5.4-mini on ${fixtures}`,
         `  Price data: ${prices.url}`,
         "  Document detection: precision 14/14 (100.0 %), recall 14/14 (100.0 %)",
         "  Document date:",
-        "  openai/gpt-5.1-codex-mini: exact 2/14 (14.3 %), month 2/14 (14.3 %); not sent 0, failed 0; cost $0.000042; latency median <n> ms, max <n> ms",
+        "  openai/gpt-5.4-mini: exact 2/14 (14.3 %), month 2/14 (14.3 %); not sent 0, failed 0; cost $0.000042; latency median <n> ms, max <n> ms",
         `  Reports: ${join(folder, "report.md")}`,
         `           ${join(folder, "report.json")}`,
         "",
@@ -129,23 +136,44 @@ describe("bun run eval", () => {
     );
     expect(model.requests.length - requests).toBe(14);
     expect(prices.fetches - fetches).toBe(1);
-    expect(model.requests.at(-1)!.model).toBe("gpt-5.1-codex-mini");
-    expect(folder).toEndWith("_openai-gpt-5.1-codex-mini");
+    expect(model.requests.at(-1)!.model).toBe("gpt-5.4-mini");
+    expect(folder).toEndWith("_openai-gpt-5.4-mini");
     expect(report).toMatchObject({ fixtures, prices: { url: prices.url, error: null } });
     expect(report.models[0]).toMatchObject({
-      model: "openai/gpt-5.1-codex-mini",
+      model: "openai/gpt-5.4-mini",
       pdfInput: true,
       tokens: { input: 14, output: 14 },
       cost: { status: "priced", usd: expect.closeTo(14 * 3e-6, 12) },
     });
     const markdown = await readFile(join(folder, "report.md"), "utf8");
     expect(markdown).toContain(
-      "| openai/gpt-5.1-codex-mini | 2/14 (14.3 %) | 2/14 (14.3 %) | 0 | $0.000042 | $0.000003 |",
+      "| openai/gpt-5.4-mini | 2/14 (14.3 %) | 2/14 (14.3 %) | 0 | $0.000042 | $0.000003 |",
     );
     expect(markdown).toMatch(
       /\| Rechnung-RE-2026-1042\.pdf \| 2026-11-02 \| 2026-11-02 \| yes \| yes \| \d+ ms \| 1 in \(0 cached\), 1 out \(0 reasoning\) \| \$0\.000003 \|/,
     );
     expect(await snapshot(fixtures)).toEqual(before);
+  });
+
+  test("without HEX_CONFIG evaluates the default model, anthropic/claude-haiku-5-5", async () => {
+    const requests = model.requests.length;
+    // No Anthropic key and a base URL nobody listens on: each call fails, none leaves the machine.
+    const { stdout, code, results } = await evalCommand({
+      HEX_CONFIG: "",
+      HEX_EVAL_FIXTURES: fixtures,
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9/v1",
+    });
+    expect(code).toBe(1);
+    expect(stdout).toStartWith(`hex eval: anthropic/claude-haiku-5-5 on ${fixtures}\n`);
+    expect(model.requests.length).toBe(requests);
+    const { folder, report } = await onlyReport(results);
+    expect(folder).toEndWith("_anthropic-claude-haiku-5-5");
+    expect(report.models[0]).toMatchObject({
+      model: "anthropic/claude-haiku-5-5",
+      priceEntry: "claude-haiku-5-5",
+      extraction: { failed: 14 },
+    });
   });
 
   test("compares the models HEX_CONFIG lists: one line each, price data fetched once", async () => {
@@ -309,5 +337,54 @@ describe("bun run eval", () => {
     } finally {
       await failing.server.stop(true);
     }
+  });
+
+  test("a failed call of one of several models exits 1 after writing both reports", async () => {
+    const config = join(directory, "one-fails.json");
+    await writeFile(
+      config,
+      JSON.stringify({ eval: { models: ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano"] } }),
+    );
+    // The third gpt-5.4-nano call is refused; every other call answers.
+    let nanoCalls = 0;
+    const failing = fakeOpenAI((request) =>
+      request.model === "gpt-5.4-nano" && ++nanoCalls === 3
+        ? { status: 400, message: "file rejected" }
+        : NOVEMBER_2,
+    );
+    try {
+      const { stdout, stderr, code, results } = await evalCommand(
+        { HEX_CONFIG: config, HEX_EVAL_FIXTURES: fixtures },
+        { openai: failing },
+      );
+      expect(code).toBe(1);
+      expect(stderr).toBe("hex eval: 1 model call(s) failed; see the report\n");
+      expect(stdout).toContain("  openai/gpt-5.4-mini: exact 2/14 (14.3 %)");
+      expect(stdout).toContain("; not sent 0, failed 1;");
+      const { folder, report } = await onlyReport(results);
+      expect(report.models.map(({ extraction }) => extraction.failed)).toEqual([0, 1]);
+      expect((await readdir(folder)).sort()).toEqual(["report.json", "report.md"]);
+    } finally {
+      await failing.server.stop(true);
+    }
+  });
+
+  test("every configured model excluded: no call, both reports, exit 1", async () => {
+    const config = join(directory, "all-excluded.json");
+    await writeFile(config, JSON.stringify({ eval: { models: ["openai/gpt-4o-mini-tts"] } }));
+    const requests = model.requests.length;
+    const { stdout, stderr, code, results } = await evalCommand({
+      HEX_CONFIG: config,
+      HEX_EVAL_FIXTURES: fixtures,
+    });
+    expect(code).toBe(1);
+    expect(stderr).toBe("hex eval: every configured model was excluded; see the report\n");
+    expect(stdout).toContain(
+      "  openai/gpt-4o-mini-tts: excluded, no PDF input (LiteLLM entry gpt-4o-mini-tts: supports_pdf_input false)\n",
+    );
+    expect(model.requests.length).toBe(requests);
+    const { folder, report } = await onlyReport(results);
+    expect(report.models).toEqual([]);
+    expect((await readdir(folder)).sort()).toEqual(["report.json", "report.md"]);
   });
 });

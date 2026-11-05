@@ -27,8 +27,11 @@ const SenderId = Schema.String.check(Schema.isPattern(/^\S+$/));
 /** A Mastra model-router id, `provider/model`. */
 const ModelId = Schema.String.check(Schema.isPattern(/^[^/\s]+\/\S+$/));
 
-/** The model that reads Document dates when the config names none. */
-const DEFAULT_INTAKE_MODEL = "openai/gpt-5.1-codex-mini";
+/**
+ * The model that reads Document dates when the config names none: the cheapest of the models
+ * that read every synthetic Document date right in the 2026-11-05 eval (issue #13).
+ */
+const DEFAULT_INTAKE_MODEL = "anthropic/claude-haiku-5-5";
 
 /** An email address, `local@domain`: no whitespace, angle brackets, quotes, commas or colons. */
 const Address = Schema.String.check(
@@ -194,7 +197,7 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
  * The Intake settings from the hex config file at `path`, or the defaults (Category ER,
  * {@link DEFAULT_INTAKE_MODEL}) without a file. Fails like {@link readConfigFile} on a file it
  * can't use, e.g. a Category other than ER or a model that is no `provider/model` id. The
- * model's API key comes from the provider's usual variable (e.g. `OPENAI_API_KEY`), never from
+ * model's API key comes from the provider's usual variable (e.g. `ANTHROPIC_API_KEY`), never from
  * this file.
  */
 export async function loadIntakeConfig(path: string | undefined): Promise<IntakeConfig> {
