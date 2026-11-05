@@ -56,7 +56,10 @@ export type DocumentRow = typeof DocumentRow.Type;
 export const IntakeRow = Schema.Struct({
   /** The `.eml` file name. */
   file: Schema.String,
-  /** Attachment file names by detection verdict. */
+  /**
+   * Attachments by detection verdict, each by the name a label gives it: its original file name,
+   * or `document-<position>.<ext>` when it has none.
+   */
   detection: Schema.Struct({
     truePositives: Schema.Array(Schema.String),
     falsePositives: Schema.Array(Schema.String),
@@ -86,9 +89,12 @@ export const Report = Schema.Struct({
     recall: Ratio,
   }),
   extraction: Schema.Struct({
-    /** Labelled Documents whose predicted Document date is the labelled day. */
+    /**
+     * Labelled Documents whose predicted Document date is the labelled day; one labelled undated
+     * counts when no date was predicted (answered none, or not sent); a failed call never counts.
+     */
     exact: Ratio,
-    /** Labelled Documents whose predicted Document date lies in the labelled month. */
+    /** The same as `exact` for the labelled year and month. */
     month: Ratio,
     notSent: Schema.Int,
     failed: Schema.Int,

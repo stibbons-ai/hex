@@ -478,13 +478,14 @@ OPENAI_API_KEY=… HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own fol
   comes from the provider's usual variable (`OPENAI_API_KEY`, …).
 
 Relative paths resolve against the directory you ran it from, as for `fixtures:generate`. A label
-names an attachment by its original file name or, when it has none, by the name hex files it under
-(`document-<position>.<ext>`, its 1-based position among the mail's attachments, as the report
-lists it). A label naming no attachment of its `.eml`, or one of several attachments with that name
-(such an Intake can't be labelled), or an `.eml` that can't be read, fails the run before any model
-call, naming the file and the label; so does a results folder that can't be created. A failed model
-call is recorded on its Document and the run goes on; the command exits 1 after writing the
-reports.
+names an attachment by its original file name or, when it has none, by the name hex would file it
+under: `document-<position>.<ext>`, its 1-based position among the mail's attachments and `.pdf`
+unless it is an image type. `report.json` lists every attachment by the exact name a label must
+use (`report.md` collapses whitespace in names). A label naming no attachment of its `.eml`, or
+one of several attachments with that name (such an Intake can't be labelled), or an `.eml` that
+can't be read, fails the run before any model call, naming the file and the label; so does a
+results folder that can't be created or written to. A failed model call is recorded on its
+Document and the run goes on; the command exits 1 after writing the reports.
 
 What it measures, per attachment matched to the labels by its file name:
 

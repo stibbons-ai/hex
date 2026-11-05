@@ -3,7 +3,7 @@
  * asserting the computed figures and the reports it writes.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DateExtractionError, DateExtractor } from "@hex/adapters";
@@ -342,10 +342,33 @@ describe("runEval on edited labels", () => {
       dateExtractor: layer,
       resultsRoot,
     });
-    await expect(run).rejects.toThrow();
+    await expect(run).rejects.toThrow(
+      `the results folder ${resultsRoot} can't be written to (EEXIST`,
+    );
     expect(calls).toEqual([]);
     expect(await readFile(resultsRoot, "utf8")).toBe("not a folder");
   });
+
+  // Root ignores permission bits.
+  test.skipIf(process.getuid?.() === 0)(
+    "fails before any model call when the results folder is read-only",
+    async () => {
+      const resultsRoot = newFolder("results-read-only");
+      await mkdir(resultsRoot, { mode: 0o555 });
+      const { layer, calls } = scriptedExtractor();
+      const run = runEval({
+        fixtures: syntheticFolder,
+        model: "scripted/model",
+        dateExtractor: layer,
+        resultsRoot,
+      });
+      await expect(run).rejects.toThrow(
+        `the results folder ${resultsRoot} can't be written to (EACCES`,
+      );
+      expect(calls).toEqual([]);
+      expect(await readdir(resultsRoot)).toEqual([]);
+    },
+  );
 
   test("refuses a results folder inside the fixture folder", async () => {
     const fixtures = await fixtureFolder([label("11-en-zero-documents-ics.eml")]);

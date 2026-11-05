@@ -4,8 +4,9 @@
  * committed synthetic set), and writes its reports under `HEX_EVAL_RESULTS` (default:
  * `<repo>/eval-results/`). Relative paths resolve against the directory you ran it from, as for
  * `fixtures:generate`. Refuses to run when `CI` is set to a non-empty value: evals cost real model
- * calls. Exits 1 under `CI`, on a config or fixture error (before any model call), and when a
- * model call failed (after writing the reports).
+ * calls. Exits 1 under `CI`, on a config or fixture error or a results folder that can't be
+ * written to (all before any model call), and when a model call failed (after writing the
+ * reports).
  */
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

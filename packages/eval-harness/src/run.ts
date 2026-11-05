@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DateExtractor,
@@ -216,8 +217,15 @@ export async function runEval({
   }
   const startedAt = new Date();
   const intakes = await prepare(fixtures);
-  // Before any paid model call: a results root that can't be a folder fails the run now.
-  await mkdir(resultsRoot, { recursive: true });
+  // Before any paid model call: a results root that can't be a writable folder fails the run now.
+  try {
+    await mkdir(resultsRoot, { recursive: true });
+    await access(resultsRoot, constants.W_OK);
+  } catch (error) {
+    throw new Error(`the results folder ${resultsRoot} can't be written to (${messageOf(error)})`, {
+      cause: error,
+    });
+  }
   const predictions = await Effect.runPromise(predict(intakes).pipe(Effect.provide(dateExtractor)));
   const rows = await Promise.all(
     intakes.map((intake, position) => score(intake, predictions[position]!)),

@@ -30,8 +30,9 @@ afterAll(async () => {
 let runs = 0;
 
 /**
- * `bun run eval` from `cwd` (default the repository root), outside CI unless `env` says so;
- * HEX_* only from `env`.
+ * `bun run eval` from `cwd` (default the repository root), with `CI` and `INIT_CWD` removed from
+ * the inherited environment; `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank and `HEX_EVAL_RESULTS` a
+ * fresh temp folder unless `env` sets them.
  */
 async function evalCommand(
   env: Record<string, string>,
@@ -126,18 +127,19 @@ describe("bun run eval", () => {
 
   test("resolves relative HEX_EVAL_FIXTURES and HEX_EVAL_RESULTS against the caller's directory", async () => {
     const caller = join(repoRoot, "docs");
+    // Inside the repo and only read: resolved from the repo root instead, it names no folder.
+    const fixturesFromCaller = "../packages/eval-harness/fixtures/synthetic";
+    // A relative path to a temp folder climbs past `/`, so it resolves the same from any repo
+    // folder; telling this half apart would mean writing into the repo.
     const results = join(directory, "results-relative");
     const { code, stdout } = await evalCommand(
-      {
-        HEX_EVAL_FIXTURES: relative(caller, fixtures),
-        HEX_EVAL_RESULTS: relative(caller, results),
-      },
+      { HEX_EVAL_FIXTURES: fixturesFromCaller, HEX_EVAL_RESULTS: relative(caller, results) },
       { cwd: caller },
     );
     expect(code).toBe(0);
     const { folder, report } = await onlyReport(results);
-    expect(report.fixtures).toBe(fixtures);
-    expect(stdout).toContain(`on ${fixtures}\n`);
+    expect(report.fixtures).toBe(syntheticFolder);
+    expect(stdout).toContain(`on ${syntheticFolder}\n`);
     expect(stdout).toContain(join(folder, "report.json"));
   });
 
