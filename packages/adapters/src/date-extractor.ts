@@ -84,7 +84,10 @@ function withoutApiKeys(message: string): string {
  */
 const MAX_PROVIDER_MESSAGE = 300;
 
-/** The HTTP status of the provider call `error` (or one of its causes) failed with, if any. */
+/**
+ * The HTTP error status (400 and up) of the provider call `error` (or one of its causes) failed
+ * with, if any; a 2xx whose body couldn't be read has none worth showing.
+ */
 function httpStatusOf(error: unknown): number | undefined {
   let current = error;
   for (let depth = 0; depth < 5 && current instanceof Object; depth++) {
@@ -93,7 +96,9 @@ function httpStatusOf(error: unknown): number | undefined {
       statusCode?: unknown;
       cause?: unknown;
     };
-    if (name === "AI_APICallError" && typeof statusCode === "number") return statusCode;
+    if (name === "AI_APICallError" && typeof statusCode === "number" && statusCode >= 400) {
+      return statusCode;
+    }
     current = cause;
   }
   return undefined;
@@ -101,7 +106,10 @@ function httpStatusOf(error: unknown): number | undefined {
 
 /** Options of {@link dateExtractorLayer}. */
 export interface DateExtractorOptions {
-  /** Wait before retrying a transient provider error (rate limit, overload); default 3000 ms. */
+  /**
+   * Least wait before retrying a transient provider error (rate limit, overload, a dropped or
+   * refused connection); longer when the provider asks (Retry-After, up to 30 s). Default 3000 ms.
+   */
   readonly retryDelayMs?: number;
 }
 
@@ -126,10 +134,9 @@ export function dateExtractorLayer(
     model,
     // Mastra's default error processors include one that, when a provider refuses the file,
     // replaces it with a placeholder text and asks again: the model would answer without the
-    // Document. Only transient errors the provider marks retryable are retried, twice, as the
-    // default retry processor does; its extra matchers (ECONNRESET / socket hang up, Gemini's
-    // MALFORMED_FUNCTION_CALL) are not kept: a reset connection fails the run, and a re-run
-    // retries it.
+    // Document. Transient errors the provider marks retryable (rate limit, overload, a dropped or
+    // refused connection, which Mastra's provider wraps as retryable) are retried twice, as the
+    // default retry processor does; its Gemini MALFORMED_FUNCTION_CALL matcher is not kept.
     errorProcessorDefaults: false,
     errorProcessors: [new StreamErrorRetryProcessor({ maxRetries: 2, delayMs: retryDelayMs })],
   });
@@ -152,7 +159,7 @@ export function dateExtractorLayer(
             { structuredOutput: { schema, errorStrategy: "warn" }, abortSignal: signal },
           ),
         catch: (cause) => {
-          const reason = withoutApiKeys(messageOf(cause)) || "the provider gave no message";
+          const reason = withoutApiKeys(messageOf(cause)).trim() || "no message";
           const shown =
             reason.length > MAX_PROVIDER_MESSAGE
               ? `${reason.slice(0, MAX_PROVIDER_MESSAGE)}…`

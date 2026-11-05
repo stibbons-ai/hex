@@ -119,12 +119,13 @@ function hasPdfHeader(content: Uint8Array): boolean {
  * The media type to hand a Document to a model as, so it can read the Document date, decided by
  * its declared type and its content: a PDF (`application/octet-stream` named `*.pdf` too) as
  * `application/pdf` when `%PDF` lies within its first 1026 bytes; an image as the type its
- * content's signature names (JPEG, PNG, GIF, WebP), whatever type it was declared as. Undefined
- * otherwise, and the Document is never sent but filed by its received date, for one of two
- * reasons: content matching none of Mastra's signatures (no valid PDF or image) Mastra would
- * replace by a placeholder text the model answers blind; image types Mastra does pass (HEIC,
- * HEIF, AVIF, TIFF, BMP) OpenAI and Anthropic refuse, failing the run every time. A type that is
- * no Document is undefined too.
+ * content's signature names (JPEG, PNG, GIF87a/89a, WebP), whatever type it was declared as.
+ * Only content hex recognises as one of these is sent; anything else is undefined, never sent,
+ * and filed by its received date, for one of two reasons: content matching none of Mastra's
+ * signatures (no valid PDF or image) Mastra would replace by a placeholder text the model
+ * answers blind; image content Mastra does pass (HEIC, HEIF, TIFF, BMP, or AVIF declared as
+ * another image type) OpenAI and Anthropic refuse, failing the run every time. A type that is no
+ * Document is undefined too.
  */
 export function documentMediaType(
   attachment: Pick<AttachmentFacts, "mimeType" | "fileName"> & { readonly content: Uint8Array },

@@ -113,7 +113,7 @@ describe("documentMediaType", () => {
     ["image/bmp", "scan.bmp", "a BMP header", undefined, ascii("BM6\u0000\u0000\u0000")],
     // Not a Document type at all, whatever the content
     ["text/plain", "notes.txt", "a JPEG signature", undefined, JPEG],
-  ] as const)("%s named %s with %s → %p", (mimeType, fileName, _label, expected, content) => {
+  ] as const)("%s named %p with %s → %p", (mimeType, fileName, _label, expected, content) => {
     expect(documentMediaType({ mimeType, fileName, content })).toBe(expected);
   });
 });

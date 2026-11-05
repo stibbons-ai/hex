@@ -160,14 +160,20 @@ describe("DateExtractor (live layer on a mock model)", () => {
 
     test("is the extractor's error, naming the Document and the model, never the API key", async () => {
       process.env.HEX_TEST_API_KEY = key;
-      const { model, calls } = scriptedModel(new Error(`401 Incorrect API key provided: ${key}`));
+      // A refused key, as the provider SDK raises it: not retryable, so exactly one call.
+      const refused = Object.assign(new Error(`401 Incorrect API key provided: ${key}`), {
+        name: "AI_APICallError",
+        statusCode: 401,
+        isRetryable: false,
+      });
+      const { model, calls } = scriptedModel(refused, '{"year":2026,"month":10,"day":5}');
       const exit = await extract(model, pdfDocument);
       expect(Exit.isFailure(exit)).toBe(true);
       expect(calls).toHaveLength(1);
       const message = String(exit);
       expect(message).toContain("DateExtractionError");
       expect(message).toContain(
-        'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed: 401 Incorrect API key provided: HEX_TEST_API_KEY',
+        'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed (HTTP 401): 401 Incorrect API key provided: HEX_TEST_API_KEY',
       );
       expect(message).not.toContain(key);
     });
@@ -209,18 +215,36 @@ describe("DateExtractor (live layer on a mock model)", () => {
       expect(message).not.toContain(key.slice(0, 10));
     });
 
-    test("a provider error without a message still says what failed: its HTTP status", async () => {
-      const tooLarge = Object.assign(new Error(""), {
+    test.each([
+      ["empty", ""],
+      ["whitespace only", "  \n "],
+    ])(
+      "a provider error whose message is %s still says what failed: its HTTP status",
+      async (_case, text) => {
+        const tooLarge = Object.assign(new Error(text), {
+          name: "AI_APICallError",
+          statusCode: 413,
+          isRetryable: false,
+          responseBody: "",
+        });
+        const { model, calls } = scriptedModel(tooLarge);
+        expect(String(await extract(model, pdfDocument))).toContain(
+          'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed (HTTP 413): no message',
+        );
+        expect(calls).toHaveLength(1);
+      },
+    );
+
+    test("a status below 400 (a body that couldn't be read) is not shown as the failure", async () => {
+      const unreadable = Object.assign(new Error("Invalid JSON response"), {
         name: "AI_APICallError",
-        statusCode: 413,
+        statusCode: 200,
         isRetryable: false,
-        responseBody: "",
       });
-      const { model, calls } = scriptedModel(tooLarge);
+      const { model } = scriptedModel(unreadable);
       expect(String(await extract(model, pdfDocument))).toContain(
-        'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed (HTTP 413): the provider gave no message',
+        "with mock-provider/mock-model-id failed: Invalid JSON response",
       );
-      expect(calls).toHaveLength(1);
     });
   });
 });

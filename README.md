@@ -96,18 +96,19 @@ The workflow, in order:
    Document date is the date it was issued (invoice date, Rechnungsdatum, Belegdatum, receipt
    date), never a due date, delivery or service period, order date or the date it was printed
    or sent. The model answers `{ year, month, day }` as structured output (an Effect Schema,
-   decoded again in the step), all `null` when the Document shows no date. Never sent, for one
-   of two reasons: content that isn't a valid PDF (`%PDF` within its first 1026 bytes) or JPEG,
-   PNG, GIF or WebP image (by its signature), which Mastra would replace by a placeholder text
-   the model answers blind; and HEIC, HEIF, AVIF, TIFF and BMP images, which Mastra would send
-   but OpenAI and Anthropic refuse, failing the run every time. A model call that fails
-   (network, missing or wrong API key, rate limit, provider error, a provider refusing the file)
-   fails the run before anything is filed or recorded, so running the Intake again retries it;
-   a transient error the provider marks retryable (rate limit, overload) is retried twice
-   first, 3 s apart, but a reset connection is not. A Document the provider rejects every time
-   (e.g. an encrypted or oversized PDF) keeps failing its Intake until it is handled by hand.
-   The error names the Document, the model and the HTTP status, and keeps at most 300
-   characters of the provider's message.
+   decoded again in the step), all `null` when the Document shows no date. Only content hex
+   recognises as a PDF (`%PDF` within its first 1026 bytes) or a JPEG, PNG, GIF87a/89a or WebP
+   image (by its signature) is sent; anything else never is, for one of two reasons: content
+   matching none of Mastra's signatures Mastra would replace by a placeholder text the model
+   answers blind; HEIC, HEIF, TIFF and BMP images (or AVIF content declared as another image
+   type) Mastra would send but OpenAI and Anthropic refuse, failing the run every time. A model
+   call that fails (network, missing or wrong API key, rate limit, provider error, a provider
+   refusing the file) fails the run before anything is filed or recorded, so running the Intake
+   again retries it; transient errors (rate limit, overload, a dropped or refused connection)
+   are retried twice first, at least 3 s apart (longer when the provider asks, up to 30 s). A
+   Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps failing
+   its Intake until it is handled by hand. The error names the Document, the model and the HTTP
+   status, if any, and keeps at most 300 characters of the provider's message.
 4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
