@@ -8,6 +8,8 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadExpectedSet, type ExpectedIntake } from "../src/index.ts";
 import { syntheticFolder } from "../src/synthetic/generate.ts";
+import { intakes as model } from "../src/synthetic/intakes.ts";
+import { printedLines } from "../src/synthetic/invoice.ts";
 
 interface Part {
   contentType: string;
@@ -80,6 +82,26 @@ function pdfText(data: Uint8Array): string {
     .replaceAll(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
 }
 
+/** The strings a text PDF shows with `( … ) Tj`, unescaped. */
+function pdfLines(text: string): string[] {
+  return [...text.matchAll(/\(((?:\\.|[^\\)])*)\) Tj/g)].map(([, line]) =>
+    line!.replaceAll(/\\(.)/g, "$1"),
+  );
+}
+
+/**
+ * The lines a scanned Document shows. A scan has no text layer, so they come from the generator's
+ * model, which is what the raster draws.
+ */
+function scanLines(intake: ExpectedIntake, fileName: string): string[] {
+  const source = model.find(({ slug }) => intake.file === `${intake.file.slice(0, 3)}${slug}.eml`);
+  const attachment = source?.attachments.find((candidate) => candidate.fileName === fileName);
+  if (attachment === undefined || !("invoice" in attachment)) {
+    throw new Error(`${intake.file}: no model for ${fileName}`);
+  }
+  return printedLines(attachment.invoice);
+}
+
 const isPdf = (part: Part) => part.contentType === "application/pdf";
 const isImage = (part: Part) => part.contentType.startsWith("image/");
 /** No plausible "tiny image" threshold (issue #6) may be what excludes a part. */
@@ -91,17 +113,22 @@ for (const intake of intakes)
   mails.set(intake.file, parseMail(await Bun.file(join(syntheticFolder, intake.file)).text()));
 
 const mailOf = (intake: ExpectedIntake) => mails.get(intake.file)!;
-/** Every labelled Document: its part, its label and, for a PDF, its text. */
+const referenced = (part: Part, html: string) =>
+  part.contentId !== undefined && html.includes(`cid:${part.contentId}`);
+/** Every labelled Document: its part, its label, its PDF text (if any) and its printed lines. */
 const documents = intakes.flatMap((intake) =>
   intake.documents.map(({ fileName, documentDate }) => {
     const part = mailOf(intake).parts.find((candidate) => candidate.fileName === fileName);
     if (part === undefined) throw new Error(`${intake.file} has no part named ${fileName}`);
-    return { part, date: documentDate, intake, text: isPdf(part) ? pdfText(part.data) : "" };
+    const text = isPdf(part) ? pdfText(part.data) : "";
+    const textLayer = text.includes(") Tj");
+    const lines = textLayer ? pdfLines(text) : scanLines(intake, fileName);
+    return { part, fileName, date: documentDate, intake, text, textLayer, lines };
   }),
 );
-const textPdfs = documents.filter(({ text }) => text.includes(") Tj"));
+const textPdfs = documents.filter(({ textLayer }) => textLayer);
 const imageOnlyPdfs = documents.filter(
-  ({ part, text }) => isPdf(part) && !text.includes(") Tj") && text.includes("/Subtype /Image"),
+  ({ part, textLayer, text }) => isPdf(part) && !textLayer && text.includes("/Subtype /Image"),
 );
 /** Every attachment-like part of the set that is not labelled a Document. */
 const nonDocuments = intakes.flatMap((intake) => {
@@ -139,6 +166,22 @@ const monate = [
   "November",
   "Dezember",
 ];
+const pad = (value: number) => String(value).padStart(2, "0");
+
+/** An ISO date as the invoices may print it: dot, short, ISO, German long, English long. */
+function formats(iso: string): string[] {
+  const [year, month, day] = iso.split("-").map(Number) as [number, number, number];
+  return [
+    `${pad(day)}.${pad(month)}.${year}`,
+    `${day} ${months[month - 1]!.slice(0, 3)} ${year}`,
+    `${year}-${pad(month)}-${pad(day)}`,
+    `${day}. ${monate[month - 1]} ${year}`,
+    `${months[month - 1]} ${day}, ${year}`,
+  ];
+}
+
+/** Labels that print a Document date; every other date label is a distractor. */
+const documentDateLabels = ["Rechnungsdatum", "Invoice date", "Datum"];
 
 describe("committed synthetic fixture set", () => {
   test("holds 10–20 Intakes and labels exactly the .eml files in the folder", async () => {
@@ -149,7 +192,20 @@ describe("committed synthetic fixture set", () => {
     for (const intake of intakes) expect(intake.description ?? "").not.toBe("");
   });
 
-  test("every Document is an attachment part of its .eml, in MIME order, PDF or image, over 20 KB", () => {
+  test("every From names its address outside any encoded word of at most 75 characters", () => {
+    for (const { file } of intakes) {
+      const from = mails.get(file)!.headers.get("from") ?? "";
+      const words = from.match(/=\?[^?]+\?[BbQq]\?[^?]*\?=/g) ?? [];
+      const outside = words.reduce((rest, word) => rest.replace(word, ""), from);
+      expect({
+        file,
+        address: /<[^<>@\s]+@[^<>@\s]+>$/.test(outside),
+        tooLong: words.filter((word) => word.length > 75),
+      }).toEqual({ file, address: true, tooLong: [] });
+    }
+  });
+
+  test("every Document is an attachment part of its .eml, in MIME order, PDF or image, over 20 KB, never cid:-referenced", () => {
     for (const intake of intakes) {
       const positions = intake.documents.map((document) =>
         mailOf(intake).parts.findIndex((part) => part.fileName === document.fileName),
@@ -159,13 +215,28 @@ describe("committed synthetic fixture set", () => {
         positions: [...positions].sort((a, b) => a - b),
       });
     }
-    for (const { part } of documents) {
-      expect({ fileName: part.fileName, disposition: part.disposition }).toEqual({
-        fileName: part.fileName,
-        disposition: "attachment",
-      });
+    for (const { part, fileName, intake } of documents) {
+      expect({
+        fileName,
+        disposition: part.disposition,
+        cid: referenced(part, mailOf(intake).html),
+      }).toEqual({ fileName, disposition: "attachment", cid: false });
       expect(isPdf(part) || isImage(part)).toBe(true);
       expect(part.data.length).toBeGreaterThan(sizeFloor);
+    }
+  });
+
+  test("labels each Document with the date printed beside its Document-date label, or null when none is printed", () => {
+    for (const { fileName, date, lines } of documents) {
+      const printed = lines.flatMap((line) => {
+        const label = documentDateLabels.find((candidate) => line.startsWith(`${candidate}: `));
+        return label === undefined ? [] : [line.slice(label.length + 2)];
+      });
+      const expected =
+        date === null ? [] : formats(date).filter((format) => printed.includes(format));
+      expect({ fileName, printed }).toEqual({ fileName, printed: date === null ? [] : expected });
+      if (date !== null)
+        expect({ fileName, count: expected.length }).toEqual({ fileName, count: 1 });
     }
   });
 
@@ -174,34 +245,22 @@ describe("committed synthetic fixture set", () => {
       intakes.map((intake) => mailOf(intake).headers.get("content-language")),
     );
     expect([...languages].sort()).toEqual(["de", "en"]);
-    expect(textPdfs.some(({ text }) => text.includes("(Rechnungsdatum:"))).toBe(true);
-    expect(textPdfs.some(({ text }) => text.includes("(Invoice date:"))).toBe(true);
+    expect(
+      textPdfs.some(({ lines }) => lines.some((line) => line.startsWith("Rechnungsdatum: "))),
+    ).toBe(true);
+    expect(
+      textPdfs.some(({ lines }) => lines.some((line) => line.startsWith("Invoice date: "))),
+    ).toBe(true);
   });
 
-  test("prints Document dates as 02.11.2026, 2 Nov 2026, 2026-11-02 and written out", () => {
-    const printed = (format: (year: string, month: number, day: number) => string) =>
-      textPdfs.some(({ date, text }) => {
-        if (date === null) return false;
-        const [year, month, day] = date.split("-");
-        return text.includes(`: ${format(year!, Number(month), Number(day))})`);
-      });
-    expect(
-      printed(
-        (year, month, day) =>
-          `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`,
-      ),
-    ).toBe(true);
-    expect(printed((year, month, day) => `${day} ${months[month - 1]!.slice(0, 3)} ${year}`)).toBe(
-      true,
-    );
-    expect(
-      printed(
-        (year, month, day) =>
-          `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
-      ),
-    ).toBe(true);
-    expect(printed((year, month, day) => `${day}. ${monate[month - 1]} ${year}`)).toBe(true);
-    expect(printed((year, month, day) => `${months[month - 1]} ${day}, ${year}`)).toBe(true);
+  test("prints Document dates in dot, short, ISO, German long and English long formats", () => {
+    for (const index of formats("2026-01-01").keys()) {
+      const found = textPdfs.some(
+        ({ date, lines }) =>
+          date !== null && lines.some((line) => line.endsWith(`: ${formats(date)[index]}`)),
+      );
+      expect({ format: index, found }).toEqual({ format: index, found: true });
+    }
   });
 
   test("has scanned Documents: a PNG and an image-only PDF", () => {
@@ -217,17 +276,26 @@ describe("committed synthetic fixture set", () => {
       "Lieferdatum",
       "Service period",
     ]) {
-      expect({ label, found: textPdfs.some(({ text }) => text.includes(`(${label}:`)) }).toEqual({
-        label,
-        found: true,
-      });
+      const found = textPdfs.some(({ lines }) =>
+        lines.some((line) => line.startsWith(`${label}: `)),
+      );
+      expect({ label, found }).toEqual({ label, found: true });
     }
-    const monthBoundary = documents.some(({ date, intake }) => {
-      const sent = /^\w{3}, \d{2} (\w{3}) (\d{4})/.exec(mailOf(intake).headers.get("date")!)!;
-      const sentMonth = `${sent[2]}-${String(months.findIndex((name) => name.startsWith(sent[1]!)) + 1).padStart(2, "0")}`;
-      return date !== null && date.slice(0, 7) !== sentMonth;
-    });
-    expect(monthBoundary).toBe(true);
+    const sentMonth = (intake: ExpectedIntake) => {
+      const [, month, year] = /^\w{3}, \d{2} (\w{3}) (\d{4})/.exec(
+        mailOf(intake).headers.get("date")!,
+      )!;
+      const index = months.findIndex((name) => name.startsWith(month!));
+      expect({ file: intake.file, month, known: index >= 0 }).toEqual({
+        file: intake.file,
+        month,
+        known: true,
+      });
+      return `${year}-${pad(index + 1)}`;
+    };
+    expect(
+      documents.some(({ date, intake }) => date !== null && date.slice(0, 7) !== sentMonth(intake)),
+    ).toBe(true);
   });
 
   test("has multiple-Document, zero-Document and undated-Document Intakes", () => {
@@ -237,8 +305,7 @@ describe("committed synthetic fixture set", () => {
   });
 
   test("has non-Documents that are never labelled: inline logo, Outlook signature, tracking pixel, non-PDF/non-image file", () => {
-    const referenced = (part: Part, html: string) =>
-      part.contentId !== undefined && html.includes(`cid:${part.contentId}`);
+    // The sizes define the traps: decorations big enough to defeat a size heuristic, a pixel tiny by nature.
     const big = (part: Part) => part.data.length > sizeFloor;
     expect(
       nonDocuments.some(

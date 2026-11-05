@@ -3,6 +3,7 @@
  * is the single source of truth for both its `.eml` and its `expected.json` entry.
  */
 import type { Invoice, Language } from "./invoice.ts";
+import type { Mailbox } from "./mime.ts";
 
 export type Attachment =
   /** Documents: a text PDF, a scanned PNG, an image-only PDF. */
@@ -17,7 +18,7 @@ export interface SyntheticIntake {
   slug: string;
   description: string;
   language: Language;
-  from: string;
+  from: Mailbox;
   subject: string;
   /** Mail `Date:` as `YYYY-MM-DDTHH:MM:SS±HH:MM`. */
   sent: string;
@@ -28,7 +29,10 @@ export interface SyntheticIntake {
 }
 
 /** The `To:` of every Intake. */
-export const recipient = "Erika Mustermann <erika.mustermann@hex.example>";
+export const recipient: Mailbox = {
+  name: "Erika Mustermann",
+  address: "erika.mustermann@hex.example",
+};
 const buyerDe = ["Erika Mustermann", "Beispielallee 42", "12345 Musterstadt"];
 const buyerEn = ["Erika Mustermann", "42 Sample Lane", "Testville TV1 0AA"];
 
@@ -84,7 +88,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "German mail, German text PDF invoice; Rechnungsdatum 02.11.2026 beside Leistungsdatum and Fälligkeitsdatum.",
     language: "de",
-    from: "Beispiel Bürobedarf GmbH <rechnung@buerobedarf.example>",
+    from: { name: "Beispiel Bürobedarf GmbH", address: "rechnung@buerobedarf.example" },
     subject: "Ihre Rechnung RE-2026-1042",
     sent: "2026-11-02T09:14:00+01:00",
     text: `Guten Tag Frau Mustermann,\n\nanbei erhalten Sie Ihre Rechnung RE-2026-1042 zu Ihrer Bestellung vom 28.10.2026.\n\n${signatureDe}`,
@@ -119,7 +123,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "English mail, English text PDF invoice; Invoice date 2 Nov 2026 beside a Service period (October) and a Due date.",
     language: "en",
-    from: "Example Cloud Hosting <billing@cloudhosting.example>",
+    from: { name: "Example Cloud Hosting", address: "billing@cloudhosting.example" },
     subject: "Your invoice INV-2026-0815",
     sent: "2026-11-03T07:30:00+00:00",
     text: `Hello Erika,\n\nyour invoice INV-2026-0815 for October is attached. It will be charged on 16 Nov 2026.\n\n${signatureEn}`,
@@ -154,7 +158,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "German text PDF with ISO dates: Rechnungsdatum 2026-10-14 beside Bestelldatum and Lieferdatum.",
     language: "de",
-    from: "Muster Software UG <buchhaltung@muster-software.example>",
+    from: { name: "Muster Software UG", address: "buchhaltung@muster-software.example" },
     subject: "Rechnung 2026-0457",
     sent: "2026-10-14T16:45:00+02:00",
     text: `Hallo,\n\ndie Rechnung 2026-0457 liegt bei.\n\n${signatureDe}`,
@@ -186,7 +190,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "German text PDF with a written-out date: Rechnungsdatum 2. September 2026, printed after the Fälligkeitsdatum.",
     language: "de",
-    from: "Stadtwerke Beispielstadt <service@stadtwerke-beispielstadt.example>",
+    from: { name: "Stadtwerke Beispielstadt", address: "service@stadtwerke-beispielstadt.example" },
     subject: "Abschlagsrechnung September 2026",
     sent: "2026-09-02T06:00:00+02:00",
     text: `Sehr geehrte Frau Mustermann,\n\nanbei Ihre Abschlagsrechnung für September.\n\n${signatureDe}`,
@@ -221,7 +225,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Month-boundary trap: mail Date 1 Oct 2026, Document date September 30, 2026 (long English format), Delivery date and Due date in October.",
     language: "en",
-    from: "Placeholder Print Co. <accounts@placeholder-print.example>",
+    from: { name: "Placeholder Print Co.", address: "accounts@placeholder-print.example" },
     subject: "Invoice PP-3301",
     sent: "2026-10-01T08:02:00+01:00",
     text: `Dear Erika,\n\nplease find invoice PP-3301 attached.\n\n${signatureEn}`,
@@ -253,7 +257,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Scanned German invoice as a PNG raster (no text layer); Rechnungsdatum 18.08.2026 beside Leistungsdatum and Fälligkeitsdatum.",
     language: "de",
-    from: "Musterwerkstatt Beispiel <werkstatt@musterwerkstatt.example>",
+    from: { name: "Musterwerkstatt Beispiel", address: "werkstatt@musterwerkstatt.example" },
     subject: "Scan Ihrer Rechnung",
     sent: "2026-08-21T11:20:00+02:00",
     text: `Hallo Frau Mustermann,\n\nwie besprochen der Scan der Rechnung.\n\n${signatureDe}`,
@@ -288,7 +292,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Scanned English invoice as an image-only PDF (no text layer); Invoice date 7 Aug 2026 beside Delivery date and Due date.",
     language: "en",
-    from: "Demo Consulting <office@demo-consulting.example>",
+    from: { name: "Demo Consulting", address: "office@demo-consulting.example" },
     subject: "Scanned invoice DC-0092",
     sent: "2026-08-10T15:05:00-04:00",
     text: `Hi Erika,\n\nattached is the scanned invoice DC-0092.\n\n${signatureEn}`,
@@ -320,7 +324,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "HTML mail with an inline logo (cid:, Content-Disposition inline, over 20 KB) that is not a Document, plus a text PDF invoice dated 27.10.2026.",
     language: "de",
-    from: "Beispiel Bürobedarf GmbH <rechnung@buerobedarf.example>",
+    from: { name: "Beispiel Bürobedarf GmbH", address: "rechnung@buerobedarf.example" },
     subject: "Rechnung RE-2026-1077",
     sent: "2026-10-27T10:00:00+01:00",
     text: `Guten Tag,\n\nanbei Ihre Rechnung RE-2026-1077.\n\n${signatureDe}`,
@@ -358,7 +362,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Outlook-style HTML mail: the signature image is referenced via cid: but marked Content-Disposition attachment (over 20 KB, not a Document); text PDF invoice dated 15 Sep 2026.",
     language: "en",
-    from: "Demo Consulting <office@demo-consulting.example>",
+    from: { name: "Demo Consulting", address: "office@demo-consulting.example" },
     subject: "Invoice DC-0101",
     sent: "2026-09-15T17:40:00-04:00",
     text: `Hi Erika,\n\nplease see invoice DC-0101 attached.\n\n${signatureEn}`,
@@ -397,7 +401,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "HTML mail with a 1×1 tracking pixel (cid:) that is not a Document, plus a text PDF invoice dated 06.07.2026.",
     language: "de",
-    from: "Muster Software UG <buchhaltung@muster-software.example>",
+    from: { name: "Muster Software UG", address: "buchhaltung@muster-software.example" },
     subject: "Ihre Rechnung 2026-0311 ist da",
     sent: "2026-07-06T09:00:00+02:00",
     text: `Hallo,\n\nIhre Rechnung 2026-0311 ist da.\n\n${signatureDe}`,
@@ -430,7 +434,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Zero-Document Intake: only a calendar invite (.ics, neither PDF nor image); the body mentions a date.",
     language: "en",
-    from: "Example Cloud Hosting <events@cloudhosting.example>",
+    from: { name: "Example Cloud Hosting", address: "events@cloudhosting.example" },
     subject: "Maintenance window on 12 Nov 2026",
     sent: "2026-11-04T12:00:00+00:00",
     text: `Hello Erika,\n\nplanned maintenance on 12 Nov 2026, 02:00-04:00 UTC. The invite is attached.\n\n${signatureEn}`,
@@ -461,7 +465,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Zero-Document Intake: a plain-text mail without attachments that mentions invoice dates.",
     language: "de",
-    from: "Stadtwerke Beispielstadt <service@stadtwerke-beispielstadt.example>",
+    from: { name: "Stadtwerke Beispielstadt", address: "service@stadtwerke-beispielstadt.example" },
     subject: "Ihre Jahresabrechnung folgt",
     sent: "2026-10-20T08:30:00+02:00",
     text: `Sehr geehrte Frau Mustermann,\n\nIhre Jahresabrechnung vom 01.10.2026 senden wir Ihnen bis zum 15.11.2026 per Post.\n\n${signatureDe}`,
@@ -472,7 +476,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "Three Documents in one Intake (invoice PDF 12.06.2026, credit note PDF 10.06.2026, scanned receipt PNG 2026-06-09) plus a .txt note that is not a Document.",
     language: "de",
-    from: "Beispiel Bürobedarf GmbH <rechnung@buerobedarf.example>",
+    from: { name: "Beispiel Bürobedarf GmbH", address: "rechnung@buerobedarf.example" },
     subject: "Rechnung, Gutschrift und Beleg",
     sent: "2026-06-12T13:15:00+02:00",
     text: `Guten Tag,\n\nanbei Rechnung, Gutschrift und der Kassenbeleg sowie unsere Hinweise.\n\n${signatureDe}`,
@@ -544,7 +548,7 @@ export const intakes: readonly SyntheticIntake[] = [
     description:
       "A Document that carries no date at all (cost estimate PDF): documentDate is null, Filing must fall back to the received date.",
     language: "de",
-    from: "Musterwerkstatt Beispiel <werkstatt@musterwerkstatt.example>",
+    from: { name: "Musterwerkstatt Beispiel", address: "werkstatt@musterwerkstatt.example" },
     subject: "Kostenvoranschlag",
     sent: "2026-10-01T09:30:00+02:00",
     text: `Hallo Frau Mustermann,\n\nanbei der Kostenvoranschlag wie besprochen.\n\n${signatureDe}`,

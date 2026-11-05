@@ -15,7 +15,10 @@ export type Language = "de" | "en";
  */
 export type DateStyle = "dot" | "short" | "iso" | "long";
 
-/** One labelled date line; `document` marks the Document date, every other line is a distractor. */
+/**
+ * One labelled date line; `document` marks the Document date (at most one line per invoice),
+ * every other line is a distractor.
+ */
 export type DateLine =
   | { label: string; date: string; document?: true }
   | { label: string; from: string; to: string };
@@ -31,15 +34,20 @@ export interface Invoice {
   dateStyle: DateStyle;
   dates: readonly DateLine[];
   items: ReadonlyArray<{ description: string; cents: number }>;
-  /** VAT rate in percent; 0 prints no VAT line. */
+  /** VAT rate in percent; 0 prints neither a net nor a VAT line, only the total. */
   vat: number;
   /** Closing lines below the totals (payment terms, notes). */
   notes: readonly string[];
 }
 
-/** The Document date (ISO), or `null` when the invoice prints none. */
+/**
+ * The Document date (ISO) from the one line flagged `document`, or `null` when no line is flagged
+ * (the invoice may still print distractor dates). Throws when several lines are flagged.
+ */
 export function documentDate(invoice: Invoice): string | null {
-  const line = invoice.dates.find((date) => "document" in date);
+  const lines = invoice.dates.filter((date) => "document" in date);
+  if (lines.length > 1) throw new Error(`${invoice.title}: more than one Document date line`);
+  const line = lines[0];
   return line !== undefined && "date" in line ? line.date : null;
 }
 
@@ -176,6 +184,13 @@ function rows(invoice: Invoice): Row[] {
     { left: `${label.taxId}: ${invoice.seller.taxId}` },
     ...label.fake.map((left) => ({ left })),
   ];
+}
+
+/** The invoice's printed text, one string per row (`left` and amount); scans draw exactly this. */
+export function printedLines(invoice: Invoice): string[] {
+  return rows(invoice).map((row) =>
+    row.right === undefined ? row.left : `${row.left} ${row.right}`,
+  );
 }
 
 /** Draws the seller's name as a banner; 8-bit grey keeps every text PDF above the 20 KB floor. */

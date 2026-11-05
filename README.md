@@ -272,20 +272,25 @@ bun run test          # bun test
 The evals run against folders of `.eml` Intakes, each labelled by one `expected.json`: per
 Intake, its Documents in MIME order with their Document dates (`null` when a Document carries
 none). `@hex/eval-harness` exports the Effect Schema (`ExpectedSet`, `decodeExpectedSet`) and
-`loadExpectedSet(folder)`, which reject malformed or impossible dates and duplicate `file` or
-`fileName` entries.
+`loadExpectedSet(folder)`. Decoding reports every problem at once and rejects malformed or
+impossible dates, duplicate `file` or `fileName` entries and unknown (mistyped) keys;
+`loadExpectedSet` names the file in its errors.
 
 `packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
 without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
 dependencies (PDF, PNG and MIME writers, a bitmap font for the scans) and byte for byte
 reproducibly: no clock, randomness, locale or compression library is involved, and
-`.gitattributes` keeps git from rewriting the files. Change the generator, then regenerate; a test
-fails when the committed files drift from the generator's output.
+`.gitattributes` keeps git from converting their line endings. Change the generator, then
+regenerate; a test fails when the committed files drift from the generator's output.
 
 ```sh
 bun run fixtures:generate             # rewrites packages/eval-harness/fixtures/synthetic/
-bun run fixtures:generate /tmp/set    # or any other folder
+bun run fixtures:generate /tmp/set    # or any other folder; relative to where you run bun
 ```
+
+The generator replaces only what it wrote itself: it refuses, touching nothing, a folder that
+holds any other `.eml` or an `expected.json` naming other files, so it cannot overwrite real
+fixtures.
 
 | Intake                       | Covers                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -305,9 +310,10 @@ bun run fixtures:generate /tmp/set    # or any other folder
 | `14-de-undated-document`     | A Document without any date: `documentDate` is `null`                              |
 
 Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
-folder. The root `.gitignore` guards against committing them by accident: it ignores every `.eml`
-and `expected.json` outside the synthetic folder, any `fixtures/real/` and `fixtures/private/`
-folder, and eval results in any `eval-results/` folder.
+folder. The root `.gitignore` guards against committing them by accident (`git add -f` still
+can): it ignores every `.eml` (any letter case) and `expected.json` except the direct children
+of the synthetic folder, any `fixtures/real/` and `fixtures/private/` folder, and eval results in
+any `eval-results/` folder.
 
 ## Packages
 

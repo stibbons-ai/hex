@@ -21,6 +21,10 @@ describe("fixture gitignore safeguard", () => {
       "packages/eval-harness/fixtures/private/notes.md",
       "some/dir/x.eml",
       "x.eml",
+      "Export/Rechnung.EML",
+      "packages/eval-harness/fixtures/other/x.eml",
+      "packages/eval-harness/fixtures/synthetic/sub/x.eml",
+      "packages/eval-harness/fixtures/synthetic/sub/expected.json",
       "private/expected.json",
       "packages/eval-harness/fixtures/real/expected.json",
       "eval-results/run.json",
@@ -40,7 +44,9 @@ describe("fixture gitignore safeguard", () => {
   });
 
   test("tracks .eml files and expected.json only in the synthetic folder", () => {
-    const tracked = git("ls-files", "--", "*.eml", "expected.json", "*/expected.json");
+    const tracked = git("ls-files", "--", ":(icase)*.eml", "expected.json", "*/expected.json");
+    // Guards against a vacuous pass: the synthetic labels themselves must be found.
+    expect(tracked).toContain("packages/eval-harness/fixtures/synthetic/expected.json");
     const outside = tracked.filter(
       (path) => !path.startsWith("packages/eval-harness/fixtures/synthetic/"),
     );

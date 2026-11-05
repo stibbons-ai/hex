@@ -8,6 +8,10 @@ export const glyphHeight = 7;
 /** Horizontal distance from one glyph to the next, in font pixels: the glyph plus one blank column. */
 export const advance = glyphWidth + 1;
 
+/**
+ * Rows per glyph, top to bottom. A glyph with more than `glyphHeight` rows carries accent rows
+ * that sit above the cap line, in the gap between text lines (the umlauts' dots).
+ */
 const rows: Record<string, readonly string[]> = {
   " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
   A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
@@ -36,9 +40,9 @@ const rows: Record<string, readonly string[]> = {
   X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
   Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
   Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
-  Ä: ["01010", "00000", "01110", "10001", "11111", "10001", "10001"],
-  Ö: ["01010", "00000", "01110", "10001", "10001", "10001", "01110"],
-  Ü: ["01010", "00000", "10001", "10001", "10001", "10001", "01110"],
+  Ä: ["01010", "00000", "01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  Ö: ["01010", "00000", "01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  Ü: ["01010", "00000", "10001", "10001", "10001", "10001", "10001", "10001", "01110"],
   "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
   "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
   "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
@@ -69,7 +73,10 @@ export function glyphText(text: string): string {
   return text.replaceAll("ß", "SS").replaceAll("€", "EUR").replaceAll(/[–—]/g, "-").toUpperCase();
 }
 
-/** Rows of `glyphWidth` bits (`1` = ink) for one character; throws on a character the font lacks. */
+/**
+ * Rows of `glyphWidth` bits (`1` = ink) for one character, accent rows first; throws on a
+ * character the font lacks.
+ */
 export function glyph(char: string): readonly string[] {
   const found = rows[char];
   if (found === undefined) throw new Error(`no glyph for ${JSON.stringify(char)}`);

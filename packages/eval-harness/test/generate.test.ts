@@ -28,8 +28,17 @@ describe("synthetic fixture generator", () => {
 
   test("writes byte-identical trees on every run, equal to the committed set", async () => {
     const [viaScript, viaFunction] = [await temp(), await temp()];
-    const run = Bun.spawnSync(["bun", "run", "fixtures:generate", viaScript], { cwd: repoRoot });
-    expect(run.exitCode).toBe(0);
+    const run = Bun.spawnSync(["bun", "run", "fixtures:generate", viaScript], {
+      cwd: repoRoot,
+      stderr: "pipe",
+    });
+    expect({
+      exitCode: run.exitCode,
+      stderr: run.exitCode === 0 ? "" : run.stderr.toString(),
+    }).toEqual({
+      exitCode: 0,
+      stderr: "",
+    });
     await writeFixtureSet(viaFunction);
 
     const first = await readTree(viaScript);
@@ -51,5 +60,23 @@ describe("synthetic fixture generator", () => {
     expect(names).not.toContain("99-stale.eml");
     expect(names).toContain("notes.md");
     expect(names).toContain("expected.json");
+  });
+
+  test.each([
+    ["a real .eml", "my-real-mail.eml", "From: someone\r\n"],
+    ["an upper-case .EML", "01-scan.EML", "From: someone\r\n"],
+    [
+      "labels for real files",
+      "expected.json",
+      JSON.stringify({ intakes: [{ file: "inbox.eml", documents: [] }] }),
+    ],
+    ["an expected.json that is not JSON", "expected.json", "{"],
+  ])("refuses a folder holding %s and leaves it untouched", async (_, name, content) => {
+    const dir = await temp();
+    await Bun.write(join(dir, name), content);
+    await Bun.write(join(dir, "02-generated.eml"), "older generated Intake");
+    await expect(writeFixtureSet(dir)).rejects.toThrow(name);
+    expect((await readdir(dir)).sort()).toEqual(["02-generated.eml", name].sort());
+    expect(await Bun.file(join(dir, name)).text()).toBe(content);
   });
 });

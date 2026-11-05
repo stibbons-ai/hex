@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Result } from "effect";
 import { decodeExpectedSet, loadExpectedSet } from "../src/index.ts";
 import { syntheticFolder } from "../src/synthetic/generate.ts";
@@ -52,6 +55,12 @@ describe("expected.json schema", () => {
     ],
     ["a file that is not an .eml", intake({ file: "01-a.txt" }), '["file"]'],
     ["a file with a path", intake({ file: "../01-a.eml" }), '["file"]'],
+    ["a mistyped key", intake({ descripton: "typo" }), "descripton"],
+    [
+      "an unknown Document key",
+      intake({ documents: [{ fileName: "a.pdf", documentDate: null, isDocument: false }] }),
+      "isDocument",
+    ],
   ])("rejects %s", (_, rejected, detail) => {
     expect(message({ intakes: [rejected] })).toContain(detail);
   });
@@ -62,5 +71,24 @@ describe("expected.json schema", () => {
 
   test("allows the same fileName in different Intakes", () => {
     expect(message({ intakes: [intake(), intake({ file: "02-b.eml" })] })).toBe("ok");
+  });
+
+  test("reports every problem at once", () => {
+    const report = message({ intakes: [dated("2026-02-30"), intake({ file: "b.txt" })] });
+    expect(report).toContain("2026-02-30");
+    expect(report).toContain('[1]["file"]');
+  });
+
+  test.each([
+    ["is not JSON", "{"],
+    ["does not decode", JSON.stringify({ intakes: [dated("2026-02-30")] })],
+  ])("loading names the file when it %s", async (_, content) => {
+    const folder = await mkdtemp(join(tmpdir(), "hex-expected-"));
+    try {
+      await Bun.write(join(folder, "expected.json"), content);
+      await expect(loadExpectedSet(folder)).rejects.toThrow(join(folder, "expected.json"));
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 });

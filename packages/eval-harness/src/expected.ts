@@ -1,8 +1,8 @@
 import { join } from "node:path";
-import { Schema } from "effect";
+import { Result, Schema } from "effect";
 
 /** `YYYY-MM-DD` naming a real calendar day (`2026-02-30` fails). */
-function isCalendarDate(value: string): boolean {
+export function isCalendarDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (match === null) return false;
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -61,10 +61,25 @@ export type ExpectedDocument = typeof ExpectedDocument.Type;
 export type ExpectedIntake = typeof ExpectedIntake.Type;
 export type ExpectedSet = typeof ExpectedSet.Type;
 
-export const decodeExpectedSet = Schema.decodeUnknownResult(ExpectedSet);
-const decodeExpectedSetPromise = Schema.decodeUnknownPromise(ExpectedSet);
+/** Hand-written labels: report every problem at once and reject unknown (mistyped) keys. */
+export const decodeExpectedSet = Schema.decodeUnknownResult(ExpectedSet, {
+  errors: "all",
+  onExcessProperty: "error",
+});
 
-/** Reads and decodes `<folder>/expected.json`; rejects with the decode error when it is malformed. */
+/**
+ * Reads and decodes `<folder>/expected.json`. Rejects, naming the file, when it is missing, is not
+ * JSON or does not decode.
+ */
 export async function loadExpectedSet(folder: string): Promise<ExpectedSet> {
-  return decodeExpectedSetPromise(await Bun.file(join(folder, "expected.json")).json());
+  const path = join(folder, "expected.json");
+  let json: unknown;
+  try {
+    json = JSON.parse(await Bun.file(path).text());
+  } catch (error) {
+    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const result = decodeExpectedSet(json);
+  if (Result.isFailure(result)) throw new Error(`${path}: ${result.failure.message}`);
+  return result.success;
 }

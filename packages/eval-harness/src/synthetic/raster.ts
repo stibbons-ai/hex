@@ -1,4 +1,4 @@
-import { advance, glyph, glyphText, glyphWidth } from "./font.ts";
+import { advance, glyph, glyphHeight, glyphText, glyphWidth } from "./font.ts";
 
 /** Grey raster samples, rows padded to whole bytes, as both the PNG and the PDF writer take them. */
 export interface GrayImage {
@@ -33,10 +33,12 @@ export class Bitmap {
   drawText(x: number, y: number, text: string, scale: number): void {
     let left = x;
     for (const char of glyphText(text)) {
-      glyph(char).forEach((bits, row) => {
+      const bitmap = glyph(char);
+      const accentRows = bitmap.length - glyphHeight;
+      bitmap.forEach((bits, row) => {
         for (let column = 0; column < glyphWidth; column++) {
           if (bits[column] === "1")
-            this.fillRect(left + column * scale, y + row * scale, scale, scale);
+            this.fillRect(left + column * scale, y + (row - accentRows) * scale, scale, scale);
         }
       });
       left += advance * scale;
