@@ -1,5 +1,12 @@
 [
   {
+    "name": "@duckdb/node-bindings-darwin-arm64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-wA50u8kQxEXlf2ho1m/n8K4qdIWNNBUZ8xQ02x+9Vc12GAgabSlnXJOaZZFrby5Dj28y+mFBIfAEGftBeQKXaw==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-darwin-arm64/1.5.2-r.2"
+  },
+  {
     "name": "@duckdb/node-bindings-darwin-x64",
     "version": "1.5.2-r.2",
     "license": "MIT",
