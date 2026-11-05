@@ -19,14 +19,16 @@ export interface FakeOpenAI {
   requests: ResponsesRequest[];
 }
 
-/** The `input_file` parts of a request: their data URLs. */
+/** The Documents in a request: the data URLs of its `input_file` and `input_image` parts. */
 export function inputFiles(request: ResponsesRequest): string[] {
   return request.input.flatMap(({ content }) =>
     typeof content === "string"
       ? []
-      : content.flatMap((part) =>
-          part["type"] === "input_file" ? [String(part["file_data"])] : [],
-        ),
+      : content.flatMap((part) => {
+          if (part["type"] === "input_file") return [String(part["file_data"])];
+          if (part["type"] === "input_image") return [String(part["image_url"])];
+          return [];
+        }),
   );
 }
 

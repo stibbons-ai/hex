@@ -69,7 +69,7 @@ bun run intake path/to/mail.eml
 
 runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
 Documents it filed (paths relative to the Outbox; a Document filed by its received date is
-marked `(no Document date found; filed by received date)`), that the Intake has no Documents, or
+marked `(no usable Document date; filed by received date)`), that the Intake has no Documents, or
 that it was already processed. It exits with code 1 and a message on a file it can't read or
 that is no mail, an Intake without a Message-ID or without a usable received date, a config it
 can't use, or a failed run. Run it from the repository root. The same workflow is registered
@@ -96,14 +96,15 @@ The workflow, in order:
    date), never a due date, delivery or service period, order date or the date it was printed
    or sent. The model answers `{ year, month, day }` as structured output (an Effect Schema,
    decoded again in the step), all `null` when the Document shows no date. HEIC, HEIF, TIFF
-   and BMP images are not sent (providers don't commonly take them). A model call that fails
+   and BMP images are not sent (OpenAI and Anthropic reject them). A model call that fails
    (network, missing or wrong API key, rate limit, provider error) fails the run before
    anything is filed or recorded, so running the Intake again retries it; the error names the
    Document and the model.
 4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
-   date, an answer that doesn't match the schema, 30 February, month 13, a two-digit year, a
-   type not sent) it falls back to the Intake's received date as a calendar date in
+   date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
+   one cut off at the token limit or withheld by a content filter; 30 February, month 13, a
+   two-digit year; a type not sent) it falls back to the Intake's received date as a calendar date in
    `Europe/Berlin`, and the Filing records that. The received date is the date after the last
    `;` of the topmost `Received:` header, else the `Date:` header, each only in the form
    `[Day,] D Mon YYYY HH:MM[:SS] zone` (four-digit year, two-digit hours, comments such as
@@ -145,14 +146,20 @@ required:
 }
 ```
 
-hex doesn't check at startup that the model's API key is set: without it every Intake with
-Documents fails until it is.
+hex doesn't check at startup that the model's API key is set: without it every Intake with a
+Document hex sends to the model fails until it is.
+
+Only OpenAI models are exercised (by the tests' fake OpenAI). The answer schema goes to the
+provider as JSON Schema with `additionalProperties: true` and ±2^53 integer bounds; a provider
+that insists on strict JSON Schema (e.g. some OpenAI-compatible ones) may reject it, which fails
+every run until `intake.model` names another model.
 
 The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use: one row per
 Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
 `{ "index": …, "path": …, "fellBack": … }` per Document: its position among the attachments,
-0-based, where it landed, and `true` when it was filed by the received date because no usable
-Document date came back). Entries recorded before Document dates were read have no `fellBack`:
+0-based, where it landed, and `true` when it was filed by the received date: the model answered
+no usable Document date, or the Document is a type hex doesn't send to a model (HEIC, HEIF,
+TIFF, BMP)). Entries recorded before Document dates were read have no `fellBack`:
 they read back without it, claiming nothing either way. The workflow's result (`IntakeResult`)
 carries the same Filings, also for an Intake already processed. An Intake whose run failed
 halfway is not recorded, so running it again files the Documents that already landed a second

@@ -83,6 +83,13 @@ function ledgerEntry(dataDirectory: string, messageId: string) {
   );
 }
 
+/** Everything `mastra.db` (and its WAL files) under `dataDirectory` holds, read as text. */
+async function persistedText(dataDirectory: string): Promise<string> {
+  const names = (await readdir(dataDirectory)).filter((name) => name.startsWith("mastra.db"));
+  const contents = await Promise.all(names.map((name) => readFile(join(dataDirectory, name))));
+  return contents.map((content) => content.toString("latin1")).join("\n");
+}
+
 describe("bun run intake", () => {
   test("files each Document by its Document date or, marked, by the received date; then reports the Intake as already processed", async () => {
     const dataDirectory = join(directory, "data");
@@ -119,7 +126,7 @@ describe("bun run intake", () => {
       [
         `hex intake: walkthrough@shop.example: filed 2 Documents into ${outbox}`,
         "  2026-09/ER/Rechnung 4711.pdf",
-        "  2026-11/ER/Lieferschein.pdf (no Document date found; filed by received date)",
+        "  2026-11/ER/Lieferschein.pdf (no usable Document date; filed by received date)",
         "",
       ].join("\n"),
     );
@@ -153,6 +160,34 @@ describe("bun run intake", () => {
     expect(model.requests).toHaveLength(asked + 2);
     expect(await readdir(join(outbox, "2026-09/ER"))).toEqual(["Rechnung 4711.pdf"]);
     expect(await readdir(join(outbox, "2026-11/ER"))).toEqual(["Lieferschein.pdf"]);
+  });
+
+  test("an image Document reaches the model natively as an image with its bytes", async () => {
+    // A PNG signature and IHDR chunk start, padded past the image size threshold.
+    const png = new Uint8Array(12_000);
+    png.set([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    ]);
+    const dataDirectory = join(directory, "image");
+    const eml = await writeMail("image.eml", {
+      messageId: "image@shop.example",
+      received: RECEIVED,
+      parts: [
+        {
+          contentType: "image/png",
+          disposition: "attachment",
+          fileName: "Beleg.png",
+          content: png,
+        },
+      ],
+    });
+    const asked = model.requests.length;
+    const run = await intake([eml], { HEX_DATA_DIR: dataDirectory });
+    expect(run).toMatchObject({ code: 0, stderr: "" });
+    expect(model.requests.slice(asked).map(inputFiles)).toEqual([
+      [`data:image/png;base64,${Buffer.from(png).toString("base64")}`],
+    ]);
+    expect(JSON.stringify(model.requests[asked]?.input)).toContain('"type":"input_image"');
   });
 
   test("the Outbox defaults to <data dir>/outbox; an Intake without Documents says so", async () => {
@@ -260,6 +295,12 @@ describe("bun run intake", () => {
       expect(rejecting.requests.map(({ model: id }) => id)).toEqual(["gpt-5-mini"]);
       expect(await readdir(outbox).catch(() => [])).toEqual([]);
       expect(await ledgerEntry(dataDirectory, "unread@shop.example")).toBeUndefined();
+      // Mastra persists the failed run: its error, but never the key or the provider's request
+      // (an error cause would carry both).
+      const persisted = await persistedText(dataDirectory);
+      expect(persisted.includes("Incorrect API key provided: OPENAI_API_KEY")).toBe(true);
+      expect(persisted.includes(API_KEY)).toBe(false);
+      expect(persisted.includes("requestBodyValues")).toBe(false);
     } finally {
       await rejecting.server.stop(true);
     }

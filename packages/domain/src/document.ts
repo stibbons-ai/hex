@@ -79,8 +79,10 @@ export function documentExtension(mimeType: string): string {
 }
 
 /**
- * Image types a model reads natively (the ones OpenAI, Anthropic and Google all accept), by the
- * types a Document may come as; the rest (HEIC, HEIF, TIFF, BMP) a provider may reject.
+ * Image types hex hands a model, by the types a Document may come as: the ones OpenAI and
+ * Anthropic document as image input (the default model is OpenAI's). Google's Gemini documents
+ * PNG, JPEG, WebP, HEIC and HEIF, so GIF is unverified there. The rest (HEIC, HEIF, TIFF, BMP)
+ * OpenAI and Anthropic reject, which would fail every run of the Intake.
  */
 const MODEL_IMAGE_TYPES: Readonly<Record<string, string>> = {
   "image/jpeg": "image/jpeg",

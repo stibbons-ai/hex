@@ -40,8 +40,10 @@ export class DateExtractor extends Context.Service<
   DateExtractor,
   {
     /**
-     * The model's answer for `document`, undecoded: undefined when the model's output didn't
-     * match the schema. Fails only when the model call itself fails, never for an unusable answer.
+     * The model's answer for `document`, undecoded: undefined when the model's reply yields no
+     * object matching the schema (no JSON, a schema mismatch, an empty reply, one cut off at the
+     * token limit or withheld by a content filter). Fails only when the model call itself fails,
+     * never for an unusable answer.
      */
     readonly extract: (document: DocumentFile) => Effect.Effect<unknown, DateExtractionError>;
   }
@@ -62,7 +64,11 @@ function modelName(model: MastraModelConfig): string {
     : "the configured model";
 }
 
-/** `message` with the value of every set `*_API_KEY` variable replaced by its name. */
+/**
+ * `message` with the value of each set `*_API_KEY` variable replaced by its name. Values under 8
+ * characters are left alone (too likely to match ordinary text), and credentials under other
+ * names (`AWS_SECRET_ACCESS_KEY`, `*_TOKEN`) are not scrubbed.
+ */
 function withoutApiKeys(message: string): string {
   return Object.entries(process.env).reduce(
     (text, [name, value]) =>
@@ -75,11 +81,13 @@ function withoutApiKeys(message: string): string {
  * The DateExtractor on `model`: a Mastra model-router id (`provider/model`, its API key from the
  * provider's usual variable, e.g. `OPENAI_API_KEY`) or a model instance (tests pass a mock). Each
  * Document goes to the model natively as a file part with its media type; the answer comes back
- * as structured output. An answer Mastra can't parse or that doesn't match the schema is
+ * as structured output. A reply that yields no object matching the schema (see `extract`) is
  * undefined (Mastra's `warn` strategy), not an error. The agent logs nothing: the error carries
  * what went wrong.
  */
 export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateExtractor> {
+  // Never register this Agent on a Mastra instance: its logger would replace the no-op one and
+  // log provider errors, which hold the request and with it the Document.
   const agent = new Agent({
     id: "hex-date-extractor",
     name: "hex-date-extractor",

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -179,6 +180,56 @@ describe("Intake workflow", () => {
       "2026-11/ER/undated.pdf",
     ]);
     expect(await hex.ledger("mixed-dates@shop.example")).toMatchObject({ filings });
+  });
+
+  test("an application/octet-stream named *.pdf goes to the extractor as application/pdf", async () => {
+    const hex = freshHex();
+    await hex.process({
+      messageId: "octet@shop.example",
+      received,
+      parts: [
+        {
+          contentType: "application/octet-stream",
+          disposition: "attachment",
+          fileName: "Scan.PDF",
+          content: bytes(500),
+        },
+      ],
+    });
+    expect(hex.asked.map(({ mediaType }) => mediaType)).toEqual(["application/pdf"]);
+  });
+
+  test("an entry recorded before Document dates were read comes back unchanged, without the flag", async () => {
+    const hex = freshHex();
+    // Opening the ledger creates its table; then an old-format row goes in, as #6 wrote it.
+    expect(await hex.ledger("old@shop.example")).toBeUndefined();
+    const database = new Database(hex.databasePath);
+    try {
+      database
+        .query(
+          "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          "old@shop.example",
+          "2026-10-01T08:00:00.000Z",
+          1,
+          '[{"index":0,"path":"2026-10/ER/a.pdf"}]',
+        );
+    } finally {
+      database.close();
+    }
+    const result = await hex.process({
+      messageId: "old@shop.example",
+      received,
+      parts: [pdf("a.pdf")],
+    });
+    expect(result).toEqual({
+      messageId: "old@shop.example",
+      status: "already-processed",
+      filings: [{ index: 0, path: "2026-10/ER/a.pdf" }],
+    });
+    expect(result.filings[0]).not.toHaveProperty("fellBack");
+    expect(hex.asked).toEqual([]);
   });
 
   test("an image type models don't take is never sent and files by the received date", async () => {

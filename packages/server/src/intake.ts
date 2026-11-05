@@ -23,7 +23,7 @@ function describe({ messageId, status, filings }: IntakeResult, outboxDirectory:
     `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
     ...filings.map(
       ({ path, fellBack }) =>
-        `  ${path}${fellBack ? " (no Document date found; filed by received date)" : ""}`,
+        `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
     ),
   ].join("\n");
 }

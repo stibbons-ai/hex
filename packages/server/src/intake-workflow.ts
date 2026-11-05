@@ -19,7 +19,7 @@ import {
   normalizeMessageId,
   planFiling,
 } from "@hex/domain";
-import type { Category } from "@hex/domain";
+import type { CalendarDate, Category } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
@@ -50,13 +50,16 @@ const Dated = Schema.Struct({
     Schema.Struct({ ...DetectedDocument.fields, documentDate: Schema.optionalKey(AnsweredDate) }),
   ),
 });
-const Filed = Schema.Struct({ filings: Schema.Array(Filing) });
+/** This run's Filings: unlike a ledger entry's, each always says whether it fell back. */
+const Filed = Schema.Struct({
+  filings: Schema.Array(Schema.Struct({ ...Filing.fields, fellBack: Schema.Boolean })),
+});
 
 /**
  * The Document date in a model's answer: present only when the answer decodes as
  * {@link DocumentDateAnswer} with no `null`. Anything else (no date found, malformed) is none.
  */
-function documentDateOf(answer: unknown): { documentDate?: typeof AnsweredDate.Type } {
+function documentDateOf(answer: unknown): { documentDate?: CalendarDate } {
   const decoded = Schema.decodeUnknownOption(DocumentDateAnswer)(answer);
   if (Option.isNone(decoded)) return {};
   const { year, month, day } = decoded.value;

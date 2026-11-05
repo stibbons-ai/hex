@@ -6,14 +6,15 @@ import { localDatabaseUrl } from "./storage";
 
 /**
  * One Document's Filing: which attachment it was, where it landed, relative to the Outbox, and
- * whether it was filed by the received date because no usable Document date came back.
+ * whether it was filed by the received date because it had no usable Document date.
  */
 export const Filing = Schema.Struct({
   /** The Document's 0-based index among the Intake's attachments. */
   index: Schema.Int,
   path: Schema.String,
   /**
-   * True: filed by the received date, as no usable Document date came back (`FilingPlan.fellBack`).
+   * True: filed by the received date (`FilingPlan.fellBack`), because the model answered no usable
+   * Document date or the Document is a type hex doesn't send to a model (HEIC, HEIF, TIFF, BMP).
    * Absent on entries recorded before Document dates were read: nothing is known either way.
    */
   fellBack: Schema.optionalKey(Schema.Boolean),
