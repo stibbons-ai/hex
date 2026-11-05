@@ -1,22 +1,9 @@
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type DependencyMetadata, excluded, type LockMetadata } from "./bun-lock.ts";
 import { licenseViolation, validateAllowlist } from "./license-policy.ts";
 import type { LicenseException, PackageLicense } from "./license-policy.ts";
-
-type Dependencies = Record<string, string>;
-
-interface DependencyMetadata {
-  dependencies?: Dependencies;
-  devDependencies?: Dependencies;
-  optionalDependencies?: Dependencies;
-  peerDependencies?: Dependencies;
-}
-
-interface LockMetadata extends DependencyMetadata {
-  os?: string | string[];
-  cpu?: string | string[];
-}
 
 export interface BunLock {
   lockfileVersion: number;
@@ -32,13 +19,6 @@ interface PlatformLicenseMetadata extends PackageLicense {
   license: string;
   integrity: string;
   source: string;
-}
-
-function excluded(constraint: string | string[] | undefined, actual: string): boolean {
-  if (constraint === undefined) return false;
-  const values = typeof constraint === "string" ? [constraint] : constraint;
-  const positive = values.filter((value) => !value.startsWith("!"));
-  return values.includes(`!${actual}`) || (positive.length > 0 && !positive.includes(actual));
 }
 
 /**
