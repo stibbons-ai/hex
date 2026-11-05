@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { LOOPBACK_ONLY, isLoopbackHost } from "@hex/adapters";
+import { LOOPBACK_ONLY, plaintextRefused } from "@hex/adapters";
 import type { ImapSettings, SmtpSettings } from "@hex/adapters";
 import { CATEGORIES, DEFAULT_CATEGORY } from "@hex/domain";
 import type { Category } from "@hex/domain";
@@ -43,8 +43,8 @@ const TargetName = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/));
 
 /**
  * The watched folder: not blank, and none of hex's outcome folders (`hex/processed`,
- * `hex/failed`, with either delimiter and under an `INBOX` namespace), since mail moved there
- * would be watched again.
+ * `hex/failed`, with either delimiter, under an `INBOX` namespace or not, in any letter case),
+ * since mail moved there would be watched again.
  */
 const WatchedFolder = Schema.String.check(
   Schema.makeFilter((folder) => folder.trim() !== "" || "a folder name that is not blank"),
@@ -227,7 +227,7 @@ function mailServerSettings(
   const security = Option.getOrElse(chosen, () =>
     settings.port === tlsPort ? ("tls" as const) : ("starttls" as const),
   );
-  if (security === "plain" && !isLoopbackHost(settings.host)) {
+  if (plaintextRefused(security, settings.host)) {
     fail(
       `${prefix}_SECURITY=plain is only allowed for ${LOOPBACK_ONLY}; use tls or starttls for ${settings.host}`,
     );

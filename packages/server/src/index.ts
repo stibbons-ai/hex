@@ -96,7 +96,7 @@ export interface RunningServer {
    * progress goes on, but Mastra's shutdown doesn't wait for it: closing the store and the
    * runtime, and the process exiting, cut it off, so it stays active in storage and resumes at
    * the next boot; one that finishes within the stop's grace can no longer move its mail, which
-   * the next boot's look moves. Then it
+   * for a processed Intake the next boot's look moves. Then it
    * stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
    * accepting requests and gives in-flight ones (open streams and chat replies included), and a
    * channel disconnect still running, `stopGraceMs` more before closing them, then shuts Mastra

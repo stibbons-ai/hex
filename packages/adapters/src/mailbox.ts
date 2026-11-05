@@ -3,7 +3,7 @@ import { Context, Data, Duration, Effect, Layer, Redacted, Schema } from "effect
 import { ImapFlow } from "imapflow";
 import type { ImapFlowError } from "imapflow";
 import { credentialRedactions, excerpt, messageOf, redact } from "./errors";
-import { LOOPBACK_ONLY, isLoopbackHost } from "./mailer";
+import { LOOPBACK_ONLY, plaintextRefused } from "./mailer";
 import type { SmtpSettings } from "./mailer";
 
 /** Where an Intake's mail goes once its outcome is known: processed, or failed permanently. */
@@ -29,12 +29,18 @@ export interface WaitingMail {
 /**
  * A mailbox operation failed. The message names the server, the folder and the IMAP stage, never
  * the credentials or a mail's content. `connectionLost`: the connection is gone (or never came
- * up), so every operation fails until it is back; otherwise the server refused this one operation.
+ * up), so every operation fails until it is back. `listingStale`: the folder's UIDs changed
+ * meaning since the last listing (UIDVALIDITY), so every UID from it is useless. Neither: the
+ * server refused this one operation.
  */
 export class MailboxError extends Data.TaggedError("MailboxError")<{
   readonly message: string;
   readonly connectionLost: boolean;
+  readonly listingStale?: true;
 }> {}
+
+/** Thrown when the folder's UIDs changed meaning since the last listing. */
+class StaleListing extends Error {}
 
 /**
  * The intake mailbox: the watched folder hex takes its Intakes from, and the outcome folders it
@@ -95,9 +101,9 @@ const CONNECT_DEADLINE = Duration.seconds(60);
 /** How long closing waits for the server's answer to LOGOUT before dropping the connection. */
 const LOGOUT_DEADLINE = Duration.seconds(5);
 /**
- * How long a connection may go without a byte from the server before it counts as lost: a
- * half-open connection (a NAT dropping it while IDLE) is noticed after this, not after imapflow's
- * default 5 min.
+ * How long the server may stay silent before the client probes the connection with a NOOP; no
+ * answer within as long again counts as a lost connection. A half-open connection (a NAT dropping
+ * it while IDLE) is noticed after about 3 min, not after imapflow's default 5 min (10 while IDLE).
  */
 const SOCKET_TIMEOUT_MS = 90_000;
 
@@ -119,7 +125,8 @@ function refusalOf(error: ImapFlowError | undefined): string {
  * could expunge other mail. The watched folder stays selected; the server's new-mail
  * notifications come through IMAP IDLE, which the client enters after 1 s without a command
  * (imapflow's default, 15 s, would leave mail arriving right after a look unnoticed that long).
- * 90 s without a byte from the server count as a lost connection. Mail is fetched with
+ * A server silent for 90 s gets a NOOP; no answer within another 90 s counts as a lost
+ * connection. Mail is fetched with
  * `BODY.PEEK`, so reading never marks it seen. Closed when the layer is released.
  */
 export function imapMailboxLayer(settings: ImapSettings): Layer.Layer<Mailbox, MailboxError> {
@@ -127,17 +134,24 @@ export function imapMailboxLayer(settings: ImapSettings): Layer.Layer<Mailbox, M
     Mailbox,
     Effect.acquireRelease(
       Effect.sync(() => new ImapConnection(settings)).pipe(
-        Effect.tap((connection) => connection.run("connecting", () => connection.open())),
-        Effect.timeoutOrElse({
-          duration: CONNECT_DEADLINE,
-          orElse: () =>
-            Effect.fail(
-              new MailboxError({
-                message: `${settings.host}:${settings.port}, folder ${settings.folder}: connecting did not finish within ${Duration.format(CONNECT_DEADLINE)}`,
-                connectionLost: true,
+        Effect.tap((connection) =>
+          connection
+            .run("connecting", () => connection.open())
+            .pipe(
+              Effect.timeoutOrElse({
+                duration: CONNECT_DEADLINE,
+                orElse: () =>
+                  Effect.fail(
+                    new MailboxError({
+                      message: `${settings.host}:${settings.port}, folder ${settings.folder}: connecting did not finish within ${Duration.format(CONNECT_DEADLINE)}`,
+                      connectionLost: true,
+                    }),
+                  ),
               }),
+              // An attempt cut off by the deadline is closed, not left running unowned.
+              Effect.onError(() => connection.close),
             ),
-        }),
+        ),
       ),
       (connection) => connection.close,
     ).pipe(
@@ -182,10 +196,12 @@ class ImapConnection {
   /** Outcome folders known to exist on the current connection. */
   #outcomeFolders = new Set<MailOutcome>();
   /**
-   * The error of the last command the server refused, which imapflow only logs for MOVE and
-   * SEARCH (returning `false`); kept to name the server's reason.
+   * The error of the last command imapflow logged as refused; for MOVE and SEARCH, which it
+   * answers with `false` instead of throwing, this is the only way to name the server's reason.
    */
   #refused: ImapFlowError | undefined;
+  /** The client while it connects, so closing can end the attempt. */
+  #connecting: ImapFlow | undefined;
 
   constructor(settings: ImapSettings) {
     this.#settings = settings;
@@ -215,6 +231,7 @@ class ImapConnection {
         return new MailboxError({
           message: `${host}:${port}, folder ${folder}: ${failedStage} failed${code ? ` (${code})` : ""}: ${excerpt(redact(detail, this.#secrets))}`,
           connectionLost: this.#closed || !this.#client?.usable,
+          ...(cause instanceof StaleListing ? { listingStale: true as const } : {}),
         });
       },
     });
@@ -237,7 +254,7 @@ class ImapConnection {
       openingStages.set(refused, stage);
       return refused;
     };
-    if (security === "plain" && !isLoopbackHost(host)) {
+    if (plaintextRefused(security, host)) {
       throw refuse("connecting", `plaintext IMAP is only allowed to ${LOOPBACK_ONLY}`);
     }
     const client = new ImapFlow({
@@ -279,7 +296,13 @@ class ImapConnection {
       client.close();
       throw error;
     };
-    await client.connect().catch(failedAt("connecting"));
+    this.#connecting = client;
+    await client
+      .connect()
+      .catch(failedAt("connecting"))
+      .finally(() => {
+        this.#connecting = undefined;
+      });
     if (!client.capabilities.has("MOVE")) {
       client.close();
       throw refuse(
@@ -318,7 +341,7 @@ class ImapConnection {
   /** Fails when the folder's UIDs no longer mean what they meant at the last listing. */
   #checkValidity(client: ImapFlow) {
     if (!client.mailbox || client.mailbox.uidValidity !== this.#listedValidity) {
-      throw new Error("the folder's UIDs changed since it was listed (UIDVALIDITY)");
+      throw new StaleListing("the folder's UIDs changed since it was listed (UIDVALIDITY)");
     }
   }
 
@@ -379,15 +402,20 @@ class ImapConnection {
     this.#outcomeFolders.add(outcome);
   }
 
+  /** The error for a command imapflow answered with `false`: refused, or the connection gone. */
+  #notDone(client: ImapFlow, command: string): Error {
+    return new Error(
+      client.usable
+        ? `the server refused the ${command}${redact(refusalOf(this.#refused), this.#secrets)}`
+        : "the connection closed",
+    );
+  }
+
   async #move(client: ImapFlow, uids: number[], outcome: MailOutcome) {
     await this.#ensureFolder(client, outcome);
     this.#refused = undefined;
     const moved = await client.messageMove(uids, [...OUTCOME_FOLDERS[outcome]], { uid: true });
-    if (!moved) {
-      throw new Error(
-        `the server refused the move${redact(refusalOf(this.#refused), this.#secrets)}`,
-      );
-    }
+    if (!moved) throw this.#notDone(client, "move");
   }
 
   moveMessageId(messageId: string, outcome: MailOutcome): Promise<number> {
@@ -397,11 +425,7 @@ class ImapConnection {
       // SEARCH HEADER matches substrings; the envelope says which candidate is this Message-ID.
       this.#refused = undefined;
       const candidates = await client.search({ header: { "message-id": id } }, { uid: true });
-      if (!candidates) {
-        throw new Error(
-          `the server refused the search${redact(refusalOf(this.#refused), this.#secrets)}`,
-        );
-      }
+      if (!candidates) throw this.#notDone(client, "search");
       if (candidates.length === 0) return 0;
       const mails = await client.fetchAll(candidates, { uid: true, envelope: true }, { uid: true });
       const uids = mails
@@ -427,6 +451,7 @@ class ImapConnection {
   readonly close: Effect.Effect<void> = Effect.suspend(() => {
     this.#closed = true;
     this.#wake(new Error("the mailbox is closed"));
+    this.#connecting?.close();
     const client = this.#client;
     this.#client = undefined;
     if (!client) return Effect.void;

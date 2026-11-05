@@ -283,5 +283,47 @@ describe("IntakeLedger", () => {
         success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("h@x", "run-1"))),
       ).toEqual({ count: 1, ended: false });
     });
+
+    test.each(["UPDATE", "DELETE"])(
+      "ending them is one transaction: a failing %s changes nothing",
+      async (failing) => {
+        const databasePath = freshDatabase();
+        success(
+          await withLedger(databasePath, (ledger) =>
+            ledger
+              .recordFailedRun("i@x", "run-1")
+              .pipe(Effect.andThen(ledger.recordFailedRun("i@x", "run-2"))),
+          ),
+        );
+        // One of its statements fails, as a busy database would.
+        const client = createClient({ url: await localDatabaseUrl(databasePath) });
+        const sql = (statement: string) => client.execute(statement);
+        try {
+          await sql(
+            `CREATE TRIGGER fail_step BEFORE ${failing} ON hex_intake_failed_runs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`,
+          );
+          const ending = await withLedger(databasePath, (ledger) =>
+            ledger.endFailedRuns("i@x", "run-2"),
+          );
+          expect(String(ending)).toContain("ending the failed runs of i@x");
+          // Nothing changed: both runs still count, none is ended.
+          expect(
+            success(await withLedger(databasePath, (ledger) => ledger.failedRuns("i@x"))),
+          ).toMatchObject({
+            count: 2,
+          });
+          await sql("DROP TRIGGER fail_step");
+        } finally {
+          client.close();
+        }
+        // Ended now; run-2's step repeated still sees the Intake failed permanently on it.
+        success(await withLedger(databasePath, (ledger) => ledger.endFailedRuns("i@x", "run-2")));
+        expect(
+          success(
+            await withLedger(databasePath, (ledger) => ledger.recordFailedRun("i@x", "run-2")),
+          ),
+        ).toEqual({ count: 0, ended: true });
+      },
+    );
   });
 });

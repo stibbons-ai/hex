@@ -553,7 +553,8 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
 /**
  * The Intake workflow did not finish. Carries this run's Forwarding attempts and Filings, so a
  * caller can show what was done although a branch failed, and what happened to the mail, unless
- * the run ended before it got there (an unreadable ledger, a defect).
+ * the run ended before it got there (an unreadable ledger, a defect) or the ledger couldn't count
+ * or end the failed runs there.
  */
 export class IntakeRunError extends Error {
   constructor(

@@ -40,7 +40,7 @@ const NOT_IN_MAILBOX = { status: "not-in-mailbox", to: "processed" } as const;
 
 /** The end of a failed run's error when the Intake has runs left (its first failed run). */
 const FIRST_FAILED_RUN =
-  "; failed run 1 of 5: a mail of it in the watched folder stays there for a retry, which the mailbox watcher retries no sooner than 5 min from now";
+  "; failed run 1 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now";
 
 /**
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted

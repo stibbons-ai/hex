@@ -61,6 +61,14 @@ export function isLoopbackHost(host: string): boolean {
 export const LOOPBACK_ONLY =
   "a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost)";
 
+/**
+ * Whether a connection secured as `security` to `host` is refused: plaintext (`plain`) to
+ * anything but a loopback IP address, so credentials never cross a network unencrypted.
+ */
+export function plaintextRefused(security: SmtpSecurity, host: string): boolean {
+  return security === "plain" && !isLoopbackHost(host);
+}
+
 /** Where and as whom the SMTP Mailer sends. */
 export interface SmtpSettings {
   readonly host: string;
@@ -79,7 +87,7 @@ export interface SmtpSettings {
  */
 export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
   const { host, port, security } = settings;
-  if (security === "plain" && !isLoopbackHost(host)) {
+  if (plaintextRefused(security, host)) {
     return Layer.succeed(Mailer, {
       send: ({ to }) =>
         Effect.fail(

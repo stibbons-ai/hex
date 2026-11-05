@@ -26,12 +26,18 @@ export interface FakeImapOptions {
   capabilities?: string;
   /** The Message-ID of the one mail in INBOX. */
   messageId?: string;
+  /** Refuse SEARCH, saying why. */
+  refuseSearch?: boolean;
+  /** Drop the connection without a word once the client enters IDLE. */
+  dropOnIdle?: boolean;
 }
 
 export function fakeImap({
   refuseLogin = false,
   capabilities = "IMAP4rev1 IDLE MOVE",
   messageId = "quota@shop.example",
+  refuseSearch = false,
+  dropOnIdle = false,
 }: FakeImapOptions = {}): FakeImap {
   const logins: string[] = [];
   const commands: string[] = [];
@@ -84,7 +90,11 @@ export function fakeImap({
               );
               break;
             case "UID SEARCH":
-              reply("* SEARCH 1", `${tag} OK done`);
+              reply(
+                refuseSearch
+                  ? `${tag} NO [CANNOT] Search is not available right now`
+                  : `* SEARCH 1\r\n${tag} OK done`,
+              );
               break;
             case "UID FETCH":
               reply(
@@ -96,6 +106,10 @@ export function fakeImap({
               reply(`${tag} NO [OVERQUOTA] Quota exceeded (mailbox full)`);
               break;
             case "IDLE":
+              if (dropOnIdle) {
+                socket.terminate();
+                return;
+              }
               socket.data.idling = tag;
               reply("+ idling");
               break;

@@ -128,8 +128,9 @@ export class IntakeLedger extends Context.Service<
     ) => Effect.Effect<RecordedFailedRun, LedgerError>;
     /**
      * The Intake failed permanently, on the run `runId` if given: its failed runs stop counting,
-     * so it gets its full number of runs again; `runId`'s own row stays, marked, so a repeat of
-     * that run's step still sees the Intake failed permanently.
+     * so it gets its full number of runs again. `runId`'s own row stays, marked ended, so a repeat
+     * of that run's step still sees the Intake failed permanently; without a run none stays. One
+     * transaction: either all of it happens or nothing does.
      */
     readonly endFailedRuns: (
       messageId: string,
@@ -141,8 +142,9 @@ export class IntakeLedger extends Context.Service<
 /**
  * Own tables in Mastra's LibSQL database, keyed by `message_id`: one row per processed Intake,
  * one per succeeded branch (a Forwarding per target, a Filing per Document), written as each
- * succeeds, and one per failed run of an Intake, kept after a later success and removed (but for
- * the last, marked `ended`) when the Intake fails permanently. A row is never replaced:
+ * succeeds, and one per failed run of an Intake, kept after a later success and removed when the
+ * Intake fails permanently (but for the row of the run it failed on, marked `ended`, if there is
+ * one). A row is never replaced:
  * `ON CONFLICT DO NOTHING` keeps the first.
  */
 const CREATE_TABLES = [
@@ -382,17 +384,24 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
         endFailedRuns: (messageId, runId) =>
           Effect.gen(function* () {
             const id = yield* key(messageId);
-            const what = `ending the failed runs of ${id}`;
-            yield* execute(
-              "DELETE FROM hex_intake_failed_runs WHERE message_id = ? AND run_id IS NOT ?",
-              [id, runId ?? null],
-              what,
-            );
-            yield* execute(
-              "UPDATE hex_intake_failed_runs SET ended = 1 WHERE message_id = ?",
-              [id],
-              what,
-            );
+            // Ended first, so even statement by statement no state left between them counts.
+            yield* Effect.tryPromise({
+              try: () =>
+                client.batch(
+                  [
+                    {
+                      sql: "UPDATE hex_intake_failed_runs SET ended = 1 WHERE message_id = ?",
+                      args: [id],
+                    },
+                    {
+                      sql: "DELETE FROM hex_intake_failed_runs WHERE message_id = ? AND run_id IS NOT ?",
+                      args: [id, runId ?? null],
+                    },
+                  ],
+                  "write",
+                ),
+              catch: ledgerError(`ending the failed runs of ${id}`),
+            });
           }),
       };
     }),

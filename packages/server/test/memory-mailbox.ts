@@ -91,7 +91,11 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
   const watched = () => folders.get(folder)!;
   const checkValidity = (what: string) => {
     if (listedValidity !== uidValidity) {
-      throw failure(what, "the folder's UIDs changed since it was listed (UIDVALIDITY)", false);
+      throw new MailboxError({
+        message: `127.0.0.1:993, folder ${folder}: ${what} failed: the folder's UIDs changed since it was listed (UIDVALIDITY)`,
+        connectionLost: false,
+        listingStale: true,
+      });
     }
   };
   const moveOut = (mails: readonly StoredMail[], to: MailOutcome) => {
@@ -162,9 +166,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
         moveOut(copies, to);
         return copies.length;
       }),
+    // Named apart from the move by Message-ID, so a test can refuse just this one.
     moveUid: (uid, to) =>
-      operation(`moving mail to ${outcomeFolder(to)}`, () => {
-        checkValidity(`moving mail to ${outcomeFolder(to)}`);
+      operation(`moving mail to ${outcomeFolder(to)} by UID`, () => {
+        checkValidity(`moving mail to ${outcomeFolder(to)} by UID`);
         const mails = watched().filter((mail) => mail.uid === uid);
         moveOut(mails, to);
         return mails.length > 0;

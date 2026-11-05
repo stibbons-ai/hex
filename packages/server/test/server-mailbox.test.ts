@@ -27,8 +27,15 @@ afterAll(async () => {
 });
 
 test("a boot sweep that fails still starts the watcher", async () => {
-  const sweep = spyOn(Mastra.prototype, "restartAllActiveWorkflowRuns").mockRejectedValueOnce(
-    new Error("reading the workflow runs failed"),
+  const logged: unknown[][] = [];
+  // Mastra's logger is silenced; the failing sweep listens on it as it fails.
+  const sweep = spyOn(Mastra.prototype, "restartAllActiveWorkflowRuns").mockImplementationOnce(
+    function (this: Mastra) {
+      spyOn(this.getLogger(), "error").mockImplementation((...args: unknown[]) => {
+        logged.push(args);
+      });
+      return Promise.reject(new Error("reading the workflow runs failed"));
+    },
   );
   const paths = {
     databasePath: join(directory, "mastra.db"),
@@ -53,6 +60,10 @@ test("a boot sweep that fails still starts the watcher", async () => {
   try {
     await within(server.booted, "the boot");
     expect(sweep).toHaveBeenCalledTimes(1);
+    expect(logged).toContainEqual([
+      "hex: restarting the active workflow runs failed; their Intakes wait",
+      new Error("reading the workflow runs failed"),
+    ]);
     await within(mailbox.waiting(), "the watcher's first look");
     expect(mailbox.messageIds("hex/processed")).toEqual(["swept@shop.example"]);
   } finally {

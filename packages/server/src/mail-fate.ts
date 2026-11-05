@@ -73,9 +73,10 @@ export const moveMail = <To extends MailOutcome>(messageId: string, to: To) =>
 
 /**
  * The Intake fails permanently, on the run `runId` if a run is at hand: its failed runs stop
- * counting, so moving it back retries it afresh, and its mail goes to `hex/failed`. Ended first:
- * a move that fails leaves the Intake retried rather than stuck; the run's own row stays, so a
- * repeat of its step after a restart still ends here.
+ * counting (in one transaction), so moving it back retries it afresh, and its mail goes to
+ * `hex/failed`. Ended first: a move that fails leaves the Intake run afresh by the watcher (a
+ * new series of runs) rather than stuck; the run's own row stays, so a repeat of its step after a
+ * restart still ends here.
  */
 export const failPermanently = (messageId: string, runId?: string) =>
   IntakeLedger.use((ledger) => ledger.endFailedRuns(messageId, runId)).pipe(
@@ -109,16 +110,16 @@ export function describeMove(mail: MailFate): string {
     case "not-moved":
       return `moving its mail to ${outcomeFolder(mail.to)} failed (${mail.reason})`;
     case "kept-for-retry":
-      return "a mail of it in the watched folder stays there for a retry";
+      return "any mail of it in the watched folder stays there";
   }
 }
 
 /** A failed run's consequence for the Intake, as Daniel reads it after the failure. */
 export function describeFailedRun({ failedRuns, mail }: FailedRun): string {
-  if (failedRuns >= MAX_FAILED_RUNS) {
+  if (mail.status !== "kept-for-retry") {
     return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, so the Intake failed permanently: ${describeMove(mail)}`;
   }
-  return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}: ${describeMove(mail)}, which the mailbox watcher retries no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
+  return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}: ${describeMove(mail)}; the mailbox watcher runs it again no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
 }
 
 /** What happened to the mail, as a failed run's error carries it (from the move step), if it does. */
