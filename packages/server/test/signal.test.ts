@@ -14,7 +14,7 @@ import type { Adapter } from "chat";
 import { type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
 import { CHAT_STATE_TYPE } from "../src/chat-state";
-import { loadChatConfig } from "../src/config";
+import { loadChatConfig } from "../src/channels";
 import {
   BOT_ACCOUNT,
   DANIEL,

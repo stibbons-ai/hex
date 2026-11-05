@@ -11,7 +11,7 @@ import { CHAT_AGENT_ID, CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } fr
 import { chatStores } from "../src/chat-state";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 import { REPLY, heldModel, mockModel, numberedModel, toolCallingModel } from "./mock-model";
-import { stored } from "./server-helpers";
+import { serverOptions as freshServerOptions, stored } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 const DANIEL = "U0DANIEL";
@@ -38,13 +38,7 @@ function chatOptions(adapter: FakeChatAdapter, model = mockModel()): ChatOptions
 }
 
 function serverOptions(chat: ChatOptions, options: Partial<ServerOptions> = {}): ServerOptions {
-  return {
-    databasePath: join(directory, `chat-${databases++}`, "mastra.db"),
-    port: 0,
-    logger: false,
-    chat,
-    ...options,
-  };
+  return freshServerOptions(directory, `chat-${databases++}`, { chat, ...options });
 }
 
 async function start(model = mockModel()) {

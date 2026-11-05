@@ -27,7 +27,9 @@ bun run start
 The server binds to `127.0.0.1` only, on `HEX_PORT` (default `4111`; `0` picks a free port), and
 answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (on port
 80 also `127.0.0.1` and `localhost` without the port; 403 otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
-`<data dir>/mastra.db`. The data directory is `HEX_DATA_DIR`, default `.data` relative to the
+`<data dir>/mastra.db`, and the traces, logs and metrics of every agent call and workflow run in
+a DuckDB file, `<data dir>/observability.duckdb` (see [Traces and Studio](#traces-and-studio)).
+The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
 SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first, then
@@ -58,8 +60,51 @@ const hex = createORPCClient<ContractRouterClient<typeof contract>>(
 await hex.workflows.list();
 ```
 
-Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
-routes don't work against this entrypoint.
+Mastra's own REST routes (`/api/...`) are not served, so Studio and other clients of those routes
+don't work against this entrypoint; Studio runs as its own dev-only server instead.
+
+## Traces and Studio
+
+hex traces every agent call and workflow run of the server (`bun run start`) with Mastra's
+observability into the DuckDB file `<data dir>/observability.duckdb` (`@mastra/duckdb`), next to
+`mastra.db`, which keeps memory, workflow state and the Intake ledger. `bun run intake` is not
+traced: it runs beside a running server, which holds the DuckDB file (see below). The storage
+exporter is the only exporter: nothing is sent anywhere. Spans are written in batches a few
+seconds apart; a normal stop (SIGINT/SIGTERM) flushes them, a killed process loses the unwritten
+ones, and so does a final flush that fails (the exporter logs it; the stop still succeeds).
+
+To look at them, open Mastra Studio (dev machine only):
+
+```sh
+bun run studio   # stop `bun run start` first
+```
+
+then browse to `http://localhost:4111` (or `PORT`): Observability → Traces lists the runs with
+their spans, input and output, Logs and Metrics the rest. Studio serves the same Mastra as hex
+(`packages/server/src/mastra.ts`, built from `packages/server/src/studio/index.ts`) on the same
+`mastra.db` and `observability.duckdb`, with the same `HEX_DATA_DIR`, `HEX_OUTBOX_DIR` and
+`HEX_CONFIG`: the Intake workflow and, when `HEX_CONFIG` is set, the chat agent with its model,
+memory and working memory, but without its channels. Studio never connects to Slack or Signal;
+calling the agent or running the Intake from Studio does the real thing (model calls, files in
+the Outbox, ledger entries) and is traced like any other run.
+
+- **One process at a time.** DuckDB lets one process open the file. While Studio runs, `bun run
+  start` fails at startup with `Could not set lock on file ".../observability.duckdb":
+  Conflicting lock is held`. The other way round, Studio starts, but every storage call (memory
+  and workflow runs too, not only traces) fails with that error and is retried on the next call
+  until hex stops. Stop one before starting the other.
+- **How it runs.** `bun run studio` is `bun run studio:build && bun run studio:start`: the
+  `mastra` CLI, through `bunx --minimum-release-age 259200 mastra@1.36.0` (never a hex
+  dependency), runs `mastra build --studio` into the git-ignored `.mastra/output`, then
+  `mastra start` serves it. A manifest rule requires the exact pin and the release-age flag, and
+  the same version in both scripts. Which Mastra server code that pulls in, its versions and
+  peer range against hex's `@mastra/core`, what the build installs into `.mastra/output`, and why
+  the bundle's enterprise (ee) import stays off hex's runtime: see
+  [ADR 0004](docs/adr/0004-orpc-api-instead-of-mastra-routes.md). `mastra dev` does not work
+  with hex (same ADR), so there is no hot reload: rerun `bun run studio` after changing code.
+  The build's `Invalid Mastra config` warning is harmless. Studio prints the data files it uses
+  (`hex studio: data in …`) at startup.
+- Mastra's and Bun's telemetry stay off (`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`).
 
 ## Intake (dev command)
 

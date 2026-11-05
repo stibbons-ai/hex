@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "../src";
 import type { ServerOptions } from "../src";
-import { loadChatConfig } from "../src/config";
+import { loadChatConfig } from "../src/channels";
 import { DANIEL, type FakeSlack, directMessage, fakeSlack, slackEnv } from "./fake-slack";
 import { REPLY, mockModel } from "./mock-model";
 import { serverOptions } from "./server-helpers";

@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
 import { dateExtractorLayer } from "@hex/adapters";
 import { closeInOrder } from "./close";
-import { loadChatConfig, loadIntakeConfig } from "./config";
+import { loadChatConfig } from "./channels";
+import { loadIntakeConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
@@ -50,6 +51,7 @@ const disposeAfterFailure = (error: unknown) =>
 await intakeRuntime.context().catch(disposeAfterFailure);
 const starting = startServer({
   databasePath: paths.databasePath,
+  observabilityPath: paths.observabilityPath,
   port,
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category }),

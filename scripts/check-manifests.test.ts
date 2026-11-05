@@ -210,6 +210,54 @@ describe("manifest policy", () => {
     ]);
   });
 
+  const prefix = "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ";
+
+  test.each([
+    ["bunx --minimum-release-age 259200 mastra dev", "mastra"],
+    ["bunx --minimum-release-age 259200 mastra@latest dev", "mastra@latest"],
+    ["bunx --minimum-release-age 259200 mastra@1.36 dev", "mastra@1.36"],
+    ["bunx --bun --minimum-release-age 259200 mastra@1 dev", "mastra@1"],
+    ["bun x --minimum-release-age 259200 @mastra/cli dev", "@mastra/cli"],
+  ])("rejects bunx without an exact version: %j", (command, spec) => {
+    const scripts = { studio: `${prefix}${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      `package.json: scripts.studio runs bunx ${spec}, which must name an exact version (<package>@<x.y.z>)`,
+    ]);
+  });
+
+  test.each([
+    "bunx mastra@1.36.0 dev",
+    "bunx --minimum-release-age 86400 mastra@1.36.0 dev",
+    "bunx --minimum-release-age mastra@1.36.0 dev",
+  ])("rejects bunx without a 3-day minimum release age: %j", (command) => {
+    const scripts = { studio: `${prefix}${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      expect.stringMatching(
+        /^package\.json: scripts\.studio runs bunx mastra@1\.36\.0 without --minimum-release-age 259200 or more/,
+      ),
+    ]);
+  });
+
+  test.each([
+    "bunx --minimum-release-age 259200 mastra@1.36.0 dev",
+    "bunx --bun --minimum-release-age 604800 @mastra/cli@1.36.0-alpha.1 dev",
+  ])("accepts bunx pinned exactly, with the release age: %j", (command) => {
+    const scripts = { studio: `${prefix}${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([]);
+  });
+
+  test("scripts running the same package with bunx run the same version", () => {
+    const bunx = `${prefix}bunx --minimum-release-age 259200`;
+    const scripts = {
+      "studio:build": `${bunx} mastra@1.36.0 build`,
+      "studio:start": `${bunx} mastra@1.37.0 start`,
+      other: `${bunx} cowsay@1.6.0 hi`,
+    };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      "package.json: scripts run bunx mastra at different versions: 1.36.0, 1.37.0",
+    ]);
+  });
+
   test.each([
     [
       { dependencies: { effect: "catalog:", hono: "catalog:" } },

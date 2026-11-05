@@ -1,6 +1,5 @@
-import { createLocalStore } from "@hex/adapters";
 import type { IMastraLogger } from "@mastra/core/logger";
-import { Mastra } from "@mastra/core/mastra";
+import type { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
 import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
@@ -8,6 +7,7 @@ import { createChatAgent } from "./chat";
 import type { ChatAgent, ChatOptions } from "./chat";
 import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
+import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
 import { router } from "./router";
 
@@ -23,6 +23,11 @@ const HOSTNAME = "127.0.0.1";
 export interface ServerOptions {
   /** LibSQL database file; its directory is created if missing. */
   databasePath: string;
+  /**
+   * DuckDB file for traces, logs and metrics; its directory is created if missing. One process at
+   * a time can open it.
+   */
+  observabilityPath: string;
   /** TCP port; 0 picks a free one. */
   port: number;
   /**
@@ -71,8 +76,9 @@ export interface RunningServer {
   /**
    * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
    * accepting requests and gives in-flight ones (open streams and chat replies included)
-   * `stopGraceMs` before closing them, then shuts Mastra down (which closes the store) and closes
-   * the store again as a fallback. Each step runs even if an earlier one fails; a step cut short
+   * `stopGraceMs` before closing them, then shuts Mastra down and closes the store. Mastra closes
+   * the store before its final trace flush, which reopens the DuckDB file, so the last close is
+   * what releases the file's lock. Each step runs even if an earlier one fails; a step cut short
    * is logged. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
@@ -89,6 +95,7 @@ export interface RunningServer {
  */
 export async function startServer({
   databasePath,
+  observabilityPath,
   port,
   logger,
   workflows,
@@ -96,7 +103,7 @@ export async function startServer({
   chat,
   chatStartTimeoutMs = DEFAULT_CHAT_START_TIMEOUT_MS,
 }: ServerOptions): Promise<RunningServer> {
-  const storage = await createLocalStore(databasePath);
+  const storage = await createHexStore({ databasePath, observabilityPath });
   // Slack: closes the socket (and stops its reconnect loop). Every adapter is disconnected even
   // if another fails. Safe to run more than once.
   const disconnectChat = () =>
@@ -130,11 +137,11 @@ export async function startServer({
   try {
     await storage.init();
     chatAgent = chat ? createChatAgent(chat, await chatStores(storage)) : undefined;
-    const mastra = new Mastra({
+    const mastra = createHexMastra({
       storage,
-      ...(logger === undefined ? {} : { logger }),
-      ...(workflows ? { workflows } : {}),
-      ...(chatAgent ? { agents: { [chatAgent.agent.id]: chatAgent.agent } } : {}),
+      logger,
+      workflows,
+      agents: chatAgent && { [chatAgent.agent.id]: chatAgent.agent },
     });
     if (chat && chatAgent) {
       // Mastra starts the channels without awaiting them and only logs a failure (so a failed
@@ -253,6 +260,8 @@ export async function startServer({
             }
           },
           () => mastra.shutdown(),
+          // Required, not a fallback: Mastra 1.80's shutdown() closes the store and then flushes
+          // the last spans, reopening DuckDB; only this releases the file's lock.
           () => storage.close(),
         ]),
     };
