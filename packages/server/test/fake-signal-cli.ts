@@ -1,6 +1,8 @@
 // A fake signal-cli HTTP daemon (`signal-cli daemon --http`, the 0.14.9 wire protocol) on
 // loopback: JSON-RPC on `POST /api/v1/rpc`, receive events as server-sent events on
-// `GET /api/v1/events`, health on `GET /api/v1/check`. Never reaches Signal.
+// `GET /api/v1/events`, health on `GET /api/v1/check`. Never reaches Signal. Like signal-cli, it
+// numbers its events and keeps the last 1000 for replay: a stream opened with a `Last-Event-ID`
+// it holds gets the events after it, one with an ID it doesn't hold gets them all.
 import type { Server } from "bun";
 import { within } from "./timeouts";
 
@@ -16,6 +18,9 @@ export interface RpcCall {
   /** The JSON-RPC error code the fake answered with, if it answered with an error. */
   error?: number;
 }
+
+/** Events signal-cli 0.14.9 keeps for replay (`SseEventBuffer.MAX_EVENTS`). */
+const REPLAY_BUFFER_EVENTS = 1000;
 
 export interface FakeSignalCliOptions {
   /** Accounts the daemon serves; default: the bot account. */
@@ -46,19 +51,22 @@ export interface FakeSignalCli {
   /**
    * Sends one receive event, a text message, to every open event stream: 1:1, or in the Group
    * {@link GROUP_ID} with `group`, there with a native @mention of the bot when `mention` is set.
+   * Returns the event's ID.
    */
   receive(message: {
     aci: string;
     text: string;
     number?: string;
     group?: { mention: boolean };
-  }): void;
+  }): string;
+  /** The `Last-Event-ID` of every event-stream request, in order; `null` when it sent none. */
+  lastEventIds: (string | null)[];
   /** Open event streams right now. */
   openStreams(): number;
   /** Event streams opened so far, closed ones included. */
   streamsOpenedEver(): number;
-  /** Resolves once an event stream has been opened (it may be closed again by then). */
-  streamOpened(): Promise<void>;
+  /** Resolves once `count` (default 1) event streams have been opened, closed ones included. */
+  streamOpened(count?: number): Promise<void>;
   /** Resolves once no event stream is open, the client having closed them all. */
   streamsClosed(): Promise<void>;
   /** Resolves with the first `count` `send` calls. Every wait here gives up after 2 s. */
@@ -77,6 +85,9 @@ export function fakeSignalCli({
   const calls: RpcCall[] = [];
   const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const encoder = new TextEncoder();
+  /** Sent events, oldest first, as signal-cli's replay buffer holds them. */
+  const buffer: { id: string; event: Uint8Array }[] = [];
+  const lastEventIds: (string | null)[] = [];
   let opened = 0;
   let eventId = 0;
   let sendTimestamp = 1_700_000_000_000;
@@ -137,6 +148,8 @@ export function fakeSignalCli({
         return new Response(null, { status: 200 });
       }
       if (pathname === "/api/v1/events" && request.method === "GET") {
+        const lastEventId = request.headers.get("last-event-id");
+        lastEventIds.push(lastEventId);
         await eventsHold;
         let self: ReadableStreamDefaultController<Uint8Array>;
         const close = () => {
@@ -155,6 +168,11 @@ export function fakeSignalCli({
             // Bun sends the headers with the first chunk; signal-cli sends them at once. A comment
             // line (as signal-cli's keep-alive) gets them out without an event.
             controller.enqueue(encoder.encode(":\n\n"));
+            if (lastEventId !== null) {
+              // An ID the buffer doesn't hold (-1) replays all of it.
+              const after = buffer.findIndex(({ id }) => id === lastEventId) + 1;
+              for (const { event } of buffer.slice(after)) controller.enqueue(event);
+            }
             streams.add(controller);
             opened++;
             changed();
@@ -193,6 +211,7 @@ export function fakeSignalCli({
     url: `http://127.0.0.1:${server.port}`,
     paths,
     calls,
+    lastEventIds,
     streamsOpenedEver: () => opened,
     receive({ aci, text, number, group }) {
       const timestamp = receiveTimestamp++;
@@ -222,11 +241,16 @@ export function fakeSignalCli({
         },
       };
       const data = JSON.stringify({ account: BOT_ACCOUNT, envelope });
-      const event = encoder.encode(`id:run-${++eventId}\nevent:receive\ndata:${data}\n\n`);
+      const id = `run-${++eventId}`;
+      const event = encoder.encode(`id:${id}\nevent:receive\ndata:${data}\n\n`);
+      buffer.push({ id, event });
+      if (buffer.length > REPLAY_BUFFER_EVENTS) buffer.shift();
       for (const stream of streams) stream.enqueue(event);
+      return id;
     },
     openStreams: () => streams.size,
-    streamOpened: () => until(() => opened > 0, "the Signal event stream to open"),
+    streamOpened: (count = 1) =>
+      until(() => opened >= count, `${count} Signal event stream(s) to open`),
     streamsClosed: () => until(() => streams.size === 0, "the Signal event streams to close"),
     async sends(count) {
       await until(() => sendCalls().length >= count, `${count} signal-cli send call(s)`);

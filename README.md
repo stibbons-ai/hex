@@ -241,12 +241,16 @@ it.
   in hex's log. Under `concurrent`, a message joined the run in progress, but Mastra
   finished it in a run that a stop could cut off before it was saved, and two first messages of a
   new conversation could land in two memory threads.
-- The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
-  subscriptions), so a restart starts at live events. Lost are messages hex had received but not
-  answered within the 5-second stop grace, or when it crashed, and messages signal-cli took off
-  Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s, longer
-  when the host itself is gone). Messages sent while no event stream was connected stay at Signal
-  and arrive once hex connects (with `--receive-mode on-connection`).
+- hex keeps the adapter's receive cursor (the last event it finished handling) in its database,
+  so a restarted hex resumes the event stream there: signal-cli replays the messages hex had
+  received but not answered within the 5-second stop grace, or when it crashed, and those
+  signal-cli took off Signal after hex was gone (it notices only at its next keep-alive, within
+  about 15-30 s, longer when the host itself is gone). Messages sent while no event stream was
+  connected stay at Signal and arrive once hex connects (with `--receive-mode on-connection`).
+  What is still lost: everything signal-cli held for replay when signal-cli itself restarts (it
+  keeps its buffer in memory), and anything older than its last 1000 events. If only the event
+  stream reconnected (hex kept running), the Chat SDK's dedupe can skip a replayed message whose
+  answer a crash cut off, for as long as its dedupe entry lasts.
 - If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
   30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
   does while Slack's socket reconnects.

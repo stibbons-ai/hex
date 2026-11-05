@@ -10,6 +10,7 @@ import type { MastraModelConfig } from "@mastra/core/llm";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { Memory } from "@mastra/memory";
 import type { Adapter } from "chat";
+import { ChatState, type ChatStores } from "./chat-state";
 
 /** Every allowlisted conversation, on every channel, shares this memory resource (Daniel's). */
 export const CHAT_RESOURCE_ID = "daniel";
@@ -112,7 +113,10 @@ function logToolCalls(logger: IMastraLogger | undefined, content: StepContent) {
  * Throws when there are no channels, or when a channel's key differs from its adapter's name,
  * since the allowlist is looked up by that name.
  */
-export function createChatAgent({ model, providerOptions, channels }: ChatOptions): ChatAgent {
+export function createChatAgent(
+  { model, providerOptions, channels }: ChatOptions,
+  stores: ChatStores,
+): ChatAgent {
   const entries = Object.entries(channels);
   if (entries.length === 0) throw new Error("chat needs at least one channel");
   const allowlists: Record<string, readonly string[]> = {};
@@ -187,6 +191,9 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
     memory: new Memory({ options: { workingMemory: { enabled: true, scope: "resource" } } }),
     channels: {
       adapters,
+      // Mastra's own state adapter, built as core would build it (the agent's id as owner), but
+      // with the Signal receive cursor persisted.
+      state: new ChatState(stores, () => agent.id),
       handlers: {
         onDirectMessage: guard,
         onMention: guard,
