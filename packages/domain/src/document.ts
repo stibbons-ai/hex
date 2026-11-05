@@ -52,7 +52,7 @@ function imageExtension(mimeType: string): string | undefined {
   return Object.hasOwn(IMAGE_EXTENSIONS, type) ? IMAGE_EXTENSIONS[type] : undefined;
 }
 
-function isPdf({ mimeType, fileName }: AttachmentFacts): boolean {
+function isPdf({ mimeType, fileName }: Pick<AttachmentFacts, "mimeType" | "fileName">): boolean {
   const type = baseMimeType(mimeType);
   if (type === "application/pdf") return true;
   return type === "application/octet-stream" && /\.pdf$/i.test(fileName?.trim() ?? "");
@@ -76,6 +76,66 @@ export function isDocument(attachment: AttachmentFacts): boolean {
 /** The extension (with its dot) a Document of this MIME type is filed with when it has no name. */
 export function documentExtension(mimeType: string): string {
   return imageExtension(mimeType) ?? ".pdf";
+}
+
+/**
+ * Image types hex hands a model, each with the leading bytes (`undefined`: any byte) its content
+ * starts with: a stricter subset of the signatures Mastra checks before it sends an image
+ * (`isValidInlineContent`, which also passes BMP, TIFF, AVIF and HEIF). They are the types OpenAI
+ * and Anthropic both document as image input (GIF only static: OpenAI takes non-animated GIFs,
+ * Anthropic reads the first frame). The default model is OpenAI's; Google's Gemini documents PNG,
+ * JPEG, WebP, HEIC and HEIF, so GIF is unverified there. Other images (HEIC, HEIF, TIFF, BMP)
+ * OpenAI and Anthropic reject, which would fail every run of the Intake.
+ */
+const MODEL_IMAGE_SIGNATURES: readonly (readonly [string, readonly (number | undefined)[]])[] = [
+  ["image/jpeg", [0xff, 0xd8]],
+  ["image/png", [0x89, 0x50, 0x4e, 0x47]],
+  ["image/gif", [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]],
+  ["image/gif", [0x47, 0x49, 0x46, 0x38, 0x39, 0x61]],
+  [
+    "image/webp",
+    [0x52, 0x49, 0x46, 0x46, undefined, undefined, undefined, undefined, 0x57, 0x45, 0x42, 0x50],
+  ],
+];
+
+/**
+ * The leading bytes a PDF's `%PDF` header must lie within, as Mastra's `isValidInlineContent`
+ * checks before sending one (the first 1026 bytes): the header may start at byte 1022 at the
+ * latest.
+ */
+const PDF_HEADER_WINDOW = 1026;
+
+const PDF_HEADER = [0x25, 0x50, 0x44, 0x46]; // %PDF
+
+function hasPdfHeader(content: Uint8Array): boolean {
+  const end = Math.min(content.length, PDF_HEADER_WINDOW) - PDF_HEADER.length;
+  for (let start = 0; start <= end; start++) {
+    if (PDF_HEADER.every((byte, offset) => content[start + offset] === byte)) return true;
+  }
+  return false;
+}
+
+/**
+ * The media type to hand a Document to a model as, so it can read the Document date, decided by
+ * its declared type and its content: a PDF (`application/octet-stream` named `*.pdf` too) as
+ * `application/pdf` when `%PDF` lies within its first 1026 bytes; an image as the type its
+ * content's signature names (JPEG, PNG, GIF87a/89a, WebP), whatever type it was declared as.
+ * Only content hex recognises as one of these is sent; anything else is undefined, never sent,
+ * and filed by its received date, for one of two reasons: content matching none of Mastra's
+ * signatures (no valid PDF or image) Mastra would replace by a placeholder text the model
+ * answers blind; image content Mastra does pass (HEIC, HEIF, TIFF, BMP, or AVIF declared as
+ * another image type) OpenAI and Anthropic refuse, failing the run every time. A type that is no
+ * Document is undefined too.
+ */
+export function documentMediaType(
+  attachment: Pick<AttachmentFacts, "mimeType" | "fileName"> & { readonly content: Uint8Array },
+): string | undefined {
+  const { content } = attachment;
+  if (isPdf(attachment)) return hasPdfHeader(content) ? "application/pdf" : undefined;
+  if (imageExtension(attachment.mimeType) === undefined) return undefined;
+  return MODEL_IMAGE_SIGNATURES.find(([, prefix]) =>
+    prefix.every((byte, offset) => byte === undefined || content[offset] === byte),
+  )?.[0];
 }
 
 /** A Content-ID as compared with `cid:` references: no angle brackets, trimmed, lowercase. */

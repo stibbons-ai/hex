@@ -2,14 +2,17 @@
 // `.eml` against the configured data directory and Outbox, and prints what it did.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { messageOf, readEml } from "@hex/adapters";
+import { dateExtractorLayer, messageOf, readEml } from "@hex/adapters";
 import { Effect } from "effect";
 import { loadIntakeConfig } from "./config";
 import { runIntake } from "./intake-workflow";
 import type { IntakeResult } from "./intake-workflow";
 import { dataPaths } from "./paths";
 
-/** The outcome as Daniel reads it: where each Document went, or why nothing was filed. */
+/**
+ * The outcome as Daniel reads it: where each Document went, marking those filed by the received
+ * date because no Document date was found, or why nothing was filed.
+ */
 function describe({ messageId, status, filings }: IntakeResult, outboxDirectory: string): string {
   if (status === "already-processed") {
     return `hex intake: ${messageId} was already processed; nothing filed`;
@@ -18,7 +21,10 @@ function describe({ messageId, status, filings }: IntakeResult, outboxDirectory:
   const count = filings.length === 1 ? "1 Document" : `${filings.length} Documents`;
   return [
     `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
-    ...filings.map(({ path }) => `  ${path}`),
+    ...filings.map(
+      ({ path, fellBack }) =>
+        `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
+    ),
   ].join("\n");
 }
 
@@ -30,9 +36,13 @@ async function main(argv: readonly string[]): Promise<string> {
   });
   const intake = await Effect.runPromise(readEml(bytes, source));
   const configPath = process.env.HEX_CONFIG;
-  const { category } = await loadIntakeConfig(configPath ? resolve(configPath) : undefined);
+  const { category, model } = await loadIntakeConfig(configPath ? resolve(configPath) : undefined);
   const paths = dataPaths(process.env);
-  return describe(await runIntake(intake, { paths, category }), paths.outboxDirectory);
+  const dateExtractor = dateExtractorLayer(model);
+  return describe(
+    await runIntake(intake, { paths, category, dateExtractor }),
+    paths.outboxDirectory,
+  );
 }
 
 try {

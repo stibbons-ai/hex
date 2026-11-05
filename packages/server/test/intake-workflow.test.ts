@@ -1,13 +1,20 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IntakeLedger, intakeLedgerLayer, readEml } from "@hex/adapters";
-import type { Intake } from "@hex/adapters";
+import {
+  DateExtractionError,
+  DateExtractor,
+  IntakeLedger,
+  intakeLedgerLayer,
+  readEml,
+} from "@hex/adapters";
+import type { DocumentFile, Intake } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { runIntake } from "../src/intake-workflow";
-import { buildEml, bytes, pdf } from "./eml";
+import { buildEml, bytes, jpegBytes, pdf, pdfBytes } from "./eml";
 import type { Mail } from "./eml";
 
 let directory: string;
@@ -24,16 +31,42 @@ afterAll(async () => {
 /** 00:30 on 1 November in Berlin: filed under November although it is still October in UTC. */
 const received = "Sat, 31 Oct 2026 23:30:00 +0000";
 
-/** A fresh data directory and Outbox, and the real Intake workflow on them. */
-function freshHex() {
+/** The model's answer when a Document shows no date. */
+const NO_DATE = { year: null, month: null, day: null };
+
+/**
+ * What the scripted DateExtractor answers for a Document, standing in for the model's answer;
+ * an Error fails the call as a failed model call would.
+ */
+type Script = (document: DocumentFile) => unknown;
+
+/**
+ * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
+ * DateExtractor that answers by `script` and records every Document it was asked about.
+ */
+function freshHex(script: Script = () => NO_DATE) {
   const root = join(directory, `hex-${instances++}`);
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
+  const asked: DocumentFile[] = [];
+  const dateExtractor = Layer.succeed(DateExtractor, {
+    extract: (document) =>
+      Effect.suspend(() => {
+        asked.push(document);
+        const answer = script(document);
+        return answer instanceof Error
+          ? Effect.fail(new DateExtractionError({ message: answer.message }))
+          : Effect.succeed(answer);
+      }),
+  });
+  /** Runs the workflow once on `intake`, as the dev command does, and returns its result. */
+  const run = (intake: Intake) => runIntake(intake, { paths, category: "ER", dateExtractor });
   return {
     ...paths,
-    /** Runs the workflow once on `mail`, as the dev command does, and returns its result. */
+    asked,
+    run,
+    /** Runs the workflow once on `mail` read as an `.eml`. */
     async process(mail: Mail) {
-      const intake = await Effect.runPromise(readEml(buildEml(mail), "test.eml"));
-      return runIntake(intake, { paths, category: "ER" });
+      return run(await Effect.runPromise(readEml(buildEml(mail), "test.eml")));
     },
     /** Every file in the Outbox, relative, with its content. */
     async outbox(): Promise<Record<string, string>> {
@@ -58,39 +91,205 @@ function freshHex() {
 }
 
 describe("Intake workflow", () => {
-  test("happy path: files each Document under the received month, records the Intake", async () => {
-    const hex = freshHex();
-    const scan = bytes(MIN_IMAGE_DOCUMENT_BYTES, "s");
+  test("happy path: files each Document by its Document date, records the Intake", async () => {
+    const dates: Record<string, unknown> = {
+      a: { year: 2026, month: 9, day: 15 },
+      s: { year: 2026, month: 10, day: 3 },
+      b: { year: 2026, month: 9, day: 30 },
+    };
+    // Answers by the Document's filler, which is a run of one letter after its header.
+    const hex = freshHex(({ content }) => dates[String.fromCharCode(content.at(-1)!)]);
+    const first = pdfBytes(500, "a");
+    const scan = jpegBytes(MIN_IMAGE_DOCUMENT_BYTES, "s");
+    const second = pdfBytes(500, "b");
     const result = await hex.process({
       messageId: "happy@shop.example",
       received,
       parts: [
-        pdf("Rechnung 2026-10.pdf", bytes(500, "a")),
+        pdf("Rechnung 2026-10.pdf", first),
         {
           contentType: "image/jpeg",
           disposition: "attachment",
           fileName: "Beleg.jpg",
           content: scan,
         },
-        pdf("Rechnung 2026-10.pdf", bytes(500, "b")),
+        pdf("Rechnung 2026-10.pdf", second),
       ],
     });
     const filings = [
-      { index: 0, path: "2026-11/ER/Rechnung 2026-10.pdf" },
-      { index: 1, path: "2026-11/ER/Beleg.jpg" },
-      { index: 2, path: "2026-11/ER/Rechnung 2026-10 (1).pdf" },
+      { index: 0, path: "2026-09/ER/Rechnung 2026-10.pdf", fellBack: false },
+      { index: 1, path: "2026-10/ER/Beleg.jpg", fellBack: false },
+      { index: 2, path: "2026-09/ER/Rechnung 2026-10 (1).pdf", fellBack: false },
     ];
     expect(result).toEqual({
       messageId: "happy@shop.example",
       status: "processed",
       filings,
     });
+    const text = (content: Uint8Array) => new TextDecoder().decode(content);
     expect(await hex.outbox()).toEqual({
-      "2026-11/ER/Rechnung 2026-10.pdf": "a".repeat(500),
-      "2026-11/ER/Beleg.jpg": "s".repeat(MIN_IMAGE_DOCUMENT_BYTES),
-      "2026-11/ER/Rechnung 2026-10 (1).pdf": "b".repeat(500),
+      "2026-09/ER/Rechnung 2026-10.pdf": text(first),
+      "2026-10/ER/Beleg.jpg": text(scan),
+      "2026-09/ER/Rechnung 2026-10 (1).pdf": text(second),
     });
     expect(await hex.ledger("happy@shop.example")).toMatchObject({ documentCount: 3, filings });
+    // Each Document went to the extractor whole, with the media type the model gets.
+    expect(hex.asked).toEqual([
+      { content: first, mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
+      { content: scan, mediaType: "image/jpeg", fileName: "Beleg.jpg" },
+      { content: second, mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
+    ]);
+  });
+
+  test.each([
+    ["no date found (all null)", NO_DATE],
+    ["some fields null", { year: 2026, month: 9, day: null }],
+    ["no answer (Mastra couldn't parse it)", undefined],
+    ["not an object", "15.09.2026"],
+    ["string fields", { year: "2026", month: "9", day: "15" }],
+    ["a fractional day", { year: 2026, month: 9, day: 15.5 }],
+    ["30 February", { year: 2026, month: 2, day: 30 }],
+    ["month 13", { year: 2026, month: 13, day: 1 }],
+    ["a two-digit year", { year: 26, month: 9, day: 15 }],
+  ])("an answer with %s files by the received date, flagged", async (_case, answer) => {
+    const hex = freshHex(() => answer);
+    const result = await hex.process({
+      messageId: "fallback@shop.example",
+      received,
+      parts: [pdf("Rechnung.pdf")],
+    });
+    const filings = [{ index: 0, path: "2026-11/ER/Rechnung.pdf", fellBack: true }];
+    expect(result).toEqual({ messageId: "fallback@shop.example", status: "processed", filings });
+    expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Rechnung.pdf"]);
+    expect(await hex.ledger("fallback@shop.example")).toMatchObject({ filings });
+  });
+
+  test("a mixed Intake: one Document by its date, one by the received date", async () => {
+    const hex = freshHex(({ fileName }) =>
+      fileName === "dated.pdf" ? { year: 2025, month: 12, day: 31 } : NO_DATE,
+    );
+    const result = await hex.process({
+      messageId: "mixed-dates@shop.example",
+      received,
+      parts: [pdf("dated.pdf"), pdf("undated.pdf")],
+    });
+    const filings = [
+      { index: 0, path: "2025-12/ER/dated.pdf", fellBack: false },
+      { index: 1, path: "2026-11/ER/undated.pdf", fellBack: true },
+    ];
+    expect(result.filings).toEqual(filings);
+    expect(Object.keys(await hex.outbox()).sort()).toEqual([
+      "2025-12/ER/dated.pdf",
+      "2026-11/ER/undated.pdf",
+    ]);
+    expect(await hex.ledger("mixed-dates@shop.example")).toMatchObject({ filings });
+  });
+
+  test("an application/octet-stream named *.pdf goes to the extractor as application/pdf", async () => {
+    const hex = freshHex();
+    await hex.process({
+      messageId: "octet@shop.example",
+      received,
+      parts: [
+        {
+          contentType: "application/octet-stream",
+          disposition: "attachment",
+          fileName: "Scan.PDF",
+          content: pdfBytes(500),
+        },
+      ],
+    });
+    expect(hex.asked.map(({ mediaType }) => mediaType)).toEqual(["application/pdf"]);
+  });
+
+  test("an entry recorded before Document dates were read comes back unchanged, without the flag", async () => {
+    const hex = freshHex();
+    // Opening the ledger creates its table; then an old-format row goes in, as #6 wrote it.
+    expect(await hex.ledger("old@shop.example")).toBeUndefined();
+    const database = new Database(hex.databasePath);
+    try {
+      database
+        .query(
+          "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          "old@shop.example",
+          "2026-10-01T08:00:00.000Z",
+          1,
+          '[{"index":0,"path":"2026-10/ER/a.pdf"}]',
+        );
+    } finally {
+      database.close();
+    }
+    const result = await hex.process({
+      messageId: "old@shop.example",
+      received,
+      parts: [pdf("a.pdf")],
+    });
+    expect(result).toEqual({
+      messageId: "old@shop.example",
+      status: "already-processed",
+      filings: [{ index: 0, path: "2026-10/ER/a.pdf" }],
+    });
+    expect(result.filings[0]).not.toHaveProperty("fellBack");
+    expect(hex.asked).toEqual([]);
+  });
+
+  test.each([
+    [
+      "a HEIC image (OpenAI and Anthropic reject the type)",
+      "image/heic",
+      "IMG_0001.HEIC",
+      new TextEncoder().encode(`\u0000\u0000\u0000\u0018ftypheic${"h".repeat(20_000)}`),
+    ],
+    ["a PDF without %PDF", "application/pdf", "Rechnung.pdf", bytes(500, "n")],
+    [
+      "a JPEG without its signature",
+      "image/jpeg",
+      "Beleg.jpg",
+      bytes(MIN_IMAGE_DOCUMENT_BYTES, "j"),
+    ],
+  ])(
+    "%s never reaches the model and files by the received date",
+    async (_case, contentType, fileName, content) => {
+      const hex = freshHex(() => ({ year: 2026, month: 1, day: 1 }));
+      const result = await hex.process({
+        messageId: "unsent@shop.example",
+        received,
+        parts: [{ contentType, disposition: "attachment", fileName, content }],
+      });
+      expect(result.filings).toEqual([
+        { index: 0, path: `2026-11/ER/${fileName}`, fellBack: true },
+      ]);
+      expect(hex.asked).toEqual([]);
+    },
+  );
+
+  test("a failed model call fails the run: nothing filed or recorded; a re-run retries", async () => {
+    let failing = true;
+    const hex = freshHex(({ fileName }) =>
+      failing && fileName === "second.pdf"
+        ? new Error(`reading the Document date of "second.pdf" with openai/x failed: 429`)
+        : { year: 2026, month: 10, day: 1 },
+    );
+    const mail = {
+      messageId: "flaky@shop.example",
+      received,
+      parts: [pdf("first.pdf"), pdf("second.pdf")],
+    };
+    await expect(hex.process(mail)).rejects.toThrow(
+      'the Intake workflow did not finish: reading the Document date of "second.pdf" with openai/x failed: 429',
+    );
+    expect(await hex.outbox()).toEqual({});
+    expect(await hex.ledger("flaky@shop.example")).toBeUndefined();
+
+    failing = false;
+    const result = await hex.process(mail);
+    expect(result).toMatchObject({ status: "processed" });
+    expect(Object.keys(await hex.outbox()).sort()).toEqual([
+      "2026-10/ER/first.pdf",
+      "2026-10/ER/second.pdf",
+    ]);
   });
 
   test("non-Document attachments are ignored: inline logos, tiny images, other types", async () => {
@@ -147,7 +346,7 @@ describe("Intake workflow", () => {
     expect(result).toEqual({
       messageId: "mixed@shop.example",
       status: "processed",
-      filings: [{ index: 6, path: "2026-11/ER/Scan.pdf" }],
+      filings: [{ index: 6, path: "2026-11/ER/Scan.pdf", fellBack: true }],
     });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Scan.pdf"]);
   });
@@ -178,7 +377,7 @@ describe("Intake workflow", () => {
     });
   });
 
-  test("an already processed Message-ID is skipped: nothing filed again", async () => {
+  test("an already processed Message-ID is skipped: nothing filed or asked again", async () => {
     const hex = freshHex();
     const mail = { messageId: "twice@shop.example", received, parts: [pdf("Rechnung.pdf")] };
     const first = await hex.process(mail);
@@ -187,8 +386,9 @@ describe("Intake workflow", () => {
     expect(second).toEqual({
       messageId: "twice@shop.example",
       status: "already-processed",
-      filings: [{ index: 0, path: "2026-11/ER/Rechnung.pdf" }],
+      filings: [{ index: 0, path: "2026-11/ER/Rechnung.pdf", fellBack: true }],
     });
+    expect(hex.asked).toHaveLength(1);
     expect(first).toMatchObject({ status: "processed" });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Rechnung.pdf"]);
     // The ledger entry is the first run's, untouched.
@@ -227,7 +427,7 @@ describe("Intake workflow", () => {
     expect(result).toEqual({
       messageId: "hostile@shop.example",
       status: "processed",
-      filings: paths.map((path, index) => ({ index, path })),
+      filings: paths.map((path, index) => ({ index, path, fellBack: true })),
     });
     expect(Object.keys(await hex.outbox()).sort()).toEqual([...paths].sort());
     // Nothing next to the Outbox either: only the database (and its WAL files) and the Outbox.
@@ -246,18 +446,14 @@ describe("Intake workflow", () => {
     test("an impossible receivedAt is rejected before anything is filed", async () => {
       const hex = freshHex();
       const intake = { ...base, receivedAt: "2026-02-30T10:00:00.000Z", attachments: [apiPdf] };
-      await expect(runIntake(intake, { paths: hex, category: "ER" })).rejects.toThrow(
-        "a real UTC instant",
-      );
+      await expect(hex.run(intake)).rejects.toThrow("a real UTC instant");
       expect(await hex.outbox()).toEqual({});
     });
 
     test("a receivedAt whose Berlin year is 10000 is rejected; nothing filed or recorded", async () => {
       const hex = freshHex();
       const intake = { ...base, receivedAt: "9999-12-31T23:30:00.000Z", attachments: [apiPdf] };
-      await expect(runIntake(intake, { paths: hex, category: "ER" })).rejects.toThrow(
-        "whose year in Europe/Berlin is 1000 to 9999",
-      );
+      await expect(hex.run(intake)).rejects.toThrow("whose year in Europe/Berlin is 1000 to 9999");
       expect(await hex.outbox()).toEqual({});
       expect(await hex.ledger("api@shop.example")).toBeUndefined();
     });
@@ -270,10 +466,7 @@ describe("Intake workflow", () => {
         content: Buffer.from("x".repeat(50)).toString("base64"),
         size: 20_000,
       };
-      const result = await runIntake({ ...base, attachments: [tinyImage] } as unknown as Intake, {
-        paths: hex,
-        category: "ER",
-      });
+      const result = await hex.run({ ...base, attachments: [tinyImage] } as unknown as Intake);
       expect(result.filings).toEqual([]);
       expect(await hex.outbox()).toEqual({});
     });
@@ -285,28 +478,25 @@ describe("Intake workflow", () => {
         fileName: "pixel.png",
         content: `AAAA${" ".repeat(30_000)}`,
       };
-      await expect(
-        runIntake({ ...base, attachments: [padded] }, { paths: hex, category: "ER" }),
-      ).rejects.toThrow("Expected a base64 encoded string");
+      await expect(hex.run({ ...base, attachments: [padded] })).rejects.toThrow(
+        "Expected a base64 encoded string",
+      );
       expect(await hex.outbox()).toEqual({});
     });
 
     test("a Message-ID that is blank once unbracketed is rejected as input", async () => {
       const hex = freshHex();
-      await expect(
-        runIntake(
-          { ...base, messageId: "<>", attachments: [apiPdf] },
-          { paths: hex, category: "ER" },
-        ),
-      ).rejects.toThrow("a Message-ID that is not blank");
+      await expect(hex.run({ ...base, messageId: "<>", attachments: [apiPdf] })).rejects.toThrow(
+        "a Message-ID that is not blank",
+      );
       expect(await hex.outbox()).toEqual({});
     });
 
     test("the result names the normalised Message-ID, on both runs", async () => {
       const hex = freshHex();
       const intake = { ...base, attachments: [apiPdf] };
-      const first = await runIntake(intake, { paths: hex, category: "ER" });
-      const second = await runIntake(intake, { paths: hex, category: "ER" });
+      const first = await hex.run(intake);
+      const second = await hex.run(intake);
       expect([first.messageId, second.messageId]).toEqual(["api@shop.example", "api@shop.example"]);
       expect(second.status).toBe("already-processed");
     });

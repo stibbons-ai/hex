@@ -26,8 +26,23 @@ export interface Mail {
 /** `size` bytes of filler content, so detection's size threshold can be exercised. */
 export const bytes = (size: number, fill = "x") => new TextEncoder().encode(fill.repeat(size));
 
+/** `size` bytes starting with `header`, then `fill`. */
+function withHeader(header: Uint8Array, size: number, fill: string) {
+  const content = bytes(size, fill);
+  content.set(header);
+  return content;
+}
+
+/** `size` bytes that pass for a PDF (a `%PDF` header, then `fill`), so a model gets them. */
+export const pdfBytes = (size: number, fill = "p") =>
+  withHeader(new TextEncoder().encode("%PDF-1.4\n"), size, fill);
+
+/** `size` bytes that pass for a JPEG (its signature, then `fill`), so a model gets them. */
+export const jpegBytes = (size: number, fill = "j") =>
+  withHeader(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0]), size, fill);
+
 /** A PDF attachment. */
-export const pdf = (fileName: string, content = bytes(500, "p")): Part => ({
+export const pdf = (fileName: string, content = pdfBytes(500)): Part => ({
   contentType: "application/pdf",
   disposition: "attachment",
   fileName,

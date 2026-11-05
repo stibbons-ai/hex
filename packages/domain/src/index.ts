@@ -3,6 +3,7 @@ export type { ChannelAllowlists, SenderDecision } from "./allowlist";
 export {
   MIN_IMAGE_DOCUMENT_BYTES,
   contentIdReferences,
+  documentMediaType,
   isDocument,
   normalizeContentId,
 } from "./document";

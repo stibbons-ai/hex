@@ -4,11 +4,21 @@ import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import { messageOf } from "./errors";
 import { localDatabaseUrl } from "./storage";
 
-/** One Document's Filing: which attachment it was and where it landed, relative to the Outbox. */
+/**
+ * One Document's Filing: which attachment it was, where it landed, relative to the Outbox, and
+ * whether it was filed by the received date because it had no usable Document date.
+ */
 export const Filing = Schema.Struct({
   /** The Document's 0-based index among the Intake's attachments. */
   index: Schema.Int,
   path: Schema.String,
+  /**
+   * True: filed by the received date (`FilingPlan.fellBack`), because the model answered no usable
+   * Document date or hex never sent the Document to a model (a HEIC, HEIF, TIFF or BMP image, or
+   * content that isn't a valid PDF or JPEG/PNG/GIF/WebP image). Absent on entries recorded before
+   * #7, which filed every Document by the received date.
+   */
+  fellBack: Schema.optionalKey(Schema.Boolean),
 });
 export type Filing = typeof Filing.Type;
 

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { dateExtractorLayer } from "@hex/adapters";
 import { closeInOrder } from "./close";
 import { loadChatConfig, loadIntakeConfig } from "./config";
 import { startServer } from "./index";
@@ -27,12 +28,12 @@ if (!chat) {
       : "hex: chat off: HEX_CONFIG is not set",
   );
 }
-const { category } = await loadIntakeConfig(configPath);
+const { category, model } = await loadIntakeConfig(configPath);
 const port = parsePort(process.env.HEX_PORT);
 const paths = dataPaths(process.env);
 // Built now, so a ledger that can't be opened fails startup instead of every later Intake run
 // (the runtime keeps a failed build); disposed after the server stopped.
-const intakeRuntime = createIntakeRuntime(paths);
+const intakeRuntime = createIntakeRuntime(paths, dateExtractorLayer(model));
 /** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
 const disposeAfterFailure = (error: unknown) =>
   intakeRuntime

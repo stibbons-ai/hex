@@ -2,9 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createClient } from "@libsql/client";
 import { Effect, Exit } from "effect";
 import { TestClock } from "effect/testing";
 import { IntakeLedger, intakeLedgerLayer } from "../src";
+import { localDatabaseUrl } from "../src/storage";
 
 let directory: string;
 let databases = 0;
@@ -39,7 +41,10 @@ describe("IntakeLedger", () => {
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("<a@x>")))).toBe(
       undefined,
     );
-    const filings = [{ index: 1, path: "2026-11/ER/a.pdf" }];
+    const filings = [
+      { index: 1, path: "2026-11/ER/a.pdf", fellBack: true },
+      { index: 2, path: "2026-09/ER/b.pdf", fellBack: false },
+    ];
     success(
       await withLedger(databasePath, (ledger) =>
         TestClock.setTime(Date.UTC(2026, 10, 5, 12, 30)).pipe(
@@ -51,7 +56,7 @@ describe("IntakeLedger", () => {
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("<a@x>")))).toEqual({
       messageId: "a@x",
       processedAt: "2026-11-05T12:30:00.000Z",
-      documentCount: 1,
+      documentCount: 2,
       filings,
     });
   });
@@ -83,5 +88,22 @@ describe("IntakeLedger", () => {
   test("a blank Message-ID is an error", async () => {
     const exit = await withLedger(freshDatabase(), (ledger) => ledger.find(" <> "));
     expect(String(exit)).toContain("blank Message-ID");
+  });
+
+  test("an entry recorded before Document dates were read still reads back, flag absent", async () => {
+    const databasePath = freshDatabase();
+    success(await withLedger(databasePath, (ledger) => ledger.find("<new@x>")));
+    const client = createClient({ url: await localDatabaseUrl(databasePath) });
+    try {
+      await client.execute({
+        sql: "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",
+        args: ["old@x", "2026-10-01T08:00:00.000Z", 1, '[{"index":0,"path":"2026-10/ER/a.pdf"}]'],
+      });
+    } finally {
+      client.close();
+    }
+    const entry = success(await withLedger(databasePath, (ledger) => ledger.find("old@x")));
+    expect(entry?.filings).toEqual([{ index: 0, path: "2026-10/ER/a.pdf" }]);
+    expect(entry?.filings[0]).not.toHaveProperty("fellBack");
   });
 });

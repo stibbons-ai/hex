@@ -174,10 +174,16 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
 // Whitespace is rejected here; case is kept, and the allowlist compares IDs exactly.
 const SenderId = Schema.String.check(Schema.isPattern(/^\S+$/));
 
+/** A Mastra model-router id, `provider/model`. */
+const ModelId = Schema.String.check(Schema.isPattern(/^[^/\s]+\/\S+$/));
+
+/** The model that reads Document dates when the config names none. */
+const DEFAULT_INTAKE_MODEL = "openai/gpt-5.1-codex-mini";
+
 const ConfigFile = Schema.Struct({
   chat: Schema.Struct({
     /** Mastra model-router id, `provider/model`. */
-    model: Schema.String.check(Schema.isPattern(/^[^/\s]+\/\S+$/)),
+    model: ModelId,
     /** Passed through to the model call, keyed by provider, e.g. `{ anthropic: { effort: "low" } }`. */
     providerOptions: Schema.optionalKey(
       Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)),
@@ -194,6 +200,8 @@ const ConfigFile = Schema.Struct({
     Schema.Struct({
       /** The Category Documents are filed under; ER, the only one, when absent. */
       category: Schema.optionalKey(Schema.Literals(CATEGORIES)),
+      /** The model that reads Document dates; {@link DEFAULT_INTAKE_MODEL} when absent. */
+      model: Schema.optionalKey(ModelId),
     }),
   ),
 });
@@ -260,13 +268,21 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
 /** Intake workflow settings from the config file. */
 export interface IntakeConfig {
   category: Category;
+  /** Mastra model-router id of the model that reads Document dates, `provider/model`. */
+  model: string;
 }
 
 /**
- * The Intake settings from the hex config file at `path`, or the defaults (Category ER) without a
- * file. Fails like {@link loadChatConfig} on a file it can't use, e.g. a Category other than ER.
+ * The Intake settings from the hex config file at `path`, or the defaults (Category ER,
+ * {@link DEFAULT_INTAKE_MODEL}) without a file. Fails like {@link loadChatConfig} on a file it
+ * can't use, e.g. a Category other than ER or a model that is no `provider/model` id. The
+ * model's API key comes from the provider's usual variable (e.g. `OPENAI_API_KEY`), never from
+ * this file.
  */
 export async function loadIntakeConfig(path: string | undefined): Promise<IntakeConfig> {
   const intake = path === undefined ? undefined : (await readConfigFile(path)).intake;
-  return { category: intake?.category ?? DEFAULT_CATEGORY };
+  return {
+    category: intake?.category ?? DEFAULT_CATEGORY,
+    model: intake?.model ?? DEFAULT_INTAKE_MODEL,
+  };
 }
