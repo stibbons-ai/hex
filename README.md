@@ -247,15 +247,18 @@ it.
   hadn't finished: a reply cut off by the 5-second stop grace or a crash, and messages signal-cli
   took off Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s,
   longer when the host itself is gone). Messages sent while no event stream was connected stay at
-  Signal and arrive once hex connects (with `--receive-mode on-connection`). Still lost:
-  - everything signal-cli held for replay when signal-cli itself restarts, and anything older than
-    its last 1000 events;
-  - a message waiting behind a reply in progress in the same conversation when hex stops or
+  Signal and arrive once hex connects (with `--receive-mode on-connection`). Limits:
+  - lost: everything signal-cli held for replay when signal-cli itself restarts, and anything
+    older than its last 1000 events;
+  - lost: a message waiting behind a reply in progress in the same conversation when hex stops or
     crashes: its handling counts as finished once it is queued, and the queue lives in memory;
-  - on a fresh database, everything before the first event hex finished: there is no cursor yet;
-  - during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message arriving
-    after hex began stopping is dropped and the cursor moves past it; and if the last cursor write
-    misses the store closing, a message already answered is answered again after the restart.
+  - lost: until hex has finished its first event and every one before it (on a new database, or
+    the first start after this upgrade), there is no cursor, so a restart replays nothing;
+  - lost, during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message
+    arriving after hex began stopping is dropped and the cursor moves past it;
+  - answered twice: a message whose reply went out just before a crash, before its handling
+    finished and the cursor was written; and, during shutdown (#29), one whose last cursor write
+    missed the store closing.
 - If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
   30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
   does while Slack's socket reconnects.

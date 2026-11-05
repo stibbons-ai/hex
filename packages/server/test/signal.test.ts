@@ -499,6 +499,22 @@ const OTHER = "07e07e07-0000-4000-8000-0000000000e1";
 /** A message saying this starts a run that never finishes, as when hex stops or crashes mid-run. */
 const STALL = "think hard";
 
+/**
+ * A {@link mockModel} recording, per call, the text of the prompt's last message: the one the
+ * call answers (earlier ones are history).
+ */
+function answeringModel() {
+  const answered: string[] = [];
+  const model = mockModel({
+    before: async (call) => {
+      const { prompt } = call as { prompt: { content: { type: string; text?: string }[] }[] };
+      const parts = prompt.at(-1)?.content ?? [];
+      answered.push(parts.map((part) => part.text ?? "").join(""));
+    },
+  });
+  return { model, answered };
+}
+
 /** A {@link mockModel} that stalls on {@link STALL}; `stalled` resolves once such a run started. */
 function stallingModel() {
   const stalled = Promise.withResolvers<void>();
@@ -561,7 +577,10 @@ test("a Signal DM hex had not answered when it stopped is answered after a resta
       await before.stop();
     }
     // The default stop grace: the final cursor write lands before the store closes.
-    const after = await startServer(options("replay", { chat: await chatFor(fake) }));
+    const restarted = answeringModel();
+    const after = await startServer(
+      options("replay", { chat: await chatFor(fake, restarted.model) }),
+    );
     try {
       await fake.streamOpened(2);
       const [, replayed] = await fake.sends(2);
@@ -573,8 +592,11 @@ test("a Signal DM hex had not answered when it stopped is answered after a resta
     } finally {
       await after.stop();
     }
-    // The restarted hex resumed after the last event the first one finished.
+    // The restarted hex resumed after the last event the first one finished, and answered run-2,
+    // and only run-2: not run-1 again.
     expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    expect(restarted.answered).toEqual([expect.stringContaining(STALL)]);
+    expect(sent(fake)).toEqual([REPLY, REPLY]);
     expect(await storedChatState(first.databasePath, CURSOR_KEY)).toEqual({
       lastEventId: "run-2",
       processed: [],
@@ -664,7 +686,8 @@ test("after a restart, a Signal DM that arrived while hex was gone is answered",
     }
     // No stream open: as a message signal-cli took off Signal before it noticed hex was gone.
     expect(fake.receive({ aci: DANIEL, text: "still there?" })).toBe("run-2");
-    const after = await startServer({ ...settings, chat: await chatFor(fake) });
+    const restarted = answeringModel();
+    const after = await startServer({ ...settings, chat: await chatFor(fake, restarted.model) });
     try {
       await fake.streamOpened(2);
       const [, answer] = await fake.sends(2);
@@ -673,6 +696,9 @@ test("after a restart, a Signal DM that arrived while hex was gone is answered",
       await after.stop();
     }
     expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    // run-2 answered, and only run-2: not run-1 again.
+    expect(restarted.answered).toEqual([expect.stringContaining("still there?")]);
+    expect(sent(fake)).toEqual([REPLY, REPLY]);
   });
 });
 
