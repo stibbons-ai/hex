@@ -26,6 +26,9 @@ import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
 
+/** The data the Intake workflow works on: the ledger's LibSQL file and the Outbox. */
+type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
+
 export const INTAKE_WORKFLOW_ID = "intake";
 
 /** What the Intake workflow did with one Intake. */
@@ -78,7 +81,7 @@ export type IntakeRuntime = ManagedRuntime.ManagedRuntime<IntakeServices, Ledger
  * ledger's connection.
  */
 export function createIntakeRuntime(
-  paths: DataPaths,
+  paths: IntakePaths,
   dateExtractor: Layer.Layer<DateExtractor>,
 ): IntakeRuntime {
   return ManagedRuntime.make(
@@ -241,7 +244,7 @@ export async function runIntake(
     paths,
     category,
     dateExtractor,
-  }: { paths: DataPaths; category: Category; dateExtractor: Layer.Layer<DateExtractor> },
+  }: { paths: IntakePaths; category: Category; dateExtractor: Layer.Layer<DateExtractor> },
 ): Promise<IntakeResult> {
   const storage = await createLocalStore(paths.databasePath);
   const runtime = createIntakeRuntime(paths, dateExtractor);

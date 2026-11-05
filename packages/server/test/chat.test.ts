@@ -38,8 +38,10 @@ function chatOptions(adapter: FakeChatAdapter, model = mockModel()): ChatOptions
 }
 
 function serverOptions(chat: ChatOptions, options: Partial<ServerOptions> = {}): ServerOptions {
+  const data = join(directory, `chat-${databases++}`);
   return {
-    databasePath: join(directory, `chat-${databases++}`, "mastra.db"),
+    databasePath: join(data, "mastra.db"),
+    observabilityPath: join(data, "observability.duckdb"),
     port: 0,
     logger: false,
     chat,

@@ -4,6 +4,7 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { toMastraSchema } from "@hex/adapters";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
+import { DuckDBStore } from "@mastra/duckdb";
 import { LibSQLStore } from "@mastra/libsql";
 import { ORPCError, createORPCClient, safe } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
@@ -54,10 +55,21 @@ function gated(id: string, entered: () => void, release: Promise<void>) {
 
 let directory: string;
 const servers: RunningServer[] = [];
+let observed = 0;
+
+/** The data files of a server in `<directory>/<name>`. */
+function dataFiles(name: string) {
+  return {
+    databasePath: join(directory, name, "mastra.db"),
+    observabilityPath: join(directory, name, "observability.duckdb"),
+  };
+}
 
 async function start(options: Partial<ServerOptions> = {}): Promise<RunningServer> {
   const server = await startServer({
     databasePath: join(directory, "data", "mastra.db"),
+    // One process opens a DuckDB file once: every running server gets its own.
+    observabilityPath: join(directory, `observability-${observed++}.duckdb`),
     port: 0,
     logger: false,
     workflows: { echo },
@@ -373,10 +385,7 @@ test("keeps Mastra's default logger unless told otherwise", async () => {
   // Mastra's default logger writes errors with console.error; the noop logger writes nothing.
   const consoleError = spyOn(console, "error").mockImplementation(() => {});
   try {
-    const server = await startServer({
-      databasePath: join(directory, "logger", "mastra.db"),
-      port: 0,
-    });
+    const server = await startServer({ ...dataFiles("logger"), port: 0 });
     servers.push(server);
     server.mastra.getLogger().error("default-logger-probe");
     expect(consoleError).toHaveBeenCalledWith("default-logger-probe");
@@ -396,7 +405,7 @@ describe("stop()", () => {
     const release = Promise.withResolvers<void>();
     const shutdown = Promise.withResolvers<void>();
     const server = await startServer({
-      databasePath: join(directory, "held", "mastra.db"),
+      ...dataFiles("held"),
       port: 0,
       logger: false,
       workflows: { hang: gated("hang", entered.resolve, release.promise) },
@@ -444,7 +453,7 @@ describe("stop()", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const server = await startServer({
-      databasePath: join(directory, "in-flight", "mastra.db"),
+      ...dataFiles("in-flight"),
       port: 0,
       logger: false,
       workflows: { slow: gated("slow", entered.resolve, release.promise) },
@@ -460,39 +469,42 @@ describe("stop()", () => {
     await stopping;
   });
 
-  test("rejects with a failing Mastra shutdown and still closes the store", async () => {
-    const close = spyOn(LibSQLStore.prototype, "close");
+  test("rejects with a failing Mastra shutdown and still closes both stores", async () => {
+    const closeLibSQL = spyOn(LibSQLStore.prototype, "close");
+    const closeDuckDB = spyOn(DuckDBStore.prototype, "close");
     try {
-      const server = await startServer({
-        databasePath: join(directory, "shutdown-fails", "mastra.db"),
-        port: 0,
-        logger: false,
-      });
+      const server = await startServer({ ...dataFiles("shutdown-fails"), port: 0, logger: false });
       const failure = new Error("mastra shutdown failed");
       server.mastra.shutdown = async () => {
         throw failure;
       };
-      close.mockClear();
+      closeLibSQL.mockClear();
+      closeDuckDB.mockClear();
       await expect(server.stop()).rejects.toBe(failure);
-      expect(close).toHaveBeenCalledTimes(1);
+      expect(closeLibSQL).toHaveBeenCalledTimes(1);
+      expect(closeDuckDB).toHaveBeenCalledTimes(1);
     } finally {
-      close.mockRestore();
+      closeLibSQL.mockRestore();
+      closeDuckDB.mockRestore();
     }
   });
 
-  test("a failed start closes the store and keeps the original error", async () => {
+  test("a failed start closes both stores and keeps the original error", async () => {
     const taken = await start({ databasePath: join(directory, "taken", "mastra.db") });
-    const close = spyOn(LibSQLStore.prototype, "close");
+    const closeLibSQL = spyOn(LibSQLStore.prototype, "close");
+    const closeDuckDB = spyOn(DuckDBStore.prototype, "close");
     try {
       const failed = startServer({
-        databasePath: join(directory, "port-in-use", "mastra.db"),
+        ...dataFiles("port-in-use"),
         port: Number(taken.url.port),
         logger: false,
       });
       await expect(failed).rejects.toThrow(/EADDRINUSE|in use/i);
-      expect(close).toHaveBeenCalledTimes(1);
+      expect(closeLibSQL).toHaveBeenCalledTimes(1);
+      expect(closeDuckDB).toHaveBeenCalledTimes(1);
     } finally {
-      close.mockRestore();
+      closeLibSQL.mockRestore();
+      closeDuckDB.mockRestore();
     }
   });
 });

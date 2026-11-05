@@ -211,6 +211,27 @@ describe("manifest policy", () => {
   });
 
   test.each([
+    ["bunx mastra dev", "mastra"],
+    ["bunx mastra@latest dev", "mastra@latest"],
+    ["bunx mastra@1.36 dev", "mastra@1.36"],
+    ["bunx --bun mastra@1 dev", "mastra@1"],
+    ["bun x @mastra/cli dev", "@mastra/cli"],
+  ])("rejects bunx without an exact version: %j", (command, spec) => {
+    const scripts = { studio: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
+    expect(manifestViolations(root({ scripts }), [])).toEqual([
+      `package.json: scripts.studio runs bunx ${spec}, which must name an exact version (<package>@<x.y.z>)`,
+    ]);
+  });
+
+  test.each(["bunx mastra@1.36.0 dev", "bunx --bun @mastra/cli@1.36.0-alpha.1 dev"])(
+    "accepts bunx pinned exactly: %j",
+    (command) => {
+      const scripts = { studio: `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 ${command}` };
+      expect(manifestViolations(root({ scripts }), [])).toEqual([]);
+    },
+  );
+
+  test.each([
     [
       { dependencies: { effect: "catalog:", hono: "catalog:" } },
       "dependencies.effect, dependencies.hono",

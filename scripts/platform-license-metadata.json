@@ -1,5 +1,54 @@
 [
   {
+    "name": "@duckdb/node-bindings-darwin-x64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-UJHIhxkHMpdzTnyXVqsGOZotG+TzwAqkX0POM20IkQVtWtFjPS52Kc9Q+qLrS8ZuabmnrFtX9AnlHNyPVqSqMA==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-darwin-x64/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-linux-arm64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-cAEALsSxYRzSfUgxAJCNbDZcmdlVQWvEKldd7r8lYWYZ7D2mxBjeLrF0WoL34vl+ZNEgqHAuqiv3I+wMU2dOXA==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-linux-arm64/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-linux-arm64-musl",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-PVC9feqV+bgsnzGfiCv1pe+9mNqoC8k15/3Qmwhp6+AUloTNtk1ln9wlsHMUzhRfNG2wb2fN8P9PJ5zY5t/J/w==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-linux-arm64-musl/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-linux-x64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-9SgKECgVtkDK6+HLBbDKxW41ORj+BciQjSgERFfhnuPIDYhgx08wTPZcnaU7KxvNdOmndIn5OmjzKZ6Jrvwv0g==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-linux-x64/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-linux-x64-musl",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-v2AUKCIHKq9+zFWmx+UdSWyxFLaT5wsWuTNID30pGBqGvwChxLGmm1szbHNxR7nNa00y2SGp9Gxoky0RS7YCwg==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-linux-x64-musl/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-win32-arm64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-g5ZWK07c0Qh7UFhJC37iC5y8oW8ZqxEgpNM2vTFD3ShM9Rn1NDXkxA7zjcheHRI+My5T1JpE9kNpCvhzItJrgw==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-win32-arm64/1.5.2-r.2"
+  },
+  {
+    "name": "@duckdb/node-bindings-win32-x64",
+    "version": "1.5.2-r.2",
+    "license": "MIT",
+    "integrity": "sha512-VUMbdeXQHWKHEXVWtfVaOSu7Mb4jR9gT56Yzu9FHyLyP9ogY/D6wpeohY5gAHZS9PHQGGq24qRtCn5g6vUolqA==",
+    "source": "https://registry.npmjs.org/@duckdb/node-bindings-win32-x64/1.5.2-r.2"
+  },
+  {
     "name": "@libsql/darwin-arm64",
     "version": "0.5.29",
     "license": "MIT",

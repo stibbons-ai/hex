@@ -49,6 +49,9 @@ const plainWord = String.raw`[\w./:@=+-]+`;
 const plainCommand = new RegExp(String.raw`^${plainWord}(?: ${plainWord})*$`);
 const chainedScript = new RegExp(String.raw`^bun run ([\w:-]+)(?: ${plainWord})*$`);
 const telemetryVariable = /\b(?:MASTRA_TELEMETRY_DISABLED|DO_NOT_TRACK)\b/;
+/** `bunx` (or `bun x`) and its flags, then the package it runs. */
+const bunxCommand = /^(?:bunx|bun x)(?: -[\w-]+)* (\S+)/;
+const versionedPackage = /^@?[^@]+@(.+)$/;
 
 /**
  * Telemetry stays off in every script (issue #2). A script is either
@@ -58,6 +61,8 @@ const telemetryVariable = /\b(?:MASTRA_TELEMETRY_DISABLED|DO_NOT_TRACK)\b/;
  *   parentheses, quotes or redirections.
  *
  * Neither form may mention the telemetry variables again (`DO_NOT_TRACK=0`, `env -u DO_NOT_TRACK`).
+ * A package run with `bunx` sits outside the catalog and the lockfile, so it names an exact
+ * version (`bunx mastra@1.36.0`), checked like a catalog pin.
  */
 export function scriptViolation(
   script: string,
@@ -69,6 +74,11 @@ export function scriptViolation(
     if (telemetryVariable.test(command)) return reset;
     if (!plainCommand.test(command)) {
       return "must be one command of plain words after the telemetry opt-out (no &, |, ;, $( ), backticks, parentheses, quotes or redirections)";
+    }
+    const bunxPackage = bunxCommand.exec(command)?.[1];
+    const bunxVersion = bunxPackage && versionedPackage.exec(bunxPackage)?.[1];
+    if (bunxPackage && !(bunxVersion && exactVersion.test(bunxVersion))) {
+      return `runs bunx ${bunxPackage}, which must name an exact version (<package>@<x.y.z>)`;
     }
     return undefined;
   }

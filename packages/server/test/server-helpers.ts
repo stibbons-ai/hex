@@ -8,13 +8,22 @@ import { CHAT_RESOURCE_ID } from "../src/chat";
 import { CHAT_STATE_TYPE, chatStores } from "../src/chat-state";
 import { within } from "./timeouts";
 
-/** Server options with a fresh database `<directory>/<name>/mastra.db`, a free port, no log. */
+/**
+ * Server options with fresh databases `<directory>/<name>/mastra.db` and
+ * `<directory>/<name>/observability.duckdb`, a free port, no log.
+ */
 export function serverOptions(
   directory: string,
   name: string,
   rest: Partial<ServerOptions>,
 ): ServerOptions {
-  return { databasePath: join(directory, name, "mastra.db"), port: 0, logger: false, ...rest };
+  return {
+    databasePath: join(directory, name, "mastra.db"),
+    observabilityPath: join(directory, name, "observability.duckdb"),
+    port: 0,
+    logger: false,
+    ...rest,
+  };
 }
 
 /**

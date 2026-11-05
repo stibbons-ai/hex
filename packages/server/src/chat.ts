@@ -1,6 +1,6 @@
 import { decideSender } from "@hex/domain";
 import { Agent } from "@mastra/core/agent";
-import type { AgentExecutionOptions } from "@mastra/core/agent";
+import type { AgentConfig, AgentExecutionOptions } from "@mastra/core/agent";
 import type {
   ChannelAdapterConfig,
   ChannelHandler,
@@ -105,6 +105,40 @@ function logToolCalls(logger: IMastraLogger | undefined, content: StepContent) {
   }
 }
 
+/** The chat agent's model settings, without its channels. */
+export type ChatModel = Pick<ChatOptions, "model" | "providerOptions">;
+
+/** The chat agent, channels aside: what every hex chat agent shares. */
+function chatAgentConfig(
+  { model, providerOptions }: ChatModel,
+  getAgent: () => Agent,
+): AgentConfig {
+  return {
+    id: CHAT_AGENT_ID,
+    name: CHAT_AGENT_ID,
+    instructions: INSTRUCTIONS,
+    model,
+    // Every run, the Channels-triggered ones included, merges these defaults into its options.
+    defaultOptions: {
+      onStepFinish: ({ content }) =>
+        logToolCalls(getAgent().getMastraInstance()?.getLogger(), content),
+      // Mastra types the known providers' options; ours come from the config as data.
+      ...(providerOptions ? { providerOptions: providerOptions as AgentProviderOptions } : {}),
+    },
+    // Storage comes from the Mastra instance (the LibSQL store).
+    memory: new Memory({ options: { workingMemory: { enabled: true, scope: "resource" } } }),
+  };
+}
+
+/**
+ * The chat agent without channels, for Mastra Studio: the same agent, memory and model, called
+ * from Studio only; it never connects to a chat platform.
+ */
+export function createStudioChatAgent(model: ChatModel): Agent {
+  const agent: Agent = new Agent(chatAgentConfig(model, () => agent));
+  return agent;
+}
+
 /**
  * The chat agent: answers allowlisted senders on every configured channel, with one memory thread
  * per channel conversation under resource {@link CHAT_RESOURCE_ID} and resource-scoped working
@@ -114,7 +148,7 @@ function logToolCalls(logger: IMastraLogger | undefined, content: StepContent) {
  * since the allowlist is looked up by that name.
  */
 export function createChatAgent(
-  { model, providerOptions, channels }: ChatOptions,
+  { channels, ...model }: ChatOptions,
   stores: ChatStores,
 ): ChatAgent {
   const entries = Object.entries(channels);
@@ -177,18 +211,7 @@ export function createChatAgent(
     }
   };
   const agent: Agent = new Agent({
-    id: CHAT_AGENT_ID,
-    name: CHAT_AGENT_ID,
-    instructions: INSTRUCTIONS,
-    model,
-    // Every run, the Channels-triggered ones included, merges these defaults into its options.
-    defaultOptions: {
-      onStepFinish: ({ content }) => logToolCalls(agent.getMastraInstance()?.getLogger(), content),
-      // Mastra types the known providers' options; ours come from the config as data.
-      ...(providerOptions ? { providerOptions: providerOptions as AgentProviderOptions } : {}),
-    },
-    // Storage comes from the Mastra instance (the LibSQL store).
-    memory: new Memory({ options: { workingMemory: { enabled: true, scope: "resource" } } }),
+    ...chatAgentConfig(model, () => agent),
     channels: {
       adapters,
       // Mastra's own state adapter, built as core would build it (the agent's id as owner), but
