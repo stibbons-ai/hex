@@ -116,16 +116,19 @@ the next start's first look moves it. A second signal of the same kind kills it 
 
 Once listening, the server restarts every workflow run a stopped or killed hex left active in
 `mastra.db` (Mastra's `restartAllActiveWorkflowRuns()`, which hex calls itself since it has no
-Mastra deployer, ADR 0004), and only then starts the mailbox watcher, so a resumed run and the
-watcher never race for one Intake (a sweep that fails is logged as an error, and the watcher
-starts anyway). A resumed run starts again at the step that was cut off, from its start, with
+Mastra deployer, ADR 0004; a sweep that fails is logged as an error) and starts the mailbox
+watcher alongside, so a run that hangs on resuming doesn't hold up all intake. They never race
+for one Intake: a run to resume stays active in `mastra.db` until it ends, and the watcher leaves
+the Intake of every active run alone. A resumed run starts again at the step that was cut off, from its start, with
 the finished steps' outputs restored from the run's snapshot; the ledger makes repeating that
 step safe (a target or Document recorded is skipped), except for what the cut-off step did but
 hadn't recorded yet: a send the server accepted is sent again (see step 3 under
 [Intake](#intake-dev-command)), and a Document written to the Outbox is filed again, as a second
 copy `name (1).pdf`. A run whose previous process still held its ownership lease (Mastra's, 15 s
 after a kill) is skipped by that sweep and restarted by Mastra once the lease lapses; until then
-the watcher leaves its Intake alone, warning once with the run's id.
+the watcher leaves its Intake alone, warning once with the run's id. A run of the watcher's own
+still going after 10 minutes is a warning, again every 10 minutes, naming the run and its Intake:
+the watcher takes no other mail meanwhile.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -450,9 +453,11 @@ processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`
 before #8 have no rows there and read back with no Forwardings. A fourth table,
 `hex_intake_failed_runs` (`message_id`, `run_id`, `failed_at`, `ended`), has one row per failed
 run of an Intake, so a run repeated after a restart counts once; the rows stay after a later
-success. Failing permanently deletes the Intake's rows but the last run's, which it marks
-`ended`: no row then counts, and that run, repeated after a restart, still fails the Intake
-permanently instead of counting 1.
+success. Failing permanently marks the Intake's rows `ended` and, in the same transaction,
+deletes all but the row of the run it failed on: no row then counts, and that run, repeated
+after a restart, still fails the Intake permanently instead of counting 1. When the watcher
+fails an Intake permanently itself (5 failed runs counted, the process gone before it ended
+them), no row is kept.
 
 ### Mailbox
 
@@ -489,12 +494,12 @@ Cyrus have it) and fails to start, naming it, on a server without: moving mail a
 and EXPUNGE would set flags and, without UIDPLUS, could expunge other mail marked deleted. A
 move or search the server refuses names the server's reason (`[OVERQUOTA] …`).
 
-**Watching.** hex looks at the folder once its boot sweep settled (see [Run](#run)), again
-whenever the server announces new mail (IMAP IDLE, which the connection enters after 1 s without
-a command; on a server without IDLE, imapflow's NOOP every 2 minutes can bring the news too), and
-`pollSeconds` after a look without news, since an IDLE connection can die without notice; when
-the server stays silent for 90 s the client sends a NOOP, and no answer within another 90 s counts
-as a lost connection. A look that runs Intakes takes as
+**Watching.** hex looks at the folder once listening, alongside its boot sweep (see [Run](#run)),
+again whenever the server announces new mail (IMAP IDLE, which the connection enters after 1 s
+without a command; on a server without IDLE, imapflow's NOOP every 2 minutes can bring the news
+too), and `pollSeconds` after a look without news, since an IDLE connection can die without
+notice. While IDLE, a server silent for 90 s gets a NOOP, and no answer within another 90 s counts
+as a lost connection; a command left unanswered for 90 s counts as lost at once. A look that runs Intakes takes as
 long as they do, so looks can be further apart than `pollSeconds`. Every mail in the folder
 counts, read or not; hex fetches mail with `BODY.PEEK`, so it never marks one read, and never
 sets or reads flags. Each look goes through the folder's mail in order, one run at a time:
@@ -508,18 +513,22 @@ sets or reads flags. Each look goes through the folder's mail in order, one run 
 - an Intake whose last run failed waits for its retry (below); any other starts a run.
 
 Decisions and actions go by the Message-ID hex reads from the mail, the one runs, the ledger and
-the active runs know it by; the server's reading (its ENVELOPE) only lets hex pass over a mail
-without fetching it: another copy seen in this look, an active run, a retry still waiting. The
-outcome folders `hex/processed` and `hex/failed` are created on first use, with the server's
-hierarchy delimiter (`hex.processed` on a server that separates folders with `.`). A failure with
-one mail (the server refusing to hand it out or move it) is logged as a warning naming its UID and
-the Message-ID the server reads, and the look goes on with the next mail. A lost connection, UIDs
-that changed meaning since the listing (UIDVALIDITY), a failure to list the folder or the active
-runs or to wait for news (all at warn, naming the mail when there is one), or anything unexpected
-(at error) ends the look; hex tries again after 1 s, doubling up to 60 s, one line per attempt,
-for as long as it runs; `/health` stays `ok` meanwhile. A move that fails is a warning; a mail
-of a processed Intake stays and a later look moves it, and a failed-run consequence (a mail moved
-to `hex/failed`, or kept for a retry) is a warning too.
+the active runs know it by. The server's reading (its ENVELOPE) decides only to pass over a mail
+without fetching it: another copy seen in this look, an active run, a retry still waiting; when
+the two readings differ, a mail can be held back by the server's reading of another Intake's id.
+The outcome folders `hex/processed` and `hex/failed` are created on first use, with the server's
+hierarchy delimiter and under its personal namespace (`hex.processed` on a server that separates
+folders with `.`, `INBOX.hex.processed` on one whose folders all sit under `INBOX.`). A failure
+with one mail (the server refusing to hand it out or move it) is logged as a warning naming its
+UID and the Message-ID the server reads, and the look goes on with the next mail. A lost
+connection, UIDs that changed meaning since the listing (UIDVALIDITY), a failure to list the
+folder or the active runs or to wait for news (all at warn, naming the mail when there is one),
+or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
+one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
+is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
+consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. A move to
+`hex/failed` that fails is tried once more by UID; when that fails too, the Intake's count is
+ended already, so the next look runs it afresh, a new series of 5 runs, as the warning says.
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after
@@ -528,7 +537,8 @@ not settings); its 5th failed run fails it permanently, about 75 minutes after t
 its mail goes to `hex/failed`, the count starting afresh: move it back to the folder and hex
 tries it 5 more times, repeating only the branches that failed. A run that fails before it gets
 to step 7 (an unreadable ledger, a defect), or whose start fails, is counted by the watcher
-instead.
+instead, unless the ledger shows the Intake processed nonetheless: then its mail goes to
+`hex/processed`.
 
 **Limits.** One hex process per mailbox and data directory. An Intake whose run stays active in
 `mastra.db` without resuming (Mastra gave up restarting it) waits for the next start; an active

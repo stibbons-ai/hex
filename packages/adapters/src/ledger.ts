@@ -223,6 +223,9 @@ const ledgerError = (what: string) => (cause: unknown) =>
 /** Now, as the ISO 8601 instant the ledger stores. */
 const now = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(millis).toISOString()));
 
+/** How long a ledger statement waits for a lock on `mastra.db` before failing with SQLITE_BUSY. */
+const BUSY_TIMEOUT_MS = 5000;
+
 /**
  * The Intake ledger in the LibSQL file at `databasePath` (Mastra's `mastra.db`; its directory is
  * created if missing), on its own connection, closed when the layer is released. The tables are
@@ -235,10 +238,13 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
       const client = yield* Effect.acquireRelease(
         Effect.tryPromise({
           try: async () => {
-            const client = createClient({ url: await localDatabaseUrl(databasePath) });
+            // Mastra writes to the same file: wait up to 5 s for its locks instead of failing, on
+            // every connection of the client's pool (a PRAGMA would cover only the first).
+            const client = createClient({
+              url: await localDatabaseUrl(databasePath),
+              timeout: BUSY_TIMEOUT_MS,
+            });
             try {
-              // Mastra writes to the same file; wait for its locks instead of failing.
-              await client.execute("PRAGMA busy_timeout = 5000");
               for (const statement of CREATE_TABLES) await client.execute(statement);
             } catch (error) {
               client.close();

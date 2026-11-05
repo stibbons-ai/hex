@@ -326,4 +326,46 @@ describe("IntakeLedger", () => {
       },
     );
   });
+
+  test("every pooled connection waits for a lock another process holds instead of failing", async () => {
+    const databasePath = freshDatabase();
+    success(
+      await withLedger(databasePath, (ledger) =>
+        Effect.gen(function* () {
+          // Two reads at once: the client's pool opens a second connection, the one it hands out
+          // next. libsql runs statements synchronously, so only a lock held by another process
+          // shows its busy timeout.
+          yield* Effect.all([ledger.find("<a@x>"), ledger.find("<b@x>")], {
+            concurrency: "unbounded",
+          });
+          yield* Effect.promise(() => lockFor(databasePath, 300));
+          yield* ledger.recordFailedRun("lock@x", "run-1");
+        }),
+      ),
+    );
+    expect(
+      success(await withLedger(databasePath, (ledger) => ledger.failedRuns("lock@x"))),
+    ).toMatchObject({ count: 1 });
+  });
 });
+
+/** Has another process hold an exclusive lock on the database for `millis`, once it holds it. */
+async function lockFor(databasePath: string, millis: number) {
+  const holder = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const db = new (require("bun:sqlite").Database)(process.argv[1]);
+      db.run("BEGIN EXCLUSIVE"); console.log("locked");
+      Bun.sleepSync(Number(process.argv[2])); db.run("COMMIT");`,
+      databasePath,
+      String(millis),
+    ],
+    { stdout: "pipe", stderr: "inherit" },
+  );
+  const reader = holder.stdout.getReader();
+  const { value } = await reader.read();
+  if (!new TextDecoder().decode(value).includes("locked"))
+    throw new Error("the lock holder failed");
+  reader.releaseLock();
+}

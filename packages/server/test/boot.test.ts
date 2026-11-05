@@ -105,7 +105,9 @@ test("a run cut off by a kill resumes at the next start, moves its mail, forward
   try {
     await second.printed(/moved 1 resume@shop\.example to hex\/processed/);
     await second.printed(/^booted$/m);
-    // The resumed run started at the step that was cut off: no second Forwarding.
+    // The watcher looked alongside the sweep, while the run stayed active (Mastra restarts it once
+    // the killed process's lease lapsed): it left the Intake to the run, which started at the
+    // step that was cut off. No second run, no second Forwarding.
     expect(model.requests).toHaveLength(2);
     expect(smtp.mails).toHaveLength(1);
     expect(await readdir(join(directory, "data", "outbox", "2026-10", "ER"))).toEqual([

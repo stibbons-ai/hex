@@ -59,10 +59,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
   /** Who waits for the next operation, attempted or failed. */
   let operationListeners: ((what: string) => void)[] = [];
 
-  const failure = (what: string, reason: string, connectionLost: boolean) =>
+  const failure = (what: string, reason: string, cause: MailboxError["reason"]) =>
     new MailboxError({
       message: `127.0.0.1:993, folder ${folder}: ${what} failed: ${reason}`,
-      connectionLost,
+      reason: cause,
     });
   /** Fails `what` while the server is unreachable, refuses it or is closed, else runs `run`. */
   const operation = <A>(what: string, run: () => A) =>
@@ -72,17 +72,19 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
       operationListeners = [];
       if (closed) {
         return Effect.fail(
-          new MailboxError({ message: "the mailbox is closed", connectionLost: true }),
+          new MailboxError({ message: "the mailbox is closed", reason: "connection-lost" }),
         );
       }
       if (unreachable > 0) {
         unreachable--;
-        return Effect.fail(failure(what, "connection lost", true));
+        return Effect.fail(failure(what, "connection lost", "connection-lost"));
       }
       for (const [prefix, left] of refusals) {
         if (left > 0 && what.startsWith(prefix)) {
           refusals.set(prefix, left - 1);
-          return Effect.fail(failure(what, "the server refused it: [NOPERM] not allowed", false));
+          return Effect.fail(
+            failure(what, "the server refused it: [NOPERM] not allowed", "refused"),
+          );
         }
       }
       // `run` throws a MailboxError for a failure of its own (a changed UIDVALIDITY).
@@ -93,8 +95,7 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     if (listedValidity !== uidValidity) {
       throw new MailboxError({
         message: `127.0.0.1:993, folder ${folder}: ${what} failed: the folder's UIDs changed since it was listed (UIDVALIDITY)`,
-        connectionLost: false,
-        listingStale: true,
+        reason: "listing-stale",
       });
     }
   };
@@ -166,10 +167,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
         moveOut(copies, to);
         return copies.length;
       }),
-    // Named apart from the move by Message-ID, so a test can refuse just this one.
+    // Named as the live Mailbox names it: a refusal of `moving mail to …` hits either move.
     moveUid: (uid, to) =>
-      operation(`moving mail to ${outcomeFolder(to)} by UID`, () => {
-        checkValidity(`moving mail to ${outcomeFolder(to)} by UID`);
+      operation(`moving mail to ${outcomeFolder(to)}`, () => {
+        checkValidity(`moving mail to ${outcomeFolder(to)}`);
         const mails = watched().filter((mail) => mail.uid === uid);
         moveOut(mails, to);
         return mails.length > 0;
@@ -177,7 +178,9 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     close: Effect.sync(() => {
       closed = true;
       wake(
-        Effect.fail(new MailboxError({ message: "the mailbox is closed", connectionLost: true })),
+        Effect.fail(
+          new MailboxError({ message: "the mailbox is closed", reason: "connection-lost" }),
+        ),
       );
     }),
   });
@@ -234,7 +237,7 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
      */
     disconnect(attempts = 0) {
       unreachable = attempts;
-      wake(Effect.fail(failure("waiting for new mail", "connection lost", true)));
+      wake(Effect.fail(failure("waiting for new mail", "connection lost", "connection-lost")));
     },
     /** Resolves once the watcher waits for a change, i.e. finished its scan; at once if it does. */
     waiting(): Promise<void> {

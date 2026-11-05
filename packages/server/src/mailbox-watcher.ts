@@ -13,7 +13,7 @@ import {
   recordFailedRun,
   retryDelayMs,
 } from "./mail-fate";
-import type { MailFate, MoveFate } from "./mail-fate";
+import type { FailedRun, MailFate, MoveFate } from "./mail-fate";
 
 /** One run of the Intake workflow, as the watcher starts it. */
 interface IntakeRun {
@@ -49,6 +49,8 @@ export interface MailboxWatcherOptions {
   now?: () => number;
   /** How long to wait before the `attempt`-th try after a failure; tests pass their own. */
   retryDelayAfterFailure?: (attempt: number) => number;
+  /** Calls `tick` every `ms` until the returned function is called; tests pass their own. */
+  every?: (ms: number, tick: () => void) => () => void;
 }
 
 export interface MailboxWatcher {
@@ -63,6 +65,14 @@ export interface MailboxWatcher {
 /** 1 s after the first failure, doubling, at most 60 s. */
 const defaultRetryDelay = (attempt: number) => Math.min(1000 * 2 ** (attempt - 1), 60_000);
 
+const defaultEvery = (ms: number, tick: () => void) => {
+  const timer = setInterval(tick, ms);
+  return () => clearInterval(timer);
+};
+
+/** How long a run of the watcher's own may go before it warns, and again each time after. */
+export const LONG_RUN_MS = 10 * 60_000;
+
 /** The Message-ID of an active run's input, if its snapshot (stored as JSON or not) shows one. */
 const ActiveInput = Schema.Struct({
   context: Schema.Struct({ input: Schema.Struct({ messageId: Schema.String }) }),
@@ -72,8 +82,8 @@ const decodeActiveInput = Schema.decodeUnknownOption(
 );
 
 /** Whether a failure at one mail ends the look: the connection is gone, or the UIDs are stale. */
-const endsLook = (error: unknown) =>
-  error instanceof MailboxError && (error.connectionLost || error.listingStale === true);
+const endsLook = (error: unknown): error is MailboxError =>
+  error instanceof MailboxError && error.reason !== "refused";
 
 /**
  * Watches the intake mailbox: looks at the watched folder at once, after every new-mail
@@ -83,13 +93,16 @@ const endsLook = (error: unknown) =>
  * mail to `hex/processed`; copies of one Message-ID start one run. An Intake whose runs failed is
  * retried no sooner than {@link retryDelayMs} after its last failed run, and fails permanently on
  * its {@link MAX_FAILED_RUNS}th. A mail that can't become an Intake goes to `hex/failed` at once,
- * without a run. Every decision and every action goes by the Message-ID hex reads from the mail,
- * the one the run, the ledger and the active runs know it by; the server's reading only spares
- * fetching a mail passed over anyway (seen in this look, an active run, waiting for its retry).
- * A failure with one mail is logged at warn, naming its UID and the server's Message-ID, and the
- * look goes on with the next. A lost connection, UIDs that changed meaning, a failure to list the
- * folder or the active runs, or to wait for news, ends the look at warn (anything unexpected at
- * error), and the watcher tries again after a growing delay, for as long as it runs.
+ * without a run. Every action goes by the Message-ID hex reads from the mail, the one the run,
+ * the ledger and the active runs know it by; the server's reading decides only to pass over a
+ * mail without fetching it (another copy seen in this look, an active run, a retry still
+ * waiting), so when the two differ, it can hold back a mail hex would run. A run of its own still
+ * going after {@link LONG_RUN_MS} is a warning, repeated as long as it goes on: no other mail is
+ * taken meanwhile. A failure with one mail is logged at warn, naming its UID and the server's
+ * Message-ID, and the look goes on with the next. A lost connection, UIDs that changed meaning, a
+ * failure to list the folder or the active runs, or to wait for news, ends the look at warn
+ * (anything unexpected at error), and the watcher tries again after a growing delay, for as long
+ * as it runs.
  */
 export function watchMailbox({
   runtime,
@@ -98,6 +111,7 @@ export function watchMailbox({
   log,
   now = Date.now,
   retryDelayAfterFailure = defaultRetryDelay,
+  every = defaultEvery,
 }: MailboxWatcherOptions): MailboxWatcher {
   let stopped = false;
   /** Message-IDs whose skip because of an active run was logged; dropped once no longer active. */
@@ -142,40 +156,91 @@ export function watchMailbox({
     else log.info(line);
   };
 
-  /** Logs `fate` of the Intake `messageId`. */
-  const logFate = (messageId: string, what: string, fate: MailFate) =>
-    logBy(fate, `hex: Intake ${messageId}: ${what}; ${describeMove(fate)}`);
-
   /**
-   * `fate` of a move to `fate.to`, finished: the mail at `uid` moved by its UID when the move
-   * found no copy by Message-ID (the server reads the Message-ID differently from hex, say). A
-   * move by UID that fails makes it `not-moved`.
+   * `fate` of a move to `fate.to`, finished by moving the mail at `uid` by its UID: when the move
+   * found no copy by Message-ID (the server reads the Message-ID differently from hex, say), and,
+   * once more, when a move to `hex/failed` failed (else the next look would run the Intake afresh).
+   * A move by UID that fails makes it `not-moved`; with the error, when that ends the look.
    */
   const settle = <To extends MailOutcome>(uid: number, fate: MoveFate<To>) =>
-    fate.status !== "not-in-mailbox"
-      ? Effect.succeed(fate)
-      : Mailbox.use((mailbox) => mailbox.moveUid(uid, fate.to)).pipe(
-          Effect.map((moved) =>
-            moved ? ({ status: "moved", to: fate.to, copies: 1 } as MoveFate<To>) : fate,
+    fate.status === "not-in-mailbox" || (fate.status === "not-moved" && fate.to === "failed")
+      ? Mailbox.use((mailbox) => mailbox.moveUid(uid, fate.to)).pipe(
+          Effect.map(
+            (moved) =>
+              [
+                moved ? ({ status: "moved", to: fate.to, copies: 1 } as MoveFate<To>) : fate,
+                undefined,
+              ] as const,
           ),
-          Effect.catchTag("MailboxError", ({ message }) =>
-            Effect.succeed({ status: "not-moved", to: fate.to, reason: message } as MoveFate<To>),
+          Effect.catchTag("MailboxError", (error) =>
+            Effect.succeed([
+              { status: "not-moved", to: fate.to, reason: error.message } as MoveFate<To>,
+              endsLook(error) ? error : undefined,
+            ] as const),
           ),
-        );
+        )
+      : Effect.succeed([fate, undefined] as const);
+
+  /**
+   * `fate` settled ({@link settle}) and logged as `describe` puts it (`undefined`: not logged,
+   * `warn`: at warn whatever the fate); then a settling error that ends the look ends it.
+   */
+  const settleLogged = <To extends MailOutcome>(
+    uid: number,
+    fate: MoveFate<To>,
+    describe: (settled: MoveFate<To>) => string | undefined,
+    warn = false,
+  ) =>
+    Effect.gen(function* () {
+      const [settled, ending] = yield* settle(uid, fate);
+      const line = describe(settled);
+      if (line !== undefined) {
+        if (warn) log.warn(line);
+        else logBy(settled, line);
+      }
+      if (ending) return yield* Effect.fail(ending);
+    });
 
   /** The mail at `uid` of the processed Intake `messageId` moved to `hex/processed`, logged. */
   const settleProcessed = (messageId: string, uid: number, what: string) =>
     Effect.gen(function* () {
-      logFate(messageId, what, yield* settle(uid, yield* moveMail(messageId, "processed")));
+      yield* settleLogged(
+        uid,
+        yield* moveMail(messageId, "processed"),
+        (settled) => `hex: Intake ${messageId}: ${what}; ${describeMove(settled)}`,
+      );
     });
 
-  /** The failed run `runId` recorded, the mail at `uid` settled, the consequence logged. */
+  /** The failed run `runId` recorded, the mail at `uid` settled, the consequence warned of. */
   const countFailedRun = (messageId: string, runId: string, uid: number) =>
     Effect.gen(function* () {
       const failed = yield* recordFailedRun(messageId, runId);
-      const mail =
-        failed.mail.status === "kept-for-retry" ? failed.mail : yield* settle(uid, failed.mail);
-      logBy(mail, `hex: Intake ${messageId}: ${describeFailedRun({ ...failed, mail })}`);
+      const line = (mail: FailedRun["mail"]) =>
+        `hex: Intake ${messageId}: ${describeFailedRun({ ...failed, mail })}`;
+      if (failed.mail.status === "kept-for-retry") log.warn(line(failed.mail));
+      else yield* settleLogged(uid, failed.mail, line, true);
+    });
+
+  /**
+   * `run`'s start, warning each {@link LONG_RUN_MS} it goes on: the watcher takes no other mail
+   * meanwhile.
+   */
+  const startWatched = (run: IntakeRun, intake: Intake) =>
+    Effect.suspend(() => {
+      const startedAt = now();
+      const stopWarning = every(LONG_RUN_MS, () => {
+        const minutes = Math.round((now() - startedAt) / 60_000);
+        try {
+          log.warn(
+            `hex: Intake ${intake.messageId}: its run ${run.runId} has been running for ${minutes} min; the mailbox watcher takes no other mail until it ends`,
+          );
+        } catch {
+          // A logger that fails here has no caller to tell; the next tick tries again.
+        }
+      });
+      return Effect.result(Effect.tryPromise(() => run.start({ inputData: intake }))).pipe(
+        Effect.ensuring(Effect.sync(stopWarning)),
+      );
     });
 
   /** Runs the workflow on `intake`, the mail at `uid`, and logs what came of it. */
@@ -186,9 +251,7 @@ export function watchMailbox({
         try: () => workflow.createRun(),
         catch: (cause) => new Error(`creating its run failed: ${messageOf(cause)}`),
       });
-      const started = yield* Effect.result(
-        Effect.tryPromise(() => run.start({ inputData: intake })),
-      );
+      const started = yield* startWatched(run, intake);
       if (started._tag === "Failure") {
         log.warn(
           `hex: Intake ${messageId}: its run failed: ${messageOf(started.failure.cause ?? started.failure)}`,
@@ -202,7 +265,11 @@ export function watchMailbox({
       const result = started.success;
       if (result.status === "success" && "result" in result) {
         const { status, mail } = result.result;
-        logFate(messageId, status, yield* settle(uid, mail));
+        yield* settleLogged(
+          uid,
+          mail,
+          (settled) => `hex: Intake ${messageId}: ${status}; ${describeMove(settled)}`,
+        );
         return;
       }
       // Mastra's failed result carries the step's error as it serialised it, `message` included.
@@ -212,8 +279,12 @@ export function watchMailbox({
       const fate = mailFateOf(error);
       if (fate) {
         if (fate.status !== "kept-for-retry") {
-          const settled = yield* settle(uid, fate);
-          if (settled !== fate) logFate(messageId, "failed permanently", settled);
+          // The run's own line told the fate; a settled one gets a line of its own.
+          yield* settleLogged(uid, fate, (settled) =>
+            settled === fate
+              ? undefined
+              : `hex: Intake ${messageId}: failed permanently; ${describeMove(settled)}`,
+          );
         }
         return;
       }
@@ -235,7 +306,8 @@ export function watchMailbox({
 
     /**
      * Whether to pass over the Intake `messageId` without looking further: another copy was seen
-     * in this look, it has an active run, or it waits for its retry. Acts on nothing.
+     * in this look, it has an active run (warned of once), or it waits for its retry. Decides
+     * only to pass over: moves nothing, counts nothing.
      */
     const passOver = (messageId: string) =>
       Effect.gen(function* () {
@@ -273,10 +345,10 @@ export function watchMailbox({
         }
         const failed = yield* ledger.failedRuns(messageId);
         if (failed && failed.count >= MAX_FAILED_RUNS) {
-          logFate(
-            messageId,
-            "failed permanently",
-            yield* settle(uid, yield* failPermanently(messageId)),
+          yield* settleLogged(
+            uid,
+            yield* failPermanently(messageId),
+            (settled) => `hex: Intake ${messageId}: failed permanently; ${describeMove(settled)}`,
           );
           return false;
         }
@@ -284,8 +356,10 @@ export function watchMailbox({
       });
 
     /** The mail at `uid`, listed with the server's reading of its Message-ID. */
-    const look = (uid: number, listed: string | undefined) =>
+    const look = (uid: number, serverId: string | undefined) =>
       Effect.gen(function* () {
+        // Normalised as the ledger and the active runs key them, whoever read the header.
+        const listed = serverId === undefined ? undefined : normalizeMessageId(serverId);
         if (listed !== undefined && (yield* passOver(listed))) {
           seen.add(listed);
           return;
@@ -298,7 +372,7 @@ export function watchMailbox({
           yield* mailbox.moveUid(uid, "failed");
           return;
         }
-        const intake = read.success;
+        const intake = { ...read.success, messageId: normalizeMessageId(read.success.messageId) };
         const run = yield* shouldRun(intake.messageId, uid);
         seen.add(intake.messageId);
         if (listed !== undefined) seen.add(listed);
@@ -320,14 +394,7 @@ export function watchMailbox({
             log.warn(`hex: mailbox: ${mail}: ${messageOf(error)}; going on with the next mail`);
             return Effect.void;
           }
-          const { connectionLost, listingStale } = error as MailboxError;
-          return Effect.fail(
-            new MailboxError({
-              message: `${mail}: ${messageOf(error)}`,
-              connectionLost,
-              ...(listingStale ? { listingStale } : {}),
-            }),
-          );
+          return Effect.fail(new MailboxError({ ...error, message: `${mail}: ${error.message}` }));
         }),
       );
     }

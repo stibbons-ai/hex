@@ -517,7 +517,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
             Effect.map((failed) => ({ text: describeFailedRun(failed), mail: failed.mail })),
             Effect.catchTag("LedgerError", ({ message }) =>
               Effect.succeed({
-                text: `recording the failed run failed: ${message}`,
+                text: `counting the failed run failed: ${message}`,
                 mail: undefined,
               }),
             ),

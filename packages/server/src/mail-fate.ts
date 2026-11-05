@@ -14,7 +14,10 @@ const moveFates = <To extends MailOutcome>(to: To) =>
     Schema.Struct({ status: Schema.Literal("moved"), to: Schema.Literal(to), copies: Copies }),
     /** No copy in the watched folder (an Intake not from the mailbox, or moved already). */
     Schema.Struct({ status: Schema.Literal("not-in-mailbox"), to: Schema.Literal(to) }),
-    /** The move failed (the mailbox unreachable): the mail stays until a later scan moves it. */
+    /**
+     * The move failed (the mailbox unreachable): the mail stays. The watcher's next look moves a
+     * processed Intake's mail; an Intake that failed permanently it runs afresh instead.
+     */
     Schema.Struct({
       status: Schema.Literal("not-moved"),
       to: Schema.Literal(to),
@@ -108,7 +111,9 @@ export function describeMove(mail: MailFate): string {
     case "not-in-mailbox":
       return "no mail of it was in the watched folder";
     case "not-moved":
-      return `moving its mail to ${outcomeFolder(mail.to)} failed (${mail.reason})`;
+      return mail.to === "failed"
+        ? `moving its mail to hex/failed failed (${mail.reason}); the mailbox watcher runs it afresh (a new series of ${MAX_FAILED_RUNS} runs) at its next look`
+        : `moving its mail to ${outcomeFolder(mail.to)} failed (${mail.reason})`;
     case "kept-for-retry":
       return "any mail of it in the watched folder stays there";
   }

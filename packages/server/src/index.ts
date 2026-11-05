@@ -13,7 +13,7 @@ import { allowedHosts } from "./hosts";
 import { DEFAULT_HOST } from "./listen-address";
 import { INTAKE_WORKFLOW_ID } from "./intake-workflow";
 import { watchMailbox } from "./mailbox-watcher";
-import type { MailboxWatcher, MailboxWatcherOptions } from "./mailbox-watcher";
+import type { MailboxWatcherOptions } from "./mailbox-watcher";
 import { router } from "./router";
 
 export { contract } from "./contract";
@@ -87,8 +87,8 @@ export interface RunningServer {
   mastra: Mastra;
   /**
    * Settles once the runs active in storage were restarted (Mastra's boot sweep, run after the
-   * server started; it settles when the restarted runs finished) and then the mailbox watcher,
-   * if any, started. Never rejects: a failed sweep is logged, and the watcher starts anyway.
+   * server started; it settles when the restarted runs finished). The mailbox watcher, if any,
+   * starts alongside it. Never rejects: a failed sweep is logged.
    */
   booted: Promise<void>;
   /**
@@ -118,7 +118,7 @@ export interface RunningServer {
  * is disconnected again when the adapter allows it (Slack: only while it is still checking the
  * bot token); otherwise the caller is expected to exit, as `main.ts` does. Once serving, it
  * restarts the workflow runs a stopped or killed hex left active (hex has no Mastra deployer to
- * do it, ADR 0004), then starts the mailbox watcher, if any (see `booted`).
+ * do it, ADR 0004) and starts the mailbox watcher, if any, alongside (see `booted`).
  */
 export async function startServer({
   databasePath,
@@ -267,22 +267,16 @@ export async function startServer({
       },
     });
     hosts = allowedHosts(server.port ?? port, hostname);
-    let stopping = false;
-    let watcher: MailboxWatcher | undefined;
-    // The watcher starts once the sweep settled, so a resumed run and the watcher never race for
-    // one Intake. A run whose previous process's lease is still live is only re-checked later by
-    // Mastra; the watcher skips the Intake of every run active in storage.
-    const booted = mastra
-      .restartAllActiveWorkflowRuns()
-      .catch((error: unknown) => {
-        mastra
-          .getLogger()
-          .error("hex: restarting the active workflow runs failed; their Intakes wait", error);
-      })
-      .then(() => {
-        if (!watching || stopping) return;
-        watcher = watchMailbox({ ...watching, log: mastra.getLogger() });
-      });
+    // The watcher starts alongside the sweep, so a run that hangs on resuming doesn't hold up all
+    // intake. They never race for one Intake: a run to resume stays `running` in storage until it
+    // ends, so the watcher skips its Intake (also while Mastra waits for a previous process's lease
+    // to lapse before it re-checks the run).
+    const watcher = watching && watchMailbox({ ...watching, log: mastra.getLogger() });
+    const booted = mastra.restartAllActiveWorkflowRuns().catch((error: unknown) => {
+      mastra
+        .getLogger()
+        .error("hex: restarting the active workflow runs failed; their Intakes wait", error);
+    });
     return {
       url: server.url,
       hostname: server.hostname ?? "",
@@ -292,8 +286,7 @@ export async function startServer({
         let stillDisconnecting: Promise<void> | undefined;
         return closeInOrder([
           async () => {
-            stopping = true;
-            await watcher?.stop();
+            if (watcher) await watcher.stop();
           },
           async () => {
             chatAgent?.close();

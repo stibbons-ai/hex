@@ -13,7 +13,7 @@ import {
   createIntakeWorkflow,
 } from "../src/intake-workflow";
 import type { IntakeForwarding } from "../src/intake-workflow";
-import { watchMailbox } from "../src/mailbox-watcher";
+import { LONG_RUN_MS, watchMailbox } from "../src/mailbox-watcher";
 import type { IntakeWorkflow, MailboxWatcher } from "../src/mailbox-watcher";
 import { buildEml, pdfMail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
@@ -143,6 +143,8 @@ async function freshWatcher({
   let watcher: MailboxWatcher | undefined;
   /** Each run the watcher started, settled (either way) when the run ends. */
   const starts: Promise<unknown>[] = [];
+  /** The watcher's repeating timers, by their tick, with their interval: a test fires them. */
+  const timers = new Map<() => void, number>();
   return {
     asked,
     mailer,
@@ -150,6 +152,7 @@ async function freshWatcher({
     clock,
     failing,
     starts,
+    timers,
     workflow: registered,
     /** Every logged line, as `level: message`. */
     log: () => log.map(({ level, message }) => `${level}: ${message}`),
@@ -175,6 +178,10 @@ async function freshWatcher({
         log: logger,
         now: () => Date.now() + clock.offset,
         retryDelayAfterFailure: () => 0,
+        every: (ms, tick) => {
+          timers.set(tick, ms);
+          return () => timers.delete(tick);
+        },
       });
       cleanups.push(() => watcher!.stop());
     },
@@ -408,17 +415,26 @@ describe("watchMailbox", () => {
       expect(await hex.runs()).toEqual(["success"]);
     });
 
-    test("two copies in one look start one run", async () => {
+    test("a second copy in the look is passed over: no run, nor a move as already processed", async () => {
       const hex = await freshWatcher();
       hex.mailbox.deliver(emlOf("diverging-copies@shop.example"), SERVER_VIEW);
       hex.mailbox.deliver(emlOf("diverging-copies@shop.example"), SERVER_VIEW);
       hex.start();
       await hex.scanned();
       expect(hex.asked).toHaveLength(1);
-      expect(await hex.runs()).toEqual(["success"]);
+      // The run moved its own copy by UID; the second waits for the next look.
+      expect(hex.mailbox.messageIds()).toEqual(["server-view@shop.example"]);
+      expect(hex.log()).not.toContainEqual(expect.stringContaining("already processed"));
+      hex.mailbox.tick();
+      await hex.scanned();
+      expect(hex.mailbox.messageIds("hex/processed")).toHaveLength(2);
+      expect(hex.log()).toContain(
+        "info: hex: Intake diverging-copies@shop.example: already processed; its mail was moved to hex/processed",
+      );
+      expect(hex.asked).toHaveLength(1);
     });
 
-    test("a move by UID that fails is a warning; the next look moves the mail, no second run", async () => {
+    test("a move by UID a stale listing fails is a warning and ends the look; the next look moves the mail, no second run", async () => {
       const model = blockingModel();
       const hex = await freshWatcher({ script: model.script });
       hex.mailbox.deliver(emlOf("diverging-stuck@shop.example"), SERVER_VIEW);
@@ -433,10 +449,14 @@ describe("watchMailbox", () => {
           /^warn: hex: Intake diverging-stuck@shop\.example: processed; moving its mail to hex\/processed failed \(.*UIDVALIDITY.*\)$/,
         ),
       );
-      expect(hex.mailbox.messageIds()).toEqual(["server-view@shop.example"]);
-      hex.mailbox.tick();
-      await hex.scanned();
+      expect(hex.log()).toContainEqual(
+        expect.stringMatching(
+          /^warn: hex: mailbox: UID 1 \(server-view@shop\.example as the server reads it\): .*UIDVALIDITY.*; trying again in 0 s \(attempt 1\)$/,
+        ),
+      );
+      // Tried again at once, without waiting for news.
       expect(hex.mailbox.messageIds("hex/processed")).toEqual(["server-view@shop.example"]);
+      expect(hex.mailbox.waits).toEqual([60_000]);
       expect(hex.asked).toHaveLength(1);
     });
 
@@ -495,6 +515,44 @@ describe("watchMailbox", () => {
     expect(hex.log()).toContain(
       "warn: hex: Intake limit@shop.example: failed permanently; its mail was moved to hex/failed",
     );
+  });
+
+  /** An always-failing Intake `messageId` driven to its 5th failed run, `refused` moves failing. */
+  async function toFifthFailure(messageId: string, refused: number) {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.mailbox.deliver(emlOf(messageId));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      if (run === 5) hex.mailbox.refuse("moving mail to hex/failed", refused);
+      // Well past any retry delay, measured from the real time of the last failure.
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.asked).toHaveLength(5);
+    return hex;
+  }
+
+  test("a failed move to hex/failed is tried once more by UID", async () => {
+    const hex = await toFifthFailure("move-once@shop.example", 1);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["move-once@shop.example"]);
+    expect(hex.log()).toContain(
+      "warn: hex: Intake move-once@shop.example: failed permanently; its mail was moved to hex/failed",
+    );
+  });
+
+  test("a move to hex/failed failing twice says the Intake is run afresh at the next look", async () => {
+    const hex = await toFifthFailure("move-never@shop.example", 2);
+    expect(hex.mailbox.messageIds()).toEqual(["move-never@shop.example"]);
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^warn: hex: Intake move-never@shop\.example: failed permanently; moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher runs it afresh \(a new series of 5 runs\) at its next look$/,
+      ),
+    );
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(6);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {
@@ -573,7 +631,9 @@ describe("watchMailbox", () => {
       count: 1,
     });
     expect(hex.log()).toContainEqual(expect.stringContaining("storage write failed"));
-    expect(hex.log().at(-1)).toContain("failed run 1 of 5");
+    expect(hex.log().at(-1)).toMatch(
+      /^warn: hex: Intake rejected@shop\.example: failed run 1 of 5/,
+    );
   });
 
   test("a run whose start rejects after it processed the Intake is not counted", async () => {
@@ -594,6 +654,8 @@ describe("watchMailbox", () => {
       }),
     });
     hex.mailbox.deliver(emlOf("late@shop.example"));
+    // The run's own move fails: the watcher moves the mail of the Intake it finds processed.
+    hex.mailbox.refuse("moving mail to hex/processed");
     hex.start();
     await hex.scanned();
     expect(await hex.ledger((ledger) => ledger.failedRuns("late@shop.example"))).toBeUndefined();
@@ -601,6 +663,36 @@ describe("watchMailbox", () => {
     expect(hex.log()).toContainEqual(
       expect.stringContaining("hex: Intake late@shop.example: processed nonetheless"),
     );
+  });
+
+  test("a run of its own going on is a warning every 10 min, naming it; none once it ended", async () => {
+    const model = blockingModel();
+    const hex = await freshWatcher({ script: model.script });
+    hex.mailbox.deliver(emlOf("slow@shop.example"));
+    hex.start();
+    await within(model.reading, "the run reading its Document date");
+    const [timer, ...others] = [...hex.timers];
+    expect(others).toEqual([]);
+    const [tick, everyMs] = timer!;
+    expect(everyMs).toBe(LONG_RUN_MS);
+    hex.clock.advance(10 * 60_000);
+    tick();
+    hex.clock.advance(10 * 60_000);
+    tick();
+    const warning = (minutes: number) =>
+      expect.stringMatching(
+        new RegExp(
+          `^warn: hex: Intake slow@shop\\.example: its run \\S+ has been running for ${minutes} min; the mailbox watcher takes no other mail until it ends$`,
+        ),
+      );
+    expect(hex.log().filter((line) => line.includes("has been running"))).toEqual([
+      warning(10),
+      warning(20),
+    ]);
+    model.release();
+    await hex.scanned();
+    expect(hex.timers.size).toBe(0);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["slow@shop.example"]);
   });
 
   test("a mail the server reads as a processed Intake but hex reads as another one is run", async () => {
@@ -656,6 +748,9 @@ describe("watchMailbox", () => {
     hex.mailbox.deliver(emlOf("a@shop.example", "a.pdf"));
     hex.start();
     await hex.scanned();
+    expect(hex.log()).toContainEqual(
+      "error: hex: mailbox: UID 1 (a@shop.example as the server reads it): something unexpected failed",
+    );
     expect(hex.log()).toContainEqual(
       expect.stringMatching(
         /^error: hex: mailbox: the watcher failed unexpectedly: .*the logger broke/s,
