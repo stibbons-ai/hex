@@ -103,13 +103,12 @@ const RunFiling = Schema.Struct({ ...Filing.fields, fellBack: Schema.Boolean });
 export type RunFiling = typeof RunFiling.Type;
 /**
  * This run's Filings, each in the ledger as soon as it was made, and, when the Filing branch
- * failed, why (the Filings made before the failure stay). The failed shape comes first:
- * decoding a failure as the ok shape would drop its `failure`.
+ * failed, why (the Filings made before the failure stay).
  */
-const Filed = Schema.Union([
-  Schema.Struct({ filings: Schema.Array(RunFiling), failure: Schema.String }),
-  Schema.Struct({ filings: Schema.Array(RunFiling) }),
-]);
+const Filed = Schema.Struct({
+  filings: Schema.Array(RunFiling),
+  failure: Schema.optionalKey(Schema.String),
+});
 
 type IntakeServices = Outbox | IntakeLedger | DateExtractor | Mailer;
 
@@ -207,11 +206,11 @@ const FILE_STEP_ID = "file-documents";
  * branches that failed. A send the server accepted but the ledger couldn't record fails its
  * branch as `sent-unrecorded`: running the Intake again sends it again. The run fails, naming each
  * failed branch, when any failed; the Intake is recorded as processed only when all succeeded.
- * Only a ledger that can't be read ends the run before every branch was attempted (before
- * anything is sent, when it fails in the Forwarding step). A failed model call fails the Filing
- * branch before any of its Documents is filed. An Intake without Documents forwards nothing and is
- * recorded with no Filings. Every ledger call takes the Intake's Message-ID as given (the ledger
- * normalises it). Each step decodes its own output.
+ * Only a ledger that can't be read, or an unexpected defect, ends the run before every branch was
+ * attempted (before anything is sent, when it happens in the Forwarding step). A failed model call
+ * fails the Filing branch before any of its Documents is filed. An Intake without Documents
+ * forwards nothing and is recorded with no Filings. Every ledger call takes the Intake's
+ * Message-ID as given (the ledger normalises it). Each step decodes its own output.
  */
 export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWorkflowOptions) {
   /** Runs `program` on the services, then decodes its result as the step's output. */
@@ -417,7 +416,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
               return [];
           }
         }),
-        ...("failure" in inputData ? [`filing: ${inputData.failure}`] : []),
+        ...(inputData.failure === undefined ? [] : [`filing: ${inputData.failure}`]),
       ];
       if (failures.length > 0) throw new Error(failures.join("; "));
       return run(

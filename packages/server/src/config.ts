@@ -137,8 +137,8 @@ const SmtpEnv = Config.all({
 /**
  * The SMTP settings from `env`: `HEX_SMTP_HOST`, `HEX_SMTP_PORT` (465 when unset),
  * `HEX_SMTP_SECURITY` (`tls` on port 465, else `starttls`, when unset; `plain` only for a
- * loopback host), `HEX_SMTP_USER` and `HEX_SMTP_PASSWORD`, both redacted. Throws naming the
- * variable, never its value.
+ * loopback IP address, see `isLoopbackHost`), `HEX_SMTP_USER` and `HEX_SMTP_PASSWORD`, both
+ * redacted. Throws naming the variable, never its value.
  */
 function smtpSettings(path: string, env: Env): SmtpSettings {
   const fail = (problem: string): never => configError(path, `forwarding: ${problem}`);
@@ -160,7 +160,7 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
   );
   if (security === "plain" && !isLoopbackHost(settings.host)) {
     fail(
-      `HEX_SMTP_SECURITY=plain is only allowed for a loopback host (localhost, 127.x.x.x, ::1); use tls or starttls for ${settings.host}`,
+      `HEX_SMTP_SECURITY=plain is only allowed for a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost); use tls or starttls for ${settings.host}`,
     );
   }
   return { ...settings, security };

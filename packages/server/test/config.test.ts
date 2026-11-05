@@ -344,9 +344,9 @@ describe("loadForwardingConfig", () => {
     ],
     ["STARTTLS on 465", { HEX_SMTP_SECURITY: "starttls" }, { port: 465, security: "starttls" }],
     [
-      "plain on localhost",
-      { HEX_SMTP_HOST: "localhost", HEX_SMTP_PORT: "2525", HEX_SMTP_SECURITY: "plain" },
-      { host: "localhost", port: 2525, security: "plain" },
+      "plain on 127.0.0.2",
+      { HEX_SMTP_HOST: "127.0.0.2", HEX_SMTP_PORT: "2525", HEX_SMTP_SECURITY: "plain" },
+      { host: "127.0.0.2", port: 2525, security: "plain" },
     ],
     [
       "plain on 127.0.0.1",
@@ -402,8 +402,16 @@ describe("loadForwardingConfig", () => {
     await expect(loading).rejects.not.toThrow(PASSWORD);
   });
 
-  test.each(["smtp.example.com", "127.0.0.1.example.com", "10.0.0.1"])(
-    "plaintext SMTP to %s is refused: only a loopback host may go without TLS",
+  test.each([
+    "smtp.example.com",
+    "127.0.0.1.example.com",
+    "10.0.0.1",
+    // Names are resolved by DNS, not /etc/hosts; no IPv4 address; brackets can't connect.
+    "localhost",
+    "127.999.999.999",
+    "[::1]",
+  ])(
+    "plaintext SMTP to %s is refused: only a loopback IP address may go without TLS",
     async (host) => {
       const path = await configFile({ ...valid, forwarding });
       const loading = loadForwardingConfig(path, {
@@ -412,7 +420,7 @@ describe("loadForwardingConfig", () => {
         HEX_SMTP_SECURITY: "plain",
       });
       await expect(loading).rejects.toThrow(
-        `hex config ${path}: forwarding: HEX_SMTP_SECURITY=plain is only allowed for a loopback host`,
+        `hex config ${path}: forwarding: HEX_SMTP_SECURITY=plain is only allowed for a loopback IP address`,
       );
       await expect(loading).rejects.not.toThrow(PASSWORD);
     },

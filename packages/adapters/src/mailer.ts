@@ -1,3 +1,4 @@
+import { isIPv4, isIPv6 } from "node:net";
 import { Context, Data, Effect, Layer, Redacted } from "effect";
 import { createTransport } from "nodemailer";
 import type { NodemailerError } from "nodemailer";
@@ -44,9 +45,13 @@ export class Mailer extends Context.Service<
  */
 export type SmtpSecurity = "tls" | "starttls" | "plain";
 
-/** Whether `host` is this machine: `localhost`, an IPv4 loopback address or `::1`. */
+/**
+ * Whether `host` is a loopback IP address: IPv4 in 127.0.0.0/8 or `::1`. Names never count, not
+ * even `localhost`: nodemailer resolves a name through DNS, not `/etc/hosts`, so it could reach
+ * another machine.
+ */
 export function isLoopbackHost(host: string): boolean {
-  return /^(?:localhost|127(?:\.\d{1,3}){3}|::1|\[::1\])$/i.test(host);
+  return (isIPv4(host) && host.startsWith("127.")) || (isIPv6(host) && host === "::1");
 }
 
 /** Where and as whom the SMTP Mailer sends. */
@@ -72,7 +77,7 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
       send: ({ to }) =>
         Effect.fail(
           new MailerError({
-            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed for a loopback host`,
+            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed to a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name)`,
           }),
         ),
     });

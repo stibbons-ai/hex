@@ -83,14 +83,17 @@ describe("smtpMailerLayer", () => {
     },
   );
 
-  test("plain to a host other than this machine sends nothing and never connects", async () => {
-    const logins = smtp.logins.length;
-    // 0.0.0.0 reaches the fake on this machine, but isn't a loopback address hex accepts for
-    // plaintext: had hex connected, the fake would have recorded a login.
-    const message = failure(await send("plain", { host: "0.0.0.0" }));
-    expect(message).toContain(
-      `sending to ${TO} via 0.0.0.0:${smtp.port} refused: plaintext SMTP is only allowed for a loopback host`,
-    );
-    expect(smtp.logins).toHaveLength(logins);
-  });
+  test.each(["0.0.0.0", "localhost", "127.999.999.999", "[::1]"])(
+    "plain to %s sends nothing and never connects: only a loopback IP address goes without TLS",
+    async (host) => {
+      const logins = smtp.logins.length;
+      // 0.0.0.0 and localhost reach the fake on this machine, but aren't loopback IP addresses
+      // hex accepts for plaintext: had hex connected, the fake would have recorded a login.
+      const message = failure(await send("plain", { host }));
+      expect(message).toContain(
+        `sending to ${TO} via ${host}:${smtp.port} refused: plaintext SMTP is only allowed to a loopback IP address`,
+      );
+      expect(smtp.logins).toHaveLength(logins);
+    },
+  );
 });

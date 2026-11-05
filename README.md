@@ -186,7 +186,7 @@ that it was already processed; then each target that has the Documents (`forward
 `already forwarded to sevdesk earlier`). It exits with code 1 and a message on a file it can't
 read or that is no mail, an Intake without a Message-ID or without a usable received date, a
 config it can't use (including SMTP settings missing while a target is enabled), or a failed run.
-A failed run still prints this run's Filings and the targets that have the Documents, and the
+A failed run still prints this run's Filings and the targets recorded as having the Documents, and the
 message names each failed branch once (`forwarding to paperless: …`, `filing: …`). Run it from the
 repository root. The same workflow is registered with the server as `intake`
 (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger at startup
@@ -273,28 +273,29 @@ The workflow, in order:
    Filings, also when it had no Documents.
 
 **Branches and retries.** Forwarding to each target and Filing (steps 4 and 5) are branches:
-every run attempts each of them, even when another failed, unless the ledger can't be read
-(then the run fails at once; in the Forwarding step, before anything is sent). When any branch
+every run attempts each of them, even when another failed, unless the ledger can't be read or an
+unexpected defect occurs (then the run fails at once; in the Forwarding step, before anything is
+sent). When any branch
 failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
 Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
-same Intake) repeats only the branches the ledger has a record of: a target recorded as having
+same Intake) repeats only the branches the ledger has no record of: a target recorded as having
 the Intake is not sent it again, and a Document recorded as filed is neither read by the model
 again nor filed again. A branch done but not recorded (the ledger failing right after) is done
 again: a send as described in step 3, a Filing as a second copy `name (1).pdf`.
 
-| Setting                        | Meaning                                                                                                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                                                                          |
-| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                                                     |
-| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                                                   |
-| `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`                                    |
-| `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config                         |
-| `HEX_CONFIG` `forwarding`      | Forwarding: `from` (the sender address) and `targets`, each name → `{ "to": address, "enabled": true/false }`; off when absent              |
-| `HEX_SMTP_HOST`                | SMTP server to forward through; required (as are user and password) once a target is enabled                                                |
-| `HEX_SMTP_PORT`                | SMTP port; default 465                                                                                                                      |
-| `HEX_SMTP_SECURITY`            | `tls` (implicit TLS), `starttls` (required, never AUTH in plaintext) or `plain` (loopback host only); default `tls` on 465, else `starttls` |
-| `HEX_SMTP_USER`                | SMTP login, read as a redacted secret                                                                                                       |
-| `HEX_SMTP_PASSWORD`            | SMTP password, read as a redacted secret: never in the config, an error, a log or the dev command's output                                  |
+| Setting                        | Meaning                                                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                                                                                                  |
+| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                                                                             |
+| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                                                                           |
+| `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`                                                            |
+| `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config                                                 |
+| `HEX_CONFIG` `forwarding`      | Forwarding: `from` (the sender address) and `targets`, each name → `{ "to": address, "enabled": true/false }`; off when absent                                      |
+| `HEX_SMTP_HOST`                | SMTP server to forward through; required (as are user and password) once a target is enabled                                                                        |
+| `HEX_SMTP_PORT`                | SMTP port; default 465                                                                                                                                              |
+| `HEX_SMTP_SECURITY`            | `tls` (implicit TLS), `starttls` (required, never AUTH in plaintext) or `plain` (loopback IP address only, e.g. `127.0.0.1`); default `tls` on 465, else `starttls` |
+| `HEX_SMTP_USER`                | SMTP login, read as a redacted secret                                                                                                                               |
+| `HEX_SMTP_PASSWORD`            | SMTP password, read as a redacted secret: never in the config, an error, a log or the dev command's output                                                          |
 
 The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
 required:
@@ -318,8 +319,10 @@ ledger records its Forwardings under, so renaming a target makes it a new one. A
 bare (`local@domain`, no display name, one per target). A disabled target sends nothing and
 records nothing; with no target enabled (or no `forwarding` section) Forwarding is off and no
 SMTP setting is needed. Plaintext SMTP (`HEX_SMTP_SECURITY=plain`) is refused unless the host is
-`localhost`, a `127.x.x.x` address or `::1`, so the credentials never cross a network
-unencrypted; the SMTP Mailer itself refuses it too, without connecting. The SMTP settings are
+a loopback IP address, an IPv4 `127.x.x.x` or `::1`, so the credentials never cross a network
+unencrypted. Names, `localhost` included, are refused: the SMTP client resolves a name through
+DNS, not `/etc/hosts`, so it could reach another machine; use `127.0.0.1`. The SMTP Mailer
+itself refuses it too, without connecting. The SMTP settings are
 read as Effect `Config` from the environment: the login (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) is
 declared in `secretspec.toml`, so the development shell exports it like the model keys; set
 `HEX_SMTP_HOST`, `HEX_SMTP_PORT` and `HEX_SMTP_SECURITY` yourself.

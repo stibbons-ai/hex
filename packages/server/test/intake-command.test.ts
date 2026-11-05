@@ -1,6 +1,7 @@
 // Walkthrough: Daniel runs `bun run intake <file.eml>` and finds the Documents in the Outbox, each
 // filed by its Document date as the model read it (a fake OpenAI on loopback) or, marked, by the
 // received date.
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -516,6 +517,58 @@ describe("bun run intake", () => {
       expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([[SEVDESK], [PAPERLESS]]);
       expect((await readdir(join(outbox, "2026-09/ER"))).sort()).toEqual(["Rechnung 4711.pdf"]);
       expect(await persistedText(dataDirectory)).not.toContain(SMTP_PASSWORD);
+    });
+
+    test("a send the ledger can't record exits 1 saying it was sent; the re-run sends it again", async () => {
+      const dataDirectory = join(directory, "forwarding-unrecorded");
+      const outbox = join(directory, "forwarding-unrecorded-outbox");
+      const config = await forwardingConfig("forwarding-unrecorded.json");
+      const eml = await writeMail("unrecorded.eml", invoice("unrecorded@shop.example"));
+      const env = {
+        HEX_DATA_DIR: dataDirectory,
+        HEX_OUTBOX_DIR: outbox,
+        HEX_CONFIG: config,
+        ...smtpEnv(),
+      };
+      const sent = smtp.mails.length;
+      // The real ledger's tables, then a trigger that refuses every Forwarding record, as a
+      // ledger that can't write would: the send goes through, its record doesn't.
+      await ledgerEntry(dataDirectory, "unrecorded@shop.example");
+      const database = new Database(join(dataDirectory, "mastra.db"));
+      try {
+        database.run(
+          "CREATE TRIGGER refuse_forwardings BEFORE INSERT ON hex_intake_forwardings BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        );
+      } finally {
+        database.close();
+      }
+
+      const failed = await intake([eml], env);
+      expect(failed.code).toBe(1);
+      for (const target of ["sevdesk", "paperless"]) {
+        expect(failed.stderr).toContain(`forwarding to ${target}: sent, but recording it failed (`);
+        // Not recorded, so not shown as a target that has the Documents.
+        expect(failed.stdout).not.toContain(`forwarded to ${target}`);
+      }
+      expect(failed.stderr).toContain("running this Intake again sends it again");
+      expect(failed.stdout).toStartWith(`hex intake: unrecorded@shop.example: filed 2 Documents`);
+      expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([[SEVDESK], [PAPERLESS]]);
+
+      const fixed = new Database(join(dataDirectory, "mastra.db"));
+      try {
+        fixed.run("DROP TRIGGER refuse_forwardings");
+      } finally {
+        fixed.close();
+      }
+      const retried = await intake([eml], env);
+      expect(retried).toMatchObject({ code: 0, stderr: "" });
+      // As the error said: both targets get the Intake a second time.
+      expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([
+        [SEVDESK],
+        [PAPERLESS],
+        [SEVDESK],
+        [PAPERLESS],
+      ]);
     });
 
     test("a target enabled without SMTP credentials fails before anything is filed, naming the variable", async () => {

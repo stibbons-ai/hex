@@ -911,9 +911,15 @@ describe("Intake workflow", () => {
       await mkdir(hex.outboxDirectory, { recursive: true });
       await writeFile(join(hex.outboxDirectory, "2026-09"), "not a folder");
       const mail = invoice("partly@shop.example");
-      await expect(hex.process(mail)).rejects.toThrow(
+      const failed = await hex.process(mail).catch((error: unknown) => error);
+      expect(failed).toBeInstanceOf(IntakeRunError);
+      expect((failed as IntakeRunError).message).toContain(
         'filing: filing "Gutschrift.pdf" into 2026-09/ER failed',
       );
+      // The error carries this run's one Filing made before the failure.
+      expect((failed as IntakeRunError).filings).toEqual([
+        { index: 0, path: "2026-10/ER/Rechnung 4711.pdf", fellBack: false },
+      ]);
       expect((await hex.branches("partly@shop.example")).filings).toEqual([
         { index: 0, path: "2026-10/ER/Rechnung 4711.pdf", fellBack: false },
       ]);
