@@ -1,7 +1,10 @@
 import { resolve } from "node:path";
-import { loadChatConfig } from "./config";
+import { closeInOrder } from "./close";
+import { loadChatConfig, loadIntakeConfig } from "./config";
 import { startServer } from "./index";
+import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
+import { dataPaths } from "./paths";
 
 const DEFAULT_PORT = 4111;
 
@@ -14,22 +17,31 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-// HEX_CONFIG names the config file (chat model and channels); unset or empty runs without chat.
-const configPath = process.env.HEX_CONFIG;
-const chat = configPath ? await loadChatConfig(resolve(configPath), process.env) : undefined;
+// HEX_CONFIG names the config file (chat and Intake settings); unset or empty runs without chat.
+const configPath = process.env.HEX_CONFIG ? resolve(process.env.HEX_CONFIG) : undefined;
+const chat = configPath ? await loadChatConfig(configPath, process.env) : undefined;
 if (!chat) {
   console.log(
     configPath
-      ? `hex: chat off: ${configPath} configures no channels`
+      ? `hex: chat off: ${process.env.HEX_CONFIG} configures no channels`
       : "hex: chat off: HEX_CONFIG is not set",
   );
 }
+const { category } = await loadIntakeConfig(configPath);
+const paths = dataPaths(process.env);
+// Built on the first Intake workflow run; disposed after the server stopped.
+const intakeRuntime = createIntakeRuntime(paths);
 const starting = startServer({
-  // HEX_DATA_DIR, else .data, relative to the working directory; empty counts as unset.
-  databasePath: resolve(process.env.HEX_DATA_DIR || ".data", "mastra.db"),
+  databasePath: paths.databasePath,
   port: parsePort(process.env.HEX_PORT),
+  workflows: {
+    [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category }),
+  },
   ...(chat ? { chat } : {}),
-});
+}).then((server) => ({
+  ...server,
+  stop: () => closeInOrder([() => server.stop(), () => intakeRuntime.dispose()]),
+}));
 // Registered before startup finishes, so a signal during startup still shuts down cleanly. A
 // signal that arrives while the modules are still loading gets the default (kill).
 const shutdown = shutdownOnce(starting, {

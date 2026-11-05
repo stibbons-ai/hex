@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createSlackAdapter } from "@chat-adapter/slack";
+import { CATEGORIES, DEFAULT_CATEGORY } from "@hex/domain";
+import type { Category } from "@hex/domain";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
 import { Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
@@ -188,16 +190,21 @@ const ConfigFile = Schema.Struct({
       }),
     ),
   }),
+  intake: Schema.optionalKey(
+    Schema.Struct({
+      /** The Category Documents are filed under; ER, the only one, when absent. */
+      category: Schema.optionalKey(Schema.Literals(CATEGORIES)),
+    }),
+  ),
 });
 
 /**
- * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings, or `undefined` when it
- * configures no channels. Throws an error naming the file and the problem on unreadable or
- * malformed JSON, a shape mismatch, an unknown adapter, or a missing or malformed secret.
+ * Reads and decodes the hex config file (`HEX_CONFIG`). Throws an error naming the file and the
+ * problem on an unreadable file, malformed JSON or a shape mismatch.
  */
-export async function loadChatConfig(path: string, env: Env): Promise<ChatOptions | undefined> {
-  const fail = (problem: string, cause?: unknown): never => {
-    throw new Error(`hex config ${path}: ${problem}`, cause === undefined ? {} : { cause });
+async function readConfigFile(path: string): Promise<typeof ConfigFile.Type> {
+  const fail = (problem: string, cause: unknown): never => {
+    throw new Error(`hex config ${path}: ${problem}`, { cause });
   };
   const text = await readFile(path, "utf8").catch((error: unknown) =>
     fail(`cannot read the file (${(error as Error).message})`, error),
@@ -208,7 +215,19 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
   } catch (error) {
     return fail(`not valid JSON (${(error as Error).message})`, error);
   }
-  const { chat } = decodeOrThrow(ConfigFile, json, `hex config ${path}: invalid config`);
+  return decodeOrThrow(ConfigFile, json, `hex config ${path}: invalid config`);
+}
+
+/**
+ * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings, or `undefined` when it
+ * configures no channels. Throws an error naming the file and the problem on unreadable or
+ * malformed JSON, a shape mismatch, an unknown adapter, or a missing or malformed secret.
+ */
+export async function loadChatConfig(path: string, env: Env): Promise<ChatOptions | undefined> {
+  const fail = (problem: string, cause?: unknown): never => {
+    throw new Error(`hex config ${path}: ${problem}`, cause === undefined ? {} : { cause });
+  };
+  const { chat } = await readConfigFile(path);
   const entries = Object.entries(chat.channels);
   if (entries.length === 0) return undefined;
   const channels: Record<string, ChatChannel> = {};
@@ -235,4 +254,18 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
   }
   const { model, providerOptions } = chat;
   return { model, ...(providerOptions ? { providerOptions } : {}), channels };
+}
+
+/** Intake workflow settings from the config file. */
+export interface IntakeConfig {
+  category: Category;
+}
+
+/**
+ * The Intake settings from the hex config file at `path`, or the defaults (Category ER) without a
+ * file. Fails like {@link loadChatConfig} on a file it can't use, e.g. a Category other than ER.
+ */
+export async function loadIntakeConfig(path: string | undefined): Promise<IntakeConfig> {
+  const intake = path === undefined ? undefined : (await readConfigFile(path)).intake;
+  return { category: intake?.category ?? DEFAULT_CATEGORY };
 }
