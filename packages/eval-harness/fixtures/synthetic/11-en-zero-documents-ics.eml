@@ -1,0 +1,30 @@
+From: Example Cloud Hosting <events@cloudhosting.example>
+To: Erika Mustermann <erika.mustermann@hex.example>
+Subject: Maintenance window on 12 Nov 2026
+Date: Wed, 04 Nov 2026 12:00:00 +0000
+Message-ID: <synthetic-11-en-zero-documents-ics@hex-fixtures.example>
+Content-Language: en
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="=_hex_11_1"
+
+--=_hex_11_1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hello Erika,
+
+planned maintenance on 12 Nov 2026, 02:00-04:00 UTC. The invite is attached.
+
+Kind regards
+The team
+--=_hex_11_1
+Content-Type: text/calendar; method=PUBLISH; name="maintenance.ics"
+Content-Disposition: attachment; filename="maintenance.ics"
+Content-Transfer-Encoding: base64
+
+QkVHSU46VkNBTEVOREFSDQpWRVJTSU9OOjIuMA0KUFJPRElEOi0vL2hleC8vc3ludGhldGljIGZp
+eHR1cmVzLy9FTg0KQkVHSU46VkVWRU5UDQpVSUQ6bWFpbnRlbmFuY2UtMjAyNi0xMS0xMkBjbG91
+ZGhvc3RpbmcuZXhhbXBsZQ0KRFRTVEFNUDoyMDI2MTEwNFQxMjAwMDBaDQpEVFNUQVJUOjIwMjYx
+MTEyVDAyMDAwMFoNCkRURU5EOjIwMjYxMTEyVDA0MDAwMFoNClNVTU1BUlk6UGxhbm5lZCBtYWlu
+dGVuYW5jZQ0KRU5EOlZFVkVOVA0KRU5EOlZDQUxFTkRBUg0K
+--=_hex_11_1--

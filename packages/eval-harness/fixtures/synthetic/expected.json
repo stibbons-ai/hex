@@ -1,0 +1,142 @@
+{
+  "intakes": [
+    {
+      "file": "01-de-pdf-invoice.eml",
+      "description": "German mail, German text PDF invoice; Rechnungsdatum 02.11.2026 beside Leistungsdatum and Fälligkeitsdatum.",
+      "documents": [
+        {
+          "fileName": "Rechnung-RE-2026-1042.pdf",
+          "documentDate": "2026-11-02"
+        }
+      ]
+    },
+    {
+      "file": "02-en-pdf-invoice.eml",
+      "description": "English mail, English text PDF invoice; Invoice date 2 Nov 2026 beside a Service period (October) and a Due date.",
+      "documents": [
+        {
+          "fileName": "INV-2026-0815.pdf",
+          "documentDate": "2026-11-02"
+        }
+      ]
+    },
+    {
+      "file": "03-de-iso-date.eml",
+      "description": "German text PDF with ISO dates: Rechnungsdatum 2026-10-14 beside Bestelldatum and Lieferdatum.",
+      "documents": [
+        {
+          "fileName": "Rechnung_2026-0457.pdf",
+          "documentDate": "2026-10-14"
+        }
+      ]
+    },
+    {
+      "file": "04-de-long-date.eml",
+      "description": "German text PDF with a written-out date: Rechnungsdatum 2. September 2026, printed after the Fälligkeitsdatum.",
+      "documents": [
+        {
+          "fileName": "Abschlagsrechnung-2026-09.pdf",
+          "documentDate": "2026-09-02"
+        }
+      ]
+    },
+    {
+      "file": "05-en-month-boundary.eml",
+      "description": "Month-boundary trap: mail Date 1 Oct 2026, Document date September 30, 2026 (long English format), Delivery date and Due date in October.",
+      "documents": [
+        {
+          "fileName": "PP-3301.pdf",
+          "documentDate": "2026-09-30"
+        }
+      ]
+    },
+    {
+      "file": "06-de-scan-png.eml",
+      "description": "Scanned German invoice as a PNG raster (no text layer); Rechnungsdatum 18.08.2026 beside Leistungsdatum and Fälligkeitsdatum.",
+      "documents": [
+        {
+          "fileName": "Scan-Rechnung-W-778.png",
+          "documentDate": "2026-08-18"
+        }
+      ]
+    },
+    {
+      "file": "07-en-scan-pdf.eml",
+      "description": "Scanned English invoice as an image-only PDF (no text layer); Invoice date 7 Aug 2026 beside Delivery date and Due date.",
+      "documents": [
+        {
+          "fileName": "scan-0001.pdf",
+          "documentDate": "2026-08-07"
+        }
+      ]
+    },
+    {
+      "file": "08-de-inline-logo.eml",
+      "description": "HTML mail with an inline logo (cid:, Content-Disposition inline, over 20 KB) that is not a Document, plus a text PDF invoice dated 27.10.2026.",
+      "documents": [
+        {
+          "fileName": "Rechnung-RE-2026-1077.pdf",
+          "documentDate": "2026-10-27"
+        }
+      ]
+    },
+    {
+      "file": "09-en-outlook-signature.eml",
+      "description": "Outlook-style HTML mail: the signature image is referenced via cid: but marked Content-Disposition attachment (over 20 KB, not a Document); text PDF invoice dated 15 Sep 2026.",
+      "documents": [
+        {
+          "fileName": "Invoice_DC-0101.pdf",
+          "documentDate": "2026-09-15"
+        }
+      ]
+    },
+    {
+      "file": "10-de-tracking-pixel.eml",
+      "description": "HTML mail with a 1×1 tracking pixel (cid:) that is not a Document, plus a text PDF invoice dated 06.07.2026.",
+      "documents": [
+        {
+          "fileName": "Rechnung_2026-0311.pdf",
+          "documentDate": "2026-07-06"
+        }
+      ]
+    },
+    {
+      "file": "11-en-zero-documents-ics.eml",
+      "description": "Zero-Document Intake: only a calendar invite (.ics, neither PDF nor image); the body mentions a date.",
+      "documents": []
+    },
+    {
+      "file": "12-de-zero-documents-plain.eml",
+      "description": "Zero-Document Intake: a plain-text mail without attachments that mentions invoice dates.",
+      "documents": []
+    },
+    {
+      "file": "13-de-multiple-documents.eml",
+      "description": "Three Documents in one Intake (invoice PDF 12.06.2026, credit note PDF 10.06.2026, scanned receipt PNG 2026-06-09) plus a .txt note that is not a Document.",
+      "documents": [
+        {
+          "fileName": "Rechnung-RE-2026-0612.pdf",
+          "documentDate": "2026-06-12"
+        },
+        {
+          "fileName": "Gutschrift-GS-2026-0031.pdf",
+          "documentDate": "2026-06-10"
+        },
+        {
+          "fileName": "Kassenbeleg.png",
+          "documentDate": "2026-06-09"
+        }
+      ]
+    },
+    {
+      "file": "14-de-undated-document.eml",
+      "description": "A Document that carries no date at all (cost estimate PDF): documentDate is null, Filing must fall back to the received date.",
+      "documents": [
+        {
+          "fileName": "Kostenvoranschlag.pdf",
+          "documentDate": null
+        }
+      ]
+    }
+  ]
+}

@@ -36,6 +36,9 @@
     "packages/eval-harness": {
       "name": "@hex/eval-harness",
       "version": "0.0.0",
+      "dependencies": {
+        "effect": "catalog:",
+      },
     },
     "packages/server": {
       "name": "@hex/server",
