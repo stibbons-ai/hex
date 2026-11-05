@@ -72,7 +72,9 @@ The keys are `ANTHROPIC_API_KEY` (the default Intake and eval model,
 `OPENAI_API_KEY` (an `openai/` one) and `GEMINI_API_KEY` (a
 `google/` one). `GOOGLE_GENERATIVE_AI_API_KEY`, the variable Mastra's model router reads for
 `google/` models, is derived from `GEMINI_API_KEY` and never stored. `HEX_SMTP_USER` and
-`HEX_SMTP_PASSWORD` are the SMTP login Forwarding sends with (see [Intake](#intake-dev-command)).
+`HEX_SMTP_PASSWORD` are the SMTP login Forwarding sends with (see [Intake](#intake-dev-command)),
+`HEX_IMAP_USER` and `HEX_IMAP_PASSWORD` the IMAP login hex reads the intake mailbox with (see
+[Mailbox](#mailbox)).
 All are optional, and a missing or rejected service token only warns: the shell still opens, and
 a model call without its key fails.
 
@@ -103,10 +105,23 @@ a DuckDB file, `<data dir>/observability.duckdb` (see [Traces and Studio](#trace
 The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
-SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first (up to
-5 seconds), then requests in flight, open streams and chat replies included, and a channel still
-disconnecting get 5 more seconds before they are closed (the cut-off is logged), then Mastra shuts
-down. A second signal of the same kind kills it at once.
+SIGINT or SIGTERM stops it: the mailbox watcher (see [Mailbox](#mailbox)) stops taking mail and
+closes its IMAP connection first, then hex stops taking chat messages and the channels disconnect
+(up to 5 seconds), then requests in flight, open streams and chat replies included, and a channel
+still disconnecting get 5 more seconds before they are closed (the cut-off is logged), then Mastra
+shuts down. An Intake run still going is cut off there and resumed at the next start. A second
+signal of the same kind kills it at once.
+
+Once listening, the server restarts every workflow run a stopped or killed hex left active in
+`mastra.db` (Mastra's `restartAllActiveWorkflowRuns()`, which hex calls itself since it has no
+Mastra deployer, ADR 0004), and only then starts the mailbox watcher, so a resumed run and the
+watcher never race for one Intake. A resumed run starts again at the step that was cut off, from
+its start, with the finished steps' outputs restored from the run's snapshot; the ledger makes
+repeating that step safe (a target or Document recorded is skipped), except a send the server
+accepted that was cut off before the ledger recorded it, which is sent again (see step 3 under
+[Intake](#intake-dev-command)). A run whose previous process still held its ownership lease
+(Mastra's, 15 s after a kill) is skipped by that sweep and restarted by Mastra once the lease
+lapses; until then the watcher leaves its Intake alone.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -163,12 +178,14 @@ docker compose down             # stops it; the data volume stays
   never Proton Drive or the Archive. On Linux the folder must be writable by uid 65532.
 - **Secrets** stay in `.env`, which is git-ignored; `.env.example` lists every variable with
   empty values. hex reads its own secrets (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`,
-  `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`) as Effect `Config.Redacted`; Mastra's model router reads
-  the model keys (`OPENAI_API_KEY`, …) straight from the environment.
+  `HEX_IMAP_USER`, `HEX_IMAP_PASSWORD`, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`) as Effect
+  `Config.Redacted`; Mastra's model router reads the model keys (`OPENAI_API_KEY`, …) straight
+  from the environment.
 - **Pinned settings**: `compose.yaml` sets `HEX_HOST=0.0.0.0`, `HEX_PORT=4111`,
   `HEX_DATA_DIR=/data`, `HEX_OUTBOX_DIR=/outbox`, `MASTRA_TELEMETRY_DISABLED=1` and
   `DO_NOT_TRACK=1` under `environment:`, which a `.env` line can't override. No config file is
-  mounted yet, so chat and Forwarding stay off (`hex: chat off: HEX_CONFIG is not set`).
+  mounted yet, so chat, Forwarding and the mailbox watcher stay off (`hex: chat off: HEX_CONFIG
+  is not set`, `hex: mailbox off: HEX_CONFIG is not set`).
 - **Network**: inside its container the server listens on every interface, which is why it logs
   the no-authentication warning; the port is published on the Mac's loopback only
   (`127.0.0.1:4111:4111`). Never publish it as `-p 4111:4111` or `"4111:4111"` without
@@ -236,16 +253,20 @@ that it was already processed; then each target that has the Documents (`forward
 read or that is no mail, an Intake without a Message-ID or without a usable received date, a
 config it can't use (including SMTP settings missing while a target is enabled), or a failed run.
 A failed run still prints this run's Filings and the targets recorded as having the Documents, and the
-message names each failed branch once (`forwarding to paperless: …`, `filing: …`). Run it from the
-repository root. The same workflow is registered with the server as `intake`
+message names each failed branch once (`forwarding to paperless: …`, `filing: …`), then the
+failed run's count (`failed run 1 of 5: …`, see [Mailbox](#mailbox)). Run it from the
+repository root. The dev command has no mailbox: it never connects to IMAP and moves no mail, but
+it does count its failed runs like the server, so its 5th failed run of one Intake starts the
+count afresh. The same workflow is registered with the server as `intake`
 (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger at startup
 and fails to start when it can't, or when a Forwarding target is enabled without usable SMTP
-settings.
+settings, and runs it for every mail in the intake mailbox (see [Mailbox](#mailbox)).
 
 The workflow, in order:
 
 1. **Ledger check**: an Intake whose Message-ID (trimmed, without `<>`) is in the ledger was
-   processed before; the run ends there and files or forwards nothing.
+   processed before; the run ends there, files or forwards nothing and moves its mail to
+   `hex/processed` (as in step 7).
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
    `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
    TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
@@ -320,20 +341,29 @@ The workflow, in order:
    place.
 6. **Ledger**: when every branch succeeded, the Intake is recorded as processed with its
    Filings, also when it had no Documents.
+7. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
+   (compared trimmed and without `<>`, as the ledger does, so a re-delivered mail moves too), goes
+   to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
+   5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
+   the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
+   nothing; a move that fails (the IMAP server unreachable) is reported, the outcome stands, and
+   the watcher's next look at the folder moves the mail.
 
 **Branches and retries.** Forwarding to each target and Filing (steps 4 and 5) are branches:
 every run attempts each of them, even when another failed, unless the ledger can't be read or an
 unexpected defect occurs; then the run fails at once. An unreadable ledger fails it before
 anything is sent; a defect can come after earlier targets were sent to, and the failed run's
 output then doesn't list them (the ledger has those that were recorded, so a re-run skips them). When any branch
-failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
+failed, the run fails, naming each failed branch and what happened to the mail, and the Intake is
+not recorded as processed.
 Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
 same Intake) repeats only the branches the ledger has no record of: a target recorded as having
 the Intake is not sent it again, and a Document recorded as filed is neither read by the model
 again nor filed again. A branch done but not recorded (the ledger failing right after) is done
-again: a send as described in step 3, a Filing as a second copy `name (1).pdf`. Running the same
-Intake twice at the same time is unsupported and may duplicate Forwardings and Filings; #9
-serialises runs.
+again: a send as described in step 3, a Filing as a second copy `name (1).pdf`. The mailbox
+watcher runs one Intake at a time and never two runs of one Intake; running the same Intake
+twice at the same time some other way (`workflows.start` or `bun run intake` beside the server's
+watcher) is unsupported and may duplicate Forwardings and Filings.
 
 | Setting                        | Meaning                                                                                                                                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -349,6 +379,7 @@ serialises runs.
 | `HEX_SMTP_SECURITY`            | `tls` (implicit TLS), `starttls` (required, never AUTH in plaintext) or `plain` (loopback IP address only, e.g. `127.0.0.1`); default `tls` on 465, else `starttls` |
 | `HEX_SMTP_USER`                | SMTP login, read as a redacted secret                                                                                                                               |
 | `HEX_SMTP_PASSWORD`            | SMTP password, read as a redacted secret: never in the config, an error, a log or the dev command's output                                                          |
+| `HEX_CONFIG` `mailbox`         | The intake mailbox the server watches; see [Mailbox](#mailbox)                                                                                                      |
 
 The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
 required:
@@ -400,13 +431,82 @@ Intake with `message_id` (the key), `processed_at`, `document_count` and `filing
 no usable Document date, or hex never sent the Document to a model (see step 4)). Entries
 recorded before #7 (when hex filed every Document by the received date) have no `fellBack` and
 read back without it. The workflow's result (`IntakeResult`)
-carries the same Filings, also for an Intake already processed, and its Forwardings (`forwarded`
-by this run or `forwarded-earlier`). Each branch is recorded as it succeeds, before the Intake is
+carries the same Filings, also for an Intake already processed, its Forwardings (`forwarded`
+by this run or `forwarded-earlier`) and what happened to its mail (`mail`: `moved` with the
+folder and the number of copies, `not-in-mailbox`, or `not-moved` with the reason); a failed
+run's `IntakeRunError` says it too (`kept-for-retry` when the Intake has runs left), unless the
+run ended before step 7. Each branch is recorded as it succeeds, before the Intake is
 processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`target`,
 `forwarded_at`; one row per target) and `hex_intake_filings` (`document_index`, `path`,
 `fell_back`, `filed_at`; one row per Document). Recording a branch again keeps the first row
 (`ON CONFLICT DO NOTHING`). Intakes processed before #8 have no rows there and read back with no
-Forwardings.
+Forwardings. A fourth table, `hex_intake_failed_runs` (`message_id`, `run_id`, `failed_at`), has
+one row per failed run of an Intake, so a run repeated after a restart counts once; failing
+permanently deletes the Intake's rows.
+
+### Mailbox
+
+With a `mailbox` section in the config file, the server watches one folder of an IMAP mailbox
+(over `imapflow`, `packages/adapters/src/mailbox.ts`) and runs the Intake workflow once per mail
+in it, an Intake being one incoming mail:
+
+```json
+{
+  "chat": { "model": "anthropic/claude-opus-5-5", "channels": {} },
+  "mailbox": { "folder": "INBOX", "pollSeconds": 60 }
+}
+```
+
+| Setting                            | Meaning                                                                                                                             |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `HEX_CONFIG` `mailbox`             | The intake mailbox; without it there is no watcher (`hex: mailbox off: …` at startup) and no IMAP setting is needed                 |
+| `HEX_CONFIG` `mailbox.folder`      | The watched folder; default `INBOX`                                                                                                 |
+| `HEX_CONFIG` `mailbox.pollSeconds` | How often hex looks at the folder whatever IMAP IDLE says, 1 to 3600 seconds; default 60                                            |
+| `HEX_IMAP_HOST`                    | IMAP server; required (as are user and password) with a `mailbox` section                                                           |
+| `HEX_IMAP_PORT`                    | IMAP port; default 993                                                                                                              |
+| `HEX_IMAP_SECURITY`                | `tls`, `starttls` (required, never LOGIN in plaintext) or `plain` (loopback IP address only); default `tls` on 993, else `starttls` |
+| `HEX_IMAP_USER`                    | IMAP login, read as a redacted secret                                                                                               |
+| `HEX_IMAP_PASSWORD`                | IMAP password, read as a redacted secret: never in the config, an error, a log or a result                                          |
+
+A setting missing or unusable fails startup, naming the variable (never its value), as for SMTP;
+plaintext IMAP is refused for anything but a loopback IP address, for the same reason. The server
+connects, logs in and opens the folder at startup and fails to start when it can't within 60 s
+(an unreachable server, wrong credentials, a missing folder); the error names the server, the
+folder and the IMAP stage, never the credentials.
+
+**Watching.** hex looks at the folder once its boot sweep settled (see [Run](#run)), again
+whenever the server announces new mail (IMAP IDLE, which the connection enters after 1 s without
+a command; a server without IDLE only gets the regular looks) and at least every `pollSeconds`,
+since an IDLE connection can die without notice. Every mail in the folder counts, read or not;
+hex fetches mail with `BODY.PEEK`, so it never marks one read, and never sets or reads flags.
+Each look goes through the folder's mail in order, one run at a time:
+
+- a mail that can't become an Intake (no Message-ID, no usable received date, not a mail) goes
+  to `hex/failed` at once, without a run, the reason logged;
+- an Intake already processed (in the ledger) only has its mail moved to `hex/processed`;
+- an Intake with a run active in `mastra.db` (one resumed after a restart, say) is left alone;
+- copies of one Message-ID start one run, which moves them all;
+- an Intake whose last run failed waits for its retry (below); any other starts a run.
+
+The outcome folders `hex/processed` and `hex/failed` are created on first use, with the
+server's hierarchy delimiter (`hex.processed` on a server that separates folders with `.`). A lost
+connection is logged as a warning and retried after 1 s, doubling up to 60 s, one warning per
+attempt, for as long as hex runs; `/health` stays `ok` meanwhile.
+
+**Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
+it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after
+its first failed run, 10 after its second, 20 after its third and 40 after its fourth (constants,
+not settings); its 5th failed run fails it permanently, about 75 minutes after the first, and
+its mail goes to `hex/failed`, the count starting afresh: move it back to the folder and hex
+tries it 5 more times, repeating only the branches that failed. A run that fails before it gets
+to step 7 (an unreadable ledger, a defect) is counted by the watcher instead.
+
+**Limits.** One hex process per mailbox and data directory. An Intake whose run stays active in
+`mastra.db` without resuming (Mastra gave up restarting it) waits for the next start. The
+watcher goes by the Message-ID the server reports for each mail (its ENVELOPE), fetching a mail
+only to run it; when the run then finds no copy by Message-ID (a server reading the header
+differently from hex), the watcher moves that mail by its UID. Studio (`bun run studio`) never
+watches the mailbox and never restarts runs; a run started there moves no mail.
 
 ## Chat (Slack, Signal)
 

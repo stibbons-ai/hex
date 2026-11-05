@@ -2,7 +2,7 @@ import { isIPv4, isIPv6 } from "node:net";
 import { Context, Data, Effect, Layer, Redacted } from "effect";
 import { createTransport } from "nodemailer";
 import type { NodemailerError } from "nodemailer";
-import { excerpt, messageOf, redact } from "./errors";
+import { credentialRedactions, excerpt, messageOf, redact } from "./errors";
 
 /** One attachment of an outgoing mail: its bytes, unchanged, under a file name and MIME type. */
 export interface MailAttachment {
@@ -98,19 +98,8 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
     disableUrlAccess: true,
     logger: false,
   });
-  // What an error must never show, should a server echo it back: the credentials as is and in
-  // base64, as AUTH PLAIN and LOGIN send them; base64 forms first, so none is half-replaced. The
-  // password's forms always; the user's only from 8 characters, as `withoutApiKeys` does: a
-  // shorter one is too likely to match ordinary text.
-  const base64 = (text: string) => Buffer.from(text).toString("base64");
-  const userForm = (form: string) => (form.length >= 8 ? [form] : []);
-  const secrets = [
-    base64(`\u0000${user}\u0000${password}`),
-    base64(password),
-    ...userForm(base64(user)),
-    password,
-    ...userForm(user),
-  ].map((form) => [form, "***"] as const);
+  // What an error must never show, should a server echo it back.
+  const secrets = credentialRedactions(user, password);
   return Layer.succeed(Mailer, {
     send: ({ from, to, subject, text, attachments }) =>
       Effect.tryPromise({

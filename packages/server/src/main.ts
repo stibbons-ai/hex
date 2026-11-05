@@ -1,8 +1,13 @@
 import { resolve } from "node:path";
-import { dateExtractorLayer, isLoopbackHost, smtpMailerLayer } from "@hex/adapters";
+import {
+  dateExtractorLayer,
+  imapMailboxLayer,
+  isLoopbackHost,
+  smtpMailerLayer,
+} from "@hex/adapters";
 import { closeInOrder } from "./close";
 import { loadChatConfig } from "./channels";
-import { loadForwardingConfig, loadIntakeConfig } from "./config";
+import { loadForwardingConfig, loadIntakeConfig, loadMailboxConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
@@ -29,21 +34,31 @@ if (!chat) {
 const { category, model } = await loadIntakeConfig(configPath);
 // Off without targets; with one enabled, missing SMTP settings fail startup, naming the variable.
 const forwarding = await loadForwardingConfig(configPath, process.env);
+// Off without a mailbox section; with one, missing IMAP settings fail startup, naming the variable.
+const mailbox = await loadMailboxConfig(configPath, process.env);
+if (!mailbox) {
+  console.log(
+    configPath
+      ? `hex: mailbox off: ${process.env.HEX_CONFIG} configures no mailbox`
+      : "hex: mailbox off: HEX_CONFIG is not set",
+  );
+}
 const paths = dataPaths(process.env);
-// Built now, so a ledger that can't be opened fails startup instead of every later Intake run
-// (the runtime keeps a failed build); disposed after the server stopped.
-const intakeRuntime = createIntakeRuntime(
-  paths,
-  dateExtractorLayer(model),
-  forwarding && smtpMailerLayer(forwarding.smtp),
-);
+// Built now, so a ledger that can't be opened, or a mailbox that can't be reached or logged into
+// (within 60 s), fails startup instead of every later Intake run (the runtime keeps a failed
+// build); disposed after the server stopped.
+const intakeRuntime = createIntakeRuntime(paths, {
+  dateExtractor: dateExtractorLayer(model),
+  mailer: forwarding && smtpMailerLayer(forwarding.smtp),
+  mailbox: mailbox && imapMailboxLayer(mailbox.imap),
+});
 /** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
 const disposeAfterFailure = (error: unknown) =>
   intakeRuntime
     .dispose()
     .catch((disposeError: unknown) => {
       console.error(
-        "hex: closing the Intake ledger after a failed start also failed",
+        "hex: closing the Intake ledger and mailbox after a failed start also failed",
         disposeError,
       );
     })
@@ -60,6 +75,7 @@ const starting = startServer({
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category, forwarding }),
   },
   ...(chat ? { chat } : {}),
+  ...(mailbox ? { mailbox: { runtime: intakeRuntime, pollMs: mailbox.pollMs } } : {}),
 }).then(
   (server) => ({
     ...server,

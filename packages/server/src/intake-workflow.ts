@@ -3,6 +3,7 @@ import {
   Filing,
   Intake,
   IntakeLedger,
+  Mailbox,
   Mailer,
   MailerError,
   Outbox,
@@ -12,7 +13,7 @@ import {
   outboxLayer,
   toMastraSchema,
 } from "@hex/adapters";
-import type { LedgerError, OutgoingMail } from "@hex/adapters";
+import type { LedgerError, MailboxError, OutgoingMail } from "@hex/adapters";
 import {
   FILING_TIME_ZONE,
   calendarDateIn,
@@ -27,6 +28,7 @@ import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
+import { MailFate, describeFailedRun, mailFateOf, moveMail, recordFailedRun } from "./mail-fate";
 
 /** The data the Intake workflow works on: the ledger's LibSQL file and the Outbox. */
 type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
@@ -51,8 +53,8 @@ const ForwardingOutcome = Schema.Struct({
   status: Schema.Literals(["forwarded", "forwarded-earlier"]),
 });
 
-/** What the Intake workflow did with one Intake. */
-export const IntakeResult = Schema.Struct({
+/** What the Intake workflow did with one Intake, before its mail was moved. */
+const IntakeOutcome = Schema.Struct({
   messageId: Schema.String,
   /** `already-processed`: the ledger had it, so nothing was filed or forwarded this time. */
   status: Schema.Literals(["processed", "already-processed"]),
@@ -61,6 +63,9 @@ export const IntakeResult = Schema.Struct({
   /** One per target the Documents went to, by this run or an earlier one. */
   forwardings: Schema.Array(ForwardingOutcome),
 });
+
+/** What the Intake workflow did with one Intake, and with its mail. */
+export const IntakeResult = Schema.Struct({ ...IntakeOutcome.fields, mail: MailFate });
 export type IntakeResult = typeof IntakeResult.Type;
 
 /**
@@ -109,11 +114,16 @@ const Filed = Schema.Struct({
   filings: Schema.Array(RunFiling),
   failure: Schema.optionalKey(Schema.String),
 });
+/** The Intake recorded as processed, or why the run failed (each failed branch). */
+const Recorded = Schema.Union([IntakeOutcome, Schema.Struct({ failure: Schema.String })]);
 
-type IntakeServices = Outbox | IntakeLedger | DateExtractor | Mailer;
+type IntakeServices = Outbox | IntakeLedger | DateExtractor | Mailer | Mailbox;
 
 /** The services the workflow's steps run on, in one shared runtime (ADR 0002). */
-export type IntakeRuntime = ManagedRuntime.ManagedRuntime<IntakeServices, LedgerError>;
+export type IntakeRuntime = ManagedRuntime.ManagedRuntime<
+  IntakeServices,
+  LedgerError | MailboxError
+>;
 
 /** The Mailer when Forwarding is off: every send fails, saying so. */
 const mailerOff = Layer.succeed(Mailer, {
@@ -124,19 +134,47 @@ const mailerOff = Layer.succeed(Mailer, {
 });
 
 /**
- * The runtime on the real Outbox, `dateExtractor` (`dateExtractorLayer` on the configured model;
- * tests pass a scripted one), `mailer` (`smtpMailerLayer` when Forwarding is on; tests pass a
- * recording one) and `ledger` (the Intake ledger in `paths.databasePath`; tests may wrap it to
- * fail). Built on first use; `dispose()` closes the ledger's connection.
+ * The Mailbox without a mailbox (the dev command, Studio): no mail is ever in it, so nothing is
+ * moved.
+ */
+const noMailbox = Layer.succeed(Mailbox, {
+  folder: "(no mailbox)",
+  list: Effect.succeed([]),
+  source: () => Effect.succeed(undefined),
+  waitForChange: () => Effect.never,
+  moveMessageId: () => Effect.succeed(0),
+  moveUid: () => Effect.void,
+  close: Effect.void,
+});
+
+/** The services an Intake runtime is built from, beside the Outbox at its path. */
+export interface IntakeServiceLayers {
+  /** `dateExtractorLayer` on the configured model; tests pass a scripted one. */
+  dateExtractor: Layer.Layer<DateExtractor>;
+  /** `smtpMailerLayer` when Forwarding is on; tests pass a recording one. Off when absent. */
+  mailer?: Layer.Layer<Mailer> | undefined;
+  /** The Intake ledger in `paths.databasePath` when absent; tests may wrap it to fail. */
+  ledger?: Layer.Layer<IntakeLedger, LedgerError> | undefined;
+  /** `imapMailboxLayer` when the mailbox is watched; tests pass an in-memory one. None when absent. */
+  mailbox?: Layer.Layer<Mailbox, MailboxError> | undefined;
+}
+
+/**
+ * The runtime on the real Outbox and `services`. Built on first use; `dispose()` closes the
+ * ledger's and the mailbox's connections.
  */
 export function createIntakeRuntime(
   paths: IntakePaths,
-  dateExtractor: Layer.Layer<DateExtractor>,
-  mailer: Layer.Layer<Mailer> = mailerOff,
-  ledger: Layer.Layer<IntakeLedger, LedgerError> = intakeLedgerLayer(paths.databasePath),
+  { dateExtractor, mailer = mailerOff, ledger, mailbox = noMailbox }: IntakeServiceLayers,
 ): IntakeRuntime {
   return ManagedRuntime.make(
-    Layer.mergeAll(outboxLayer(paths.outboxDirectory), ledger, dateExtractor, mailer),
+    Layer.mergeAll(
+      outboxLayer(paths.outboxDirectory),
+      ledger ?? intakeLedgerLayer(paths.databasePath),
+      dateExtractor,
+      mailer,
+      mailbox,
+    ),
   );
 }
 
@@ -193,11 +231,15 @@ const FILE_STEP_ID = "file-documents";
 
 /**
  * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed or
- * forwarded) → Document detection → Forwarding of the Documents to each target that is on, one
- * mail per target → reading each Document's Document date with the DateExtractor → Filing of each
- * Document into the Outbox under `YYYY-MM/<Category>/` by its Document date, or by the received
- * date (in {@link FILING_TIME_ZONE}) when no usable one came back, flagged `fellBack` →
- * recording the Intake in the ledger.
+ * forwarded, its mail moved to `hex/processed`) → Document detection → Forwarding of the
+ * Documents to each target that is on, one mail per target → reading each Document's Document
+ * date with the DateExtractor → Filing of each Document into the Outbox under
+ * `YYYY-MM/<Category>/` by its Document date, or by the received date (in
+ * {@link FILING_TIME_ZONE}) when no usable one came back, flagged `fellBack` → recording the
+ * Intake in the ledger → moving its mail: every copy in the watched folder with its Message-ID to
+ * `hex/processed`, or, for a failed run, recording the failure ({@link recordFailedRun}: on the
+ * 5th the Intake fails permanently, its mail going to `hex/failed`). No copy in the folder moves nothing;
+ * a move that fails is reported in the result, the outcome standing.
  *
  * Forwarding per target and Filing (date extraction, then Filing) are branches: each is attempted
  * on every run even when another failed, and recorded in the ledger as it succeeds (a Forwarding
@@ -205,7 +247,8 @@ const FILE_STEP_ID = "file-documents";
  * Document recorded by an earlier run is skipped: running a failed Intake again repeats only the
  * branches that failed. A send the server accepted but the ledger couldn't record fails its
  * branch as `sent-unrecorded`: running the Intake again sends it again. The run fails, naming each
- * failed branch, when any failed; the Intake is recorded as processed only when all succeeded.
+ * failed branch and what happened to the mail, when any failed; the Intake is recorded as
+ * processed only when all succeeded.
  * Only a ledger that can't be read, or an unexpected defect, ends the run before every branch was
  * attempted. An unreadable ledger ends it before anything is sent; a defect may come after earlier
  * targets were sent to, and the failed run's {@link IntakeRunError} then lists no Forwardings
@@ -230,17 +273,21 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
       const earlier = await run(
         Schema.UndefinedOr(IntakeResult),
         IntakeLedger.use((ledger) => ledger.find(messageId)).pipe(
-          Effect.map(
-            (entry) =>
-              entry && {
-                messageId: entry.messageId,
-                status: "already-processed",
-                filings: entry.filings,
-                forwardings: entry.forwardings.map(({ target }) => ({
-                  target,
-                  status: "forwarded-earlier",
-                })),
-              },
+          Effect.flatMap((entry) =>
+            entry
+              ? moveMail(messageId, "processed").pipe(
+                  Effect.map((mail) => ({
+                    messageId: entry.messageId,
+                    status: "already-processed",
+                    filings: entry.filings,
+                    forwardings: entry.forwardings.map(({ target }) => ({
+                      target,
+                      status: "forwarded-earlier",
+                    })),
+                    mail,
+                  })),
+                )
+              : Effect.succeed(undefined),
           ),
         ),
       );
@@ -401,7 +448,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
   const record = createStep({
     id: "record",
     inputSchema: toMastraSchema(Filed),
-    outputSchema: toMastraSchema(IntakeResult),
+    outputSchema: toMastraSchema(Recorded),
     execute: async ({ inputData, getStepResult, getInitData }) => {
       const rawMessageId = getInitData<Intake>().messageId;
       const attempts = getStepResult(forward).forwardings;
@@ -420,9 +467,11 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
         }),
         ...(inputData.failure === undefined ? [] : [`filing: ${inputData.failure}`]),
       ];
-      if (failures.length > 0) throw new Error(failures.join("; "));
+      if (failures.length > 0) {
+        return Schema.decodeUnknownPromise(Recorded)({ failure: failures.join("; ") });
+      }
       return run(
-        IntakeResult,
+        Recorded,
         Effect.gen(function* () {
           const ledger = yield* IntakeLedger;
           // Every branch as recorded, this run's and earlier runs'.
@@ -447,6 +496,37 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
     },
   });
 
+  const move = createStep({
+    // The IMAP move is the workflow's last step, so a run resumed after a restart moves its mail too.
+    id: "move-mail",
+    inputSchema: toMastraSchema(Recorded),
+    outputSchema: toMastraSchema(IntakeResult),
+    execute: async ({ inputData, getInitData, runId }) => {
+      const { messageId } = getInitData<Intake>();
+      if ("failure" in inputData) {
+        // The failure stays the run's error even when the ledger can't count it.
+        const consequence = await runtime.runPromise(
+          recordFailedRun(messageId, runId).pipe(
+            Effect.map((failed) => ({ text: describeFailedRun(failed), mail: failed.mail })),
+            Effect.catchTag("LedgerError", ({ message }) =>
+              Effect.succeed({
+                text: `recording the failed run failed: ${message}`,
+                mail: undefined,
+              }),
+            ),
+          ),
+        );
+        throw Object.assign(new Error(`${inputData.failure}; ${consequence.text}`), {
+          mail: consequence.mail,
+        });
+      }
+      return run(
+        IntakeResult,
+        moveMail(messageId, "processed").pipe(Effect.map((mail) => ({ ...inputData, mail }))),
+      );
+    },
+  });
+
   return createWorkflow({
     id: INTAKE_WORKFLOW_ID,
     inputSchema: toMastraSchema(Intake),
@@ -459,18 +539,21 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
     .then(extract)
     .then(file)
     .then(record)
+    .then(move)
     .commit();
 }
 
 /**
  * The Intake workflow did not finish. Carries this run's Forwarding attempts and Filings, so a
- * caller can show what was done although a branch failed.
+ * caller can show what was done although a branch failed, and what happened to the mail, unless
+ * the run ended before it got there (an unreadable ledger, a defect).
  */
 export class IntakeRunError extends Error {
   constructor(
     message: string,
     readonly forwardings: readonly ForwardingAttempt[],
     readonly filings: readonly RunFiling[],
+    readonly mail: MailFate | undefined,
   ) {
     super(message);
   }
@@ -499,21 +582,16 @@ export async function runIntake(
   {
     paths,
     category,
-    dateExtractor,
-    mailer,
-    ledger,
     forwarding,
-  }: {
+    ...services
+  }: IntakeServiceLayers & {
     paths: IntakePaths;
     category: Category;
-    dateExtractor: Layer.Layer<DateExtractor>;
-    mailer?: Layer.Layer<Mailer> | undefined;
-    ledger?: Layer.Layer<IntakeLedger, LedgerError> | undefined;
     forwarding?: IntakeForwarding | undefined;
   },
 ): Promise<IntakeResult> {
   const storage = await createLocalStore(paths.databasePath);
-  const runtime = createIntakeRuntime(paths, dateExtractor, mailer, ledger);
+  const runtime = createIntakeRuntime(paths, services);
   const mastra = new Mastra({
     storage,
     logger: false,
@@ -524,11 +602,13 @@ export async function runIntake(
     const run = await mastra.getWorkflow(INTAKE_WORKFLOW_ID).createRun();
     const result = await run.start({ inputData: intake });
     if (result.status !== "success") {
-      const reason = result.status === "failed" ? result.error.message : result.status;
+      const error = result.status === "failed" ? result.error : undefined;
+      const reason = error ? error.message : result.status;
       throw new IntakeRunError(
         `the Intake workflow did not finish: ${reason}`,
         stepOutput(result.steps, FORWARD_STEP_ID, Forwarded)?.forwardings ?? [],
         stepOutput(result.steps, FILE_STEP_ID, Filed)?.filings ?? [],
+        mailFateOf(error),
       );
     }
     return result.result;

@@ -6,6 +6,7 @@ import { createLocalStore } from "@hex/adapters";
 import type { Agent } from "@mastra/core/agent";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { Mastra } from "@mastra/core/mastra";
+import type { MastraRecoveryConfig } from "@mastra/core/mastra";
 import { MastraCompositeStore } from "@mastra/core/storage";
 import type { AnyWorkflow } from "@mastra/core/workflows";
 import { DuckDBStore } from "@mastra/duckdb";
@@ -58,13 +59,21 @@ export interface HexMastraOptions {
   logger?: IMastraLogger | false | undefined;
   workflows?: Record<string, AnyWorkflow> | undefined;
   agents?: Record<string, Agent> | undefined;
+  /** Mastra's boot-time recovery, which only a Mastra deployer (Studio's `mastra start`) runs. */
+  recovery?: MastraRecoveryConfig | undefined;
 }
 
 /**
  * hex's Mastra on `storage`, tracing every agent and workflow run into the store's observability
  * domain (the DuckDB file) and nowhere else: the storage exporter is the only exporter.
  */
-export function createHexMastra({ storage, logger, workflows, agents }: HexMastraOptions): Mastra {
+export function createHexMastra({
+  storage,
+  logger,
+  workflows,
+  agents,
+  recovery,
+}: HexMastraOptions): Mastra {
   return new Mastra({
     storage,
     observability: new Observability({
@@ -73,5 +82,6 @@ export function createHexMastra({ storage, logger, workflows, agents }: HexMastr
     ...(logger === undefined ? {} : { logger }),
     ...(workflows ? { workflows } : {}),
     ...(agents ? { agents } : {}),
+    ...(recovery ? { recovery } : {}),
   });
 }

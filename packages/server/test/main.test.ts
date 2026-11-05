@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { refusingImap } from "./fake-imap";
+import { freePort } from "./timeouts";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const telemetryOff = { MASTRA_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1" };
@@ -50,6 +52,7 @@ describe("bun packages/server/src/main.ts", () => {
       try {
         const { url, output } = await listeningUrl(child.stdout);
         expect(output.match(/hex: chat off: HEX_CONFIG is not set/g)).toHaveLength(1);
+        expect(output.match(/hex: mailbox off: HEX_CONFIG is not set/g)).toHaveLength(1);
         expect(url.hostname).toBe("127.0.0.1");
         const health = await fetch(new URL("/health", url));
         expect(health.status).toBe(200);
@@ -186,6 +189,7 @@ describe("bun packages/server/src/main.ts", () => {
     try {
       const { output } = await listeningUrl(child.stdout);
       expect(output).toContain(`hex: chat off: ${config} configures no channels`);
+      expect(output).toContain(`hex: mailbox off: ${config} configures no mailbox`);
     } finally {
       child.kill("SIGTERM");
     }
@@ -209,5 +213,60 @@ describe("bun packages/server/src/main.ts", () => {
     const stderr = await new Response(child.stderr).text();
     expect(stderr).toContain("Intake ledger: opening");
     expect(stderr).toContain("already an index named hex_intake_ledger");
+  });
+
+  describe("with a mailbox", () => {
+    const PASSWORD = "imap-secret-0123456789";
+    /** hex with a config watching INBOX on the IMAP server at 127.0.0.1:`port`, in plaintext. */
+    async function spawnWithMailbox(name: string, port: number) {
+      const config = join(directory, `${name}.json`);
+      await Bun.write(
+        config,
+        JSON.stringify({ chat: { model: "openai/gpt-5", channels: {} }, mailbox: {} }),
+      );
+      return spawnMain({
+        HEX_PORT: "0",
+        HEX_DATA_DIR: join(directory, name),
+        HEX_CONFIG: config,
+        HEX_IMAP_HOST: "127.0.0.1",
+        HEX_IMAP_PORT: String(port),
+        HEX_IMAP_SECURITY: "plain",
+        HEX_IMAP_USER: "intake@example.com",
+        HEX_IMAP_PASSWORD: PASSWORD,
+      });
+    }
+
+    test("an IMAP server that refuses the login fails startup, never showing the credentials", async () => {
+      const imap = refusingImap();
+      try {
+        const child = await spawnWithMailbox("refused-login", imap.port);
+        try {
+          expect(await child.exited).toBe(1);
+        } finally {
+          child.kill();
+        }
+        const stderr = await new Response(child.stderr).text();
+        // The server got the password, and echoed it back in its refusal.
+        expect(imap.logins.join("\n")).toContain(PASSWORD);
+        expect(stderr).toContain(`127.0.0.1:${imap.port}, folder INBOX: logging in failed`);
+        expect(stderr).not.toContain(PASSWORD);
+        expect(stderr).not.toContain(Buffer.from(PASSWORD).toString("base64"));
+      } finally {
+        imap.server.stop(true);
+      }
+    });
+
+    test("an IMAP server that can't be reached fails startup, naming it", async () => {
+      const port = await freePort();
+      const child = await spawnWithMailbox("unreachable", port);
+      try {
+        expect(await child.exited).toBe(1);
+      } finally {
+        child.kill();
+      }
+      expect(await new Response(child.stderr).text()).toContain(
+        `127.0.0.1:${port}, folder INBOX: connecting failed`,
+      );
+    });
   });
 });

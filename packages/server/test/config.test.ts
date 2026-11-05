@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redacted } from "effect";
 import { loadChatConfig } from "../src/channels";
-import { loadEvalConfig, loadForwardingConfig, loadIntakeConfig } from "../src/config";
+import {
+  loadEvalConfig,
+  loadForwardingConfig,
+  loadIntakeConfig,
+  loadMailboxConfig,
+} from "../src/config";
 import { BOT_ACCOUNT, BOT_ACI, DANIEL as DANIEL_ACI } from "./fake-signal-cli";
 
 const signalEnv = { SIGNAL_ACCOUNT: BOT_ACCOUNT, SIGNAL_CLI_URL: "http://127.0.0.1:8080" };
@@ -548,6 +553,107 @@ describe("loadForwardingConfig", () => {
   ])("%s fails, naming the file and the key", async (_case, content, at) => {
     const path = await configFile({ ...valid, forwarding: content });
     const loading = loadForwardingConfig(path, smtpEnv);
+    await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
+    await expect(loading).rejects.toThrow(`at ${at}`);
+  });
+});
+
+describe("loadMailboxConfig", () => {
+  const PASSWORD = "imap-secret-0123456789";
+  const imapEnv = {
+    HEX_IMAP_HOST: "imap.example.com",
+    HEX_IMAP_USER: "intake@example.com",
+    HEX_IMAP_PASSWORD: PASSWORD,
+  };
+
+  test("an empty section: INBOX every 60 s, on port 993 with TLS, credentials redacted", async () => {
+    const config = await loadMailboxConfig(await configFile({ ...valid, mailbox: {} }), imapEnv);
+    expect(config).toMatchObject({
+      imap: { host: "imap.example.com", port: 993, security: "tls", folder: "INBOX" },
+      pollMs: 60_000,
+    });
+    expect(Redacted.value(config!.imap.password)).toBe(PASSWORD);
+    expect(Redacted.value(config!.imap.user)).toBe("intake@example.com");
+    for (const shown of [
+      String(config!.imap.password),
+      JSON.stringify(config),
+      Bun.inspect(config),
+    ]) {
+      expect(shown).not.toContain(PASSWORD);
+    }
+  });
+
+  test("the folder and poll interval as configured; STARTTLS on another port", async () => {
+    const path = await configFile({ ...valid, mailbox: { folder: "Rechnungen", pollSeconds: 5 } });
+    expect(await loadMailboxConfig(path, { ...imapEnv, HEX_IMAP_PORT: "143" })).toMatchObject({
+      imap: { port: 143, security: "starttls", folder: "Rechnungen" },
+      pollMs: 5000,
+    });
+  });
+
+  test.each([
+    ["no config file", undefined],
+    ["no mailbox section", valid],
+  ])("%s: no watcher, no IMAP setting needed", async (_case, content) => {
+    const path = content === undefined ? undefined : await configFile(content);
+    expect(await loadMailboxConfig(path, {})).toBeUndefined();
+  });
+
+  test.each(["HEX_IMAP_HOST", "HEX_IMAP_USER", "HEX_IMAP_PASSWORD"])(
+    "a missing %s fails, naming it",
+    async (name) => {
+      const path = await configFile({ ...valid, mailbox: {} });
+      await expect(loadMailboxConfig(path, { ...imapEnv, [name]: "" })).rejects.toThrow(
+        `hex config ${path}: mailbox: environment variable ${name} is not set`,
+      );
+    },
+  );
+
+  test.each([
+    ["HEX_IMAP_PORT", "0"],
+    ["HEX_IMAP_SECURITY", "ssl"],
+  ])("%s=%j fails, naming the variable and never the password", async (name, value) => {
+    const path = await configFile({ ...valid, mailbox: {} });
+    const loading = loadMailboxConfig(path, { ...imapEnv, [name]: value });
+    await expect(loading).rejects.toThrow(
+      `hex config ${path}: mailbox: unusable environment variable: `,
+    );
+    await expect(loading).rejects.toThrow(`at ["${name}"]`);
+    await expect(loading).rejects.not.toThrow(PASSWORD);
+  });
+
+  test.each(["imap.example.com", "localhost", "10.0.0.1"])(
+    "plaintext IMAP to %s is refused: only a loopback IP address may go without TLS",
+    async (host) => {
+      const path = await configFile({ ...valid, mailbox: {} });
+      const loading = loadMailboxConfig(path, {
+        ...imapEnv,
+        HEX_IMAP_HOST: host,
+        HEX_IMAP_SECURITY: "plain",
+      });
+      await expect(loading).rejects.toThrow(
+        `hex config ${path}: mailbox: HEX_IMAP_SECURITY=plain is only allowed for a loopback IP address`,
+      );
+      await expect(loading).rejects.not.toThrow(PASSWORD);
+    },
+  );
+
+  test("plaintext IMAP to 127.0.0.1 is allowed", async () => {
+    const path = await configFile({ ...valid, mailbox: {} });
+    const env = { ...imapEnv, HEX_IMAP_HOST: "127.0.0.1", HEX_IMAP_SECURITY: "plain" };
+    expect((await loadMailboxConfig(path, env))?.imap).toMatchObject({ security: "plain" });
+  });
+
+  test.each([
+    ["an unknown key", { folder: "INBOX", password: "x" }, '["mailbox"]["password"]'],
+    ["an empty folder", { folder: "" }, '["mailbox"]["folder"]'],
+    ["pollSeconds 0", { pollSeconds: 0 }, '["mailbox"]["pollSeconds"]'],
+    ["a fractional pollSeconds", { pollSeconds: 1.5 }, '["mailbox"]["pollSeconds"]'],
+    ["pollSeconds above an hour", { pollSeconds: 3601 }, '["mailbox"]["pollSeconds"]'],
+    ["pollSeconds as a string", { pollSeconds: "60" }, '["mailbox"]["pollSeconds"]'],
+  ])("%s fails, naming the file and the key", async (_case, content, at) => {
+    const path = await configFile({ ...valid, mailbox: content });
+    const loading = loadMailboxConfig(path, imapEnv);
     await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
     await expect(loading).rejects.toThrow(`at ${at}`);
   });

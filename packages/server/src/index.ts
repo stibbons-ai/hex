@@ -11,6 +11,9 @@ import { closeInOrder } from "./close";
 import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
 import { DEFAULT_HOST } from "./listen-address";
+import { INTAKE_WORKFLOW_ID } from "./intake-workflow";
+import { watchMailbox } from "./mailbox-watcher";
+import type { MailboxWatcher, MailboxWatcherOptions } from "./mailbox-watcher";
 import { router } from "./router";
 
 export { contract } from "./contract";
@@ -53,6 +56,11 @@ export interface ServerOptions {
   chat?: ChatOptions;
   /** How long the chat channels get to connect before startup fails. */
   chatStartTimeoutMs?: number;
+  /**
+   * The intake mailbox to watch with the registered Intake workflow (see `watchMailbox`);
+   * omitted runs without a watcher.
+   */
+  mailbox?: Pick<MailboxWatcherOptions, "runtime" | "pollMs"> | undefined;
 }
 
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -78,7 +86,15 @@ export interface RunningServer {
   hostname: string;
   mastra: Mastra;
   /**
-   * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
+   * Settles once the runs active in storage were restarted (Mastra's boot sweep, run after the
+   * server started; it settles when the restarted runs finished) and then the mailbox watcher,
+   * if any, started. Never rejects: a failed sweep is logged.
+   */
+  booted: Promise<void>;
+  /**
+   * Stops the mailbox watcher (it takes no more mail and closes its connection; a run in
+   * progress goes on until Mastra shuts down, staying active in storage for the next boot), then
+   * stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
    * accepting requests and gives in-flight ones (open streams and chat replies included), and a
    * channel disconnect still running, `stopGraceMs` more before closing them, then shuts Mastra
    * down and closes the store. Waiting for the disconnect lets a channel finish its own last
@@ -97,7 +113,9 @@ export interface RunningServer {
  * channel doesn't start within `chatStartTimeoutMs`, fails to start, or starts but can't work (its
  * `verify` throws, e.g. Slack rejected the bot token). A start that finishes after the deadline
  * is disconnected again when the adapter allows it (Slack: only while it is still checking the
- * bot token); otherwise the caller is expected to exit, as `main.ts` does.
+ * bot token); otherwise the caller is expected to exit, as `main.ts` does. Once serving, it
+ * restarts the workflow runs a stopped or killed hex left active (hex has no Mastra deployer to
+ * do it, ADR 0004), then starts the mailbox watcher, if any (see `booted`).
  */
 export async function startServer({
   databasePath,
@@ -109,6 +127,7 @@ export async function startServer({
   stopGraceMs = DEFAULT_STOP_GRACE_MS,
   chat,
   chatStartTimeoutMs = DEFAULT_CHAT_START_TIMEOUT_MS,
+  mailbox,
 }: ServerOptions): Promise<RunningServer> {
   // Before anything opens: a DNS name in the Host allow-list would let a page whose name resolves
   // here pass the DNS rebinding check.
@@ -157,6 +176,11 @@ export async function startServer({
       workflows,
       agents: chatAgent && { [chatAgent.agent.id]: chatAgent.agent },
     });
+    // A watcher without the Intake workflow fails startup here.
+    const watching: Omit<MailboxWatcherOptions, "log"> | undefined = mailbox && {
+      ...mailbox,
+      workflow: mastra.getWorkflow(INTAKE_WORKFLOW_ID),
+    };
     if (chat && chatAgent) {
       // Mastra starts the channels without awaiting them and only logs a failure (so a failed
       // start is logged twice: by Mastra and as our startup error); awaiting the same start here
@@ -240,13 +264,32 @@ export async function startServer({
       },
     });
     hosts = allowedHosts(server.port ?? port, hostname);
+    let stopping = false;
+    let watcher: MailboxWatcher | undefined;
+    // The watcher starts once the sweep settled, so a resumed run and the watcher never race for
+    // one Intake. A run whose previous process's lease is still live is only re-checked later by
+    // Mastra; the watcher skips the Intake of every run active in storage.
+    const booted = mastra
+      .restartAllActiveWorkflowRuns()
+      .then(() => {
+        if (!watching || stopping) return;
+        watcher = watchMailbox({ ...watching, log: mastra.getLogger() });
+      })
+      .catch((error: unknown) => {
+        mastra.getLogger().error("hex: restarting the active workflow runs failed", error);
+      });
     return {
       url: server.url,
       hostname: server.hostname ?? "",
       mastra,
+      booted,
       stop: () => {
         let stillDisconnecting: Promise<void> | undefined;
         return closeInOrder([
+          async () => {
+            stopping = true;
+            await watcher?.stop();
+          },
           async () => {
             chatAgent?.close();
             ({ stillDisconnecting } = await disconnectChatWithin("stop", (message, cause) =>

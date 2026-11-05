@@ -83,6 +83,18 @@ forwards Documents to SevDesk and paperless-ngx.
   modify and distribute without conditions; provided "as is", without
   warranty.
 
+imapflow 2.10.0 — MIT; the IMAP client behind the Mailbox hex watches the
+intake mailbox with.
+  Upstream: https://github.com/postalsys/imapflow
+  Copyright (c) 2020-2024 Postal Systems OÜ.
+Its dependencies: libmime 5.6.3, libqp 3.0.1, libbase64 1.4.1,
+encoding-japanese 2.4.0, iconv-lite 0.7.3, pino 10.3.1 (with @pinojs/redact,
+atomic-sleep, on-exit-leak-free, pino-abstract-transport, pino-std-serializers,
+process-warning, quick-format-unescaped, real-require, safe-stable-stringify,
+sonic-boom, thread-stream), socks 2.8.10, ip-address 10.7.5, smart-buffer
+4.2.0 — MIT; split2 4.2.0 — ISC; @zone-eu/mailsplit 5.4.29 — (MIT OR
+EUPL-1.1+); project selects MIT.
+
 zod 4.6.7 — MIT; transitive Mastra dependency only, not a schema authority.
 posthog-node 5.57.2, @posthog/core 1.62.0, @posthog/types 1.418.0 — MIT;
 transitive telemetry dependencies. Project scripts and CI set
