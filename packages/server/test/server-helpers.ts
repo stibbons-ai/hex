@@ -2,7 +2,8 @@
 // persisted, its warnings, and the environment around it.
 import { spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLocalStore, toMastraSchema } from "@hex/adapters";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { DuckDBStore } from "@mastra/duckdb";
@@ -111,9 +112,13 @@ export async function storedChatState(databasePath: string, key: string) {
   }
 }
 
-/** Every row of Mastra's thread-state table a stopped server left at `databasePath`. */
+/**
+ * Every row of Mastra's thread-state table a stopped server left at `databasePath`. Opened
+ * read-write: a read-only open of the WAL database right after stop could find no `-shm` file
+ * and fail with SQLITE_CANTOPEN.
+ */
 export function chatStateRows(databasePath: string) {
-  const database = new Database(databasePath, { readonly: true });
+  const database = new Database(databasePath);
   try {
     return database.query('SELECT "threadId", "type" FROM mastra_thread_state').all();
   } finally {
@@ -130,6 +135,25 @@ export async function rootSpans(path: string) {
   } finally {
     await duckdb.close();
   }
+}
+
+/**
+ * Whether another process can open the DuckDB file at `path` read-write, i.e. no process (this
+ * one included) still holds its lock. The error, when it can't, is in `stderr`.
+ */
+export async function openableElsewhere(path: string) {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `import { DuckDBInstance } from "@duckdb/node-api";
+       (await DuckDBInstance.create(${JSON.stringify(path)})).closeSync();`,
+    ],
+    // From the package that installs @mastra/duckdb, whose dependency @duckdb/node-api is.
+    { cwd: dirname(fileURLToPath(import.meta.resolve("@mastra/duckdb"))), stderr: "pipe" },
+  );
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  return { openable: code === 0, stderr };
 }
 
 /**

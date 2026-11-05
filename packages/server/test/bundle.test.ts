@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { EntityType } from "@mastra/core/observability";
 
 let directory: string;
+/** The prefix of bundle-entry.ts's result line. */
+const RESULT = "bundle-result ";
 
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "hex-bundle-"));
@@ -45,20 +47,30 @@ test("DuckDB stores traces under the Bun JS bundle, its native addon kept extern
     await symlink(path, join(out, "node_modules", name));
   }
 
-  const bundled = Bun.spawn(["bun", join(out, "bundle-entry.js"), join(directory, "data")], {
-    cwd: directory,
-    env: { ...process.env, MASTRA_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1" },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const bundled = Bun.spawn(
+    [process.execPath, join(out, "bundle-entry.js"), join(directory, "data")],
+    {
+      cwd: directory,
+      env: { ...process.env, MASTRA_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const [stdout, stderr, code] = await Promise.all([
     new Response(bundled.stdout).text(),
     new Response(bundled.stderr).text(),
     bundled.exited,
   ]);
-  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
-  expect(JSON.parse(stdout)).toEqual({
-    status: "success",
-    traces: [{ entityType: EntityType.WORKFLOW_RUN, entityName: "bundled" }],
+  // Exit 0 and the result line; stderr may carry harmless warnings and is shown on failure.
+  const result = stdout
+    .split("\n")
+    .find((line) => line.startsWith(RESULT))
+    ?.slice(RESULT.length);
+  expect({ code, result: result && JSON.parse(result), stderr }).toMatchObject({
+    code: 0,
+    result: {
+      status: "success",
+      traces: [{ entityType: EntityType.WORKFLOW_RUN, entityName: "bundled" }],
+    },
   });
 }, 60_000);

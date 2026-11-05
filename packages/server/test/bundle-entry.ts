@@ -34,9 +34,11 @@ await mastra.shutdown();
 const duckdb = new DuckDBStore({ path: observabilityPath });
 const { spans } = await duckdb.observability.listTraces({});
 await duckdb.close();
+// One line, prefixed: bundle.test.ts looks for it among whatever else is logged.
 console.log(
-  JSON.stringify({
-    status: result.status,
-    traces: spans.map(({ entityType, entityName }) => ({ entityType, entityName })),
-  }),
+  "bundle-result " +
+    JSON.stringify({
+      status: result.status,
+      traces: spans.map(({ entityType, entityName }) => ({ entityType, entityName })),
+    }),
 );

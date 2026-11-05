@@ -1,6 +1,6 @@
 node_modules/
 .data/
-# `bun run studio` (mastra dev) builds and runs Studio's server here.
+# `bun run studio` (`mastra build --studio`, then `mastra start`) builds and runs Studio's server here.
 .mastra/
 coverage/
 dist/

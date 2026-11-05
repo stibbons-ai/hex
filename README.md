@@ -65,11 +65,13 @@ don't work against this entrypoint; Studio runs as its own dev-only server inste
 
 ## Traces and Studio
 
-hex traces every agent call and workflow run with Mastra's observability into the DuckDB file
-`<data dir>/observability.duckdb` (`@mastra/duckdb`), next to `mastra.db`, which keeps memory,
-workflow state and the Intake ledger. The storage exporter is the only exporter: nothing is
-sent anywhere. Spans are written in batches a few seconds apart; a normal stop (SIGINT/SIGTERM)
-flushes them, a killed process loses the unwritten ones.
+hex traces every agent call and workflow run of the server (`bun run start`) with Mastra's
+observability into the DuckDB file `<data dir>/observability.duckdb` (`@mastra/duckdb`), next to
+`mastra.db`, which keeps memory, workflow state and the Intake ledger. `bun run intake` is not
+traced: it runs beside a running server, which holds the DuckDB file (see below). The storage
+exporter is the only exporter: nothing is sent anywhere. Spans are written in batches a few
+seconds apart; a normal stop (SIGINT/SIGTERM) flushes them, a killed process loses the unwritten
+ones, and so does a final flush that fails (the exporter logs it; the stop still succeeds).
 
 To look at them, open Mastra Studio (dev machine only):
 
@@ -88,20 +90,27 @@ the Outbox, ledger entries) and is traced like any other run.
 
 - **One process at a time.** DuckDB lets one process open the file. While Studio runs, `bun run
   start` fails at startup with `Could not set lock on file ".../observability.duckdb":
-  Conflicting lock is held`, and the other way round. Stop one before starting the other.
+  Conflicting lock is held`. The other way round, Studio starts, but every storage call (memory
+  and workflow runs too, not only traces) fails with that error and is retried on the next call
+  until hex stops. Stop one before starting the other.
 - **How it runs.** `bun run studio` is `bun run studio:build && bun run studio:start`: the
-  `mastra` CLI, through `bunx mastra@1.36.0` (pinned exactly, matching `@mastra/core` 1.80.0;
-  never a hex dependency, ADR 0004), runs `mastra build --studio` into the git-ignored
-  `.mastra/output`, then `mastra start` serves it. The build installs the bundle's dependencies
-  into `.mastra/output` with their own lockfile, at the versions hex has installed; outside hex's
-  `bunfig.toml`, so only your global Bun config's minimum release age applies there. The bundle
-  contains `@mastra/server`, which imports Mastra's enterprise (ee) auth code; it stays on this
-  machine, never in hex's runtime or its dependencies. `mastra dev` does not work with hex (it
-  resolves its server's packages from the repository root, which Bun's isolated install and a
-  CLI outside the dependencies don't provide), so there is no hot reload: rerun `bun run studio`
-  after changing code. The build warns `Invalid Mastra config` because the entry exports the
-  instance from hex's builder rather than `new Mastra(...)`; that only skips reading server
-  options from it.
+  `mastra` CLI, through `bunx --minimum-release-age 259200 mastra@1.36.0` (never a hex
+  dependency, ADR 0004), runs `mastra build --studio` into the git-ignored `.mastra/output`, then
+  `mastra start` serves it. Only the CLI is pinned exactly; the `@mastra/deployer` it depends on
+  (`^1.80.0`), and the `@mastra/server` that pins, float to the newest release at least three days
+  old (the flag: `bunfig.toml` doesn't reach bunx's install). Deployer 1.81 and later declare a
+  peer dependency on `@mastra/core` 1.81 or later, so Studio currently runs that server code
+  outside its declared peer range against hex's `@mastra/core` 1.80.0 (observed working with
+  1.81.0). The build then installs the bundle's own dependencies into `.mastra/output` with their
+  own lockfile: the packages the bundle imports at the versions hex has installed (e.g.
+  `@mastra/core` 1.80.0), their dependencies resolved anew, outside hex's `bunfig.toml`, so only
+  your global Bun config's minimum release age applies there. The bundle contains
+  `@mastra/server`, which imports Mastra's enterprise (ee) auth code; it stays on this machine,
+  never in hex's runtime or its dependencies. `mastra dev` does not work with hex (it resolves
+  its server's packages from the repository root, which Bun's isolated install and a CLI outside
+  the dependencies don't provide), so there is no hot reload: rerun `bun run studio` after
+  changing code. The build's `Invalid Mastra config` warning is harmless. Studio prints the data
+  files it opened (`hex studio: data in …`) at startup.
 - Mastra's and Bun's telemetry stay off (`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`).
 
 ## Intake (dev command)

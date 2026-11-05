@@ -59,6 +59,7 @@ describe("bun packages/server/src/main.ts", () => {
       }
       expect(await child.exited).toBe(0);
       expect((await stat(join(dataDirectory, "mastra.db"))).size).toBeGreaterThan(0);
+      expect((await stat(join(dataDirectory, "observability.duckdb"))).size).toBeGreaterThan(0);
     },
   );
 
@@ -71,6 +72,7 @@ describe("bun packages/server/src/main.ts", () => {
     }
     expect(await child.exited).toBe(0);
     expect((await stat(join(directory, ".data", "mastra.db"))).size).toBeGreaterThan(0);
+    expect((await stat(join(directory, ".data", "observability.duckdb"))).size).toBeGreaterThan(0);
   });
 
   test("a failed startup exits 1 with the listen error reported once", async () => {

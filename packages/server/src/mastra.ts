@@ -16,7 +16,8 @@ import type { DataPaths } from "./paths";
 /**
  * hex's Mastra storage: the LibSQL store for every domain (memory, workflow state, ...) except
  * observability, which lives in the DuckDB file. close() closes both files: the composite only
- * forwards to its LibSQL parent, since the DuckDB domain has no close() of its own.
+ * forwards to its LibSQL parent, since the DuckDB domain has no close() of its own. Its private
+ * field keeps any other store (a plain LibSQL one, say) from passing for it.
  */
 class HexStore extends MastraCompositeStore {
   readonly #duckdb: DuckDBStore;
@@ -31,16 +32,20 @@ class HexStore extends MastraCompositeStore {
   }
 }
 
+export type { HexStore };
+
 /**
- * The store on the local files at `paths`, their directories created if missing. Both open on
- * first use (`init()`); DuckDB then holds its file's lock, which only one process can hold.
+ * The store on the local files at `paths`, their directories created if missing. LibSQL opens its
+ * file here, DuckDB on first use (`init()`) and then holds the file's lock, which only one process
+ * can hold.
  */
 export async function createHexStore({
   databasePath,
   observabilityPath,
-}: Pick<DataPaths, "databasePath" | "observabilityPath">): Promise<MastraCompositeStore> {
-  const libsql = await createLocalStore(databasePath);
+}: Pick<DataPaths, "databasePath" | "observabilityPath">): Promise<HexStore> {
+  // First: a failure here leaves no LibSQL handle open.
   await mkdir(dirname(observabilityPath), { recursive: true });
+  const libsql = await createLocalStore(databasePath);
   return new HexStore(
     libsql,
     new DuckDBStore({ id: "hex-observability", path: observabilityPath }),
@@ -48,7 +53,7 @@ export async function createHexStore({
 }
 
 export interface HexMastraOptions {
-  storage: MastraCompositeStore;
+  storage: HexStore;
   /** Mastra's logger; omitted keeps Mastra's default. `false` silences it (tests only). */
   logger?: IMastraLogger | false | undefined;
   workflows?: Record<string, AnyWorkflow> | undefined;

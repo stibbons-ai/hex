@@ -7,7 +7,15 @@ import { EntityType } from "@mastra/core/observability";
 import { type RunningServer, startServer } from "../src";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 import { REPLY, mockModel } from "./mock-model";
-import { client, echo, rootSpans, serverOptions, setEnv, stored } from "./server-helpers";
+import {
+  client,
+  echo,
+  openableElsewhere,
+  rootSpans,
+  serverOptions,
+  setEnv,
+  stored,
+} from "./server-helpers";
 
 const DANIEL = "U0DANIEL";
 
@@ -67,6 +75,25 @@ test("traces of a workflow run and an agent call land in the DuckDB file; memory
     }
   } finally {
     libsql.close();
+  }
+});
+
+test("stop() releases the DuckDB file: another process can open it", async () => {
+  const { server, adapter, options } = await start("released");
+  await runWorkflowAndAgent(server, adapter);
+  expect((await openableElsewhere(options.observabilityPath)).openable).toBe(false);
+  await server.stop();
+  expect(await openableElsewhere(options.observabilityPath)).toMatchObject({ openable: true });
+});
+
+test("a failed start releases the DuckDB file: another process can open it", async () => {
+  const { server: taken } = await start("taken");
+  try {
+    const options = serverOptions(directory, "failed-start", { port: Number(taken.url.port) });
+    await expect(startServer(options)).rejects.toThrow(/EADDRINUSE|in use/i);
+    expect(await openableElsewhere(options.observabilityPath)).toMatchObject({ openable: true });
+  } finally {
+    await taken.stop();
   }
 });
 

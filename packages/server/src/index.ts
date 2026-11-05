@@ -76,9 +76,10 @@ export interface RunningServer {
   /**
    * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
    * accepting requests and gives in-flight ones (open streams and chat replies included)
-   * `stopGraceMs` before closing them, then shuts Mastra down (which flushes traces and closes
-   * the store) and closes the store again as a fallback. Each step runs even if an earlier one
-   * fails; a step cut short is logged. LibSQL's file handles may stay open until GC.
+   * `stopGraceMs` before closing them, then shuts Mastra down and closes the store. Mastra closes
+   * the store before its final trace flush, which reopens the DuckDB file, so the last close is
+   * what releases the file's lock. Each step runs even if an earlier one fails; a step cut short
+   * is logged. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
 }
@@ -259,6 +260,8 @@ export async function startServer({
             }
           },
           () => mastra.shutdown(),
+          // Required, not a fallback: Mastra 1.80's shutdown() closes the store and then flushes
+          // the last spans, reopening DuckDB; only this releases the file's lock.
           () => storage.close(),
         ]),
     };

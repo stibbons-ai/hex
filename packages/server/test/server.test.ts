@@ -39,7 +39,7 @@ function dataFiles(name: string) {
 async function start(options: Partial<ServerOptions> = {}): Promise<RunningServer> {
   const server = await startServer({
     databasePath: join(directory, "data", "mastra.db"),
-    // One process opens a DuckDB file once: every running server gets its own.
+    // A DuckDB file per running server, as in production, where only one process can hold one.
     observabilityPath: join(directory, `observability-${observed++}.duckdb`),
     port: 0,
     logger: false,
