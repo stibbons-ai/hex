@@ -1,20 +1,27 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
-import { DateExtractor, documentDateOf, messageOf, readEml } from "@hex/adapters";
+import { join } from "node:path";
+import {
+  DateExtractor,
+  documentDateOf,
+  isErrno,
+  isWithin,
+  messageOf,
+  readEml,
+} from "@hex/adapters";
 import type { IntakeAttachment } from "@hex/adapters";
 import { detectDocuments, documentMediaType } from "@hex/domain";
 import type { CalendarDate, DetectedDocument } from "@hex/domain";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer } from "effect";
 import { loadExpectedSet } from "./expected.ts";
 import type { ExpectedIntake } from "./expected.ts";
-import { Report, ratio, renderMarkdown } from "./report.ts";
-import type { DocumentRow, IntakeRow } from "./report.ts";
+import { encodeReport, renderMarkdown, summarize } from "./report.ts";
+import type { DocumentRow, IntakeRow, Prediction, Report } from "./report.ts";
 import {
   documentDateExactScorer,
   documentDateMonthScorer,
   documentDetectionScorer,
 } from "./scorers.ts";
-import type { DetectionVerdict, Prediction } from "./scorers.ts";
+import type { DetectionVerdict } from "./scorers.ts";
 
 export interface EvalOptions {
   /** The fixture folder (`expected.json` and its `.eml` Intakes), absolute. */
@@ -59,16 +66,14 @@ async function prepare(fixtures: string): Promise<PreparedIntake[]> {
   const prepared: PreparedIntake[] = [];
   for (const label of intakes) {
     const path = join(fixtures, label.file);
-    let attachments: readonly IntakeAttachment[];
-    let cidReferences: readonly string[];
-    try {
-      ({ attachments, cidReferences } = await Effect.runPromise(
-        readEml(await readFile(path), path),
-      ));
-    } catch (error) {
-      problems.push(messageOf(error));
-      continue;
-    }
+    const intake = await readFile(path)
+      .then((bytes) => Effect.runPromise(readEml(bytes, path)))
+      .catch((error: unknown) => {
+        problems.push(messageOf(error));
+        return undefined;
+      });
+    if (intake === undefined) continue;
+    const { attachments, cidReferences } = intake;
     // As the workflow's detect-documents step: the size detection goes by is the content's.
     const facts = attachments.map(({ content, ...attachment }) => ({
       ...attachment,
@@ -180,7 +185,7 @@ async function createRunFolder(root: string, startedAt: Date, model: string): Pr
       await mkdir(folder);
       return folder;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!isErrno(error, "EEXIST")) throw error;
     }
   }
 }
@@ -198,48 +203,25 @@ export async function runEval({
   dateExtractor,
   resultsRoot,
 }: EvalOptions): Promise<EvalRun> {
-  const inside = relative(fixtures, resultsRoot);
-  if (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) {
+  if (isWithin(fixtures, resultsRoot)) {
     throw new Error(`the results folder ${resultsRoot} must not lie in the fixture folder`);
   }
   const startedAt = new Date();
   const intakes = await prepare(fixtures);
   const predictions = await Effect.runPromise(predict(intakes).pipe(Effect.provide(dateExtractor)));
-  const rows: IntakeRow[] = [];
-  for (const [position, intake] of intakes.entries()) {
-    rows.push(await score(intake, predictions[position]!));
-  }
-  const count = (select: (row: IntakeRow) => number) =>
-    rows.reduce((sum, row) => sum + select(row), 0);
-  const documents = rows.flatMap((row) => row.documents);
-  const truePositives = count((row) => row.detection.truePositives.length);
-  const falsePositives = count((row) => row.detection.falsePositives.length);
-  const falseNegatives = count((row) => row.detection.falseNegatives.length);
+  const rows = await Promise.all(
+    intakes.map((intake, position) => score(intake, predictions[position]!)),
+  );
   const report: Report = {
     fixtures,
     model,
     startedAt: startedAt.toISOString(),
     durationMs: Date.now() - startedAt.getTime(),
-    detection: {
-      truePositives,
-      falsePositives,
-      falseNegatives,
-      precision: ratio(truePositives, truePositives + falsePositives),
-      recall: ratio(truePositives, truePositives + falseNegatives),
-    },
-    extraction: {
-      exact: ratio(documents.filter((row) => row.exact).length, documents.length),
-      month: ratio(documents.filter((row) => row.month).length, documents.length),
-      notSent: documents.filter((row) => row.status === "not-sent").length,
-      failed: documents.filter((row) => row.status === "failed").length,
-    },
+    ...summarize(rows),
     intakes: rows,
   };
   const folder = await createRunFolder(resultsRoot, startedAt, model);
-  await writeFile(
-    join(folder, "report.json"),
-    `${JSON.stringify(Schema.encodeUnknownSync(Report)(report), null, 2)}\n`,
-  );
+  await writeFile(join(folder, "report.json"), encodeReport(report));
   await writeFile(join(folder, "report.md"), renderMarkdown(report));
   return { report, folder };
 }

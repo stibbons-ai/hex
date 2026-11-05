@@ -20,13 +20,15 @@ export const DocumentDateAnswer = Schema.Struct({
 });
 export type DocumentDateAnswer = typeof DocumentDateAnswer.Type;
 
+const decodeAnswer = Schema.decodeUnknownOption(DocumentDateAnswer);
+
 /**
  * The Document date in a model's answer: present only when the answer decodes as
  * {@link DocumentDateAnswer} with no `null` and names a real day (`isCalendarDate`). Anything else
  * (no date found, malformed, 30 February) is none, as `planFiling` would fall back on it.
  */
 export function documentDateOf(answer: unknown): CalendarDate | undefined {
-  const decoded = Schema.decodeUnknownOption(DocumentDateAnswer)(answer);
+  const decoded = decodeAnswer(answer);
   if (Option.isNone(decoded)) return undefined;
   const { year, month, day } = decoded.value;
   if (year === null || month === null || day === null) return undefined;

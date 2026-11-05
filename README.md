@@ -506,12 +506,12 @@ takes the DateExtractor as a Layer, so a test can script the model.
 
 ## Packages
 
-| Package             | Holds                                                                                                                                          |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names  |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router) |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                          |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, scorers, reports)               |
+| Package             | Holds                                                                                                                                           |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names   |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)  |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                           |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers) |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags

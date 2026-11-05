@@ -14,7 +14,6 @@ import { router } from "./router";
 export { contract } from "./contract";
 export type { ChatOptions } from "./chat";
 export { loadIntakeConfig } from "./config";
-export type { IntakeConfig } from "./config";
 
 /**
  * Loopback only: other machines can't connect. Local browsers still can, so requests are also

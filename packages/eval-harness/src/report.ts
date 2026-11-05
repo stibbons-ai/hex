@@ -8,7 +8,7 @@ export const Ratio = Schema.Struct({
 });
 export type Ratio = typeof Ratio.Type;
 
-export function ratio(count: number, total: number): Ratio {
+function ratio(count: number, total: number): Ratio {
   return { count, total, value: total === 0 ? null : count / total };
 }
 
@@ -27,18 +27,25 @@ const DocumentVerdicts = {
   month: Schema.Boolean,
 };
 
-/** One labelled Document: what the model predicted, and the verdicts. */
+/** Answered: the Document date the model answered, `YYYY-MM-DD`; `null`: none (or no real day). */
+const Answered = Schema.Struct({
+  status: Schema.Literal("answered"),
+  predicted: Schema.NullOr(Schema.String),
+});
+/** Never sent to the model (`documentMediaType`): predicted no date. */
+const NotSent = Schema.Struct({ status: Schema.Literal("not-sent") });
+/** The model call failed: counts as incorrect. */
+const Failed = Schema.Struct({ status: Schema.Literal("failed"), error: Schema.String });
+
+/** What the eval got for one labelled Document. */
+export const Prediction = Schema.Union([Answered, NotSent, Failed]);
+export type Prediction = typeof Prediction.Type;
+
+/** One labelled Document: its {@link Prediction} and the verdicts. */
 export const DocumentRow = Schema.Union([
-  Schema.Struct({
-    ...DocumentVerdicts,
-    status: Schema.Literal("answered"),
-    /** The Document date the model answered, `YYYY-MM-DD`; `null`: none (or no real day). */
-    predicted: Schema.NullOr(Schema.String),
-  }),
-  /** Never sent to the model (`documentMediaType`): predicted no date. */
-  Schema.Struct({ ...DocumentVerdicts, status: Schema.Literal("not-sent") }),
-  /** The model call failed: counts as incorrect. */
-  Schema.Struct({ ...DocumentVerdicts, status: Schema.Literal("failed"), error: Schema.String }),
+  Schema.Struct({ ...DocumentVerdicts, ...Answered.fields }),
+  Schema.Struct({ ...DocumentVerdicts, ...NotSent.fields }),
+  Schema.Struct({ ...DocumentVerdicts, ...Failed.fields }),
 ]);
 export type DocumentRow = typeof DocumentRow.Type;
 
@@ -86,6 +93,41 @@ export const Report = Schema.Struct({
   intakes: Schema.Array(IntakeRow),
 });
 export type Report = typeof Report.Type;
+
+/** The set-level figures of `intakes`. */
+export function summarize(intakes: readonly IntakeRow[]): Pick<Report, "detection" | "extraction"> {
+  const truePositives = intakes.flatMap((row) => row.detection.truePositives).length;
+  const falsePositives = intakes.flatMap((row) => row.detection.falsePositives).length;
+  const falseNegatives = intakes.flatMap((row) => row.detection.falseNegatives).length;
+  const documents = intakes.flatMap((row) => row.documents);
+  const counted = (keep: (row: DocumentRow) => boolean) => documents.filter(keep).length;
+  return {
+    detection: {
+      truePositives,
+      falsePositives,
+      falseNegatives,
+      precision: ratio(truePositives, truePositives + falsePositives),
+      recall: ratio(truePositives, truePositives + falseNegatives),
+    },
+    extraction: {
+      exact: ratio(
+        counted((row) => row.exact),
+        documents.length,
+      ),
+      month: ratio(
+        counted((row) => row.month),
+        documents.length,
+      ),
+      notSent: counted((row) => row.status === "not-sent"),
+      failed: counted((row) => row.status === "failed"),
+    },
+  };
+}
+
+/** `report` as `report.json`. */
+export function encodeReport(report: Report): string {
+  return `${JSON.stringify(Schema.encodeUnknownSync(Report)(report), null, 2)}\n`;
+}
 
 /** `text` safe inside a Markdown table cell: one line, pipes escaped. */
 const cell = (text: string) => text.replace(/\s+/g, " ").replaceAll("|", "\\|");
