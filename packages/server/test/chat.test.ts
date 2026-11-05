@@ -403,26 +403,49 @@ describe("chat conversation queue", () => {
     expect(said).toContain("two");
   });
 
-  test("messages queued behind a busy run are one turn per sender: a stranger's is ignored and stays out of Daniel's", async () => {
+  /**
+   * Daniel @-mentions hex in a channel thread; while that run is busy, `queued` arrive in order.
+   * Returns hex's warnings, each model call's prompt, and the fields of every batch the Chat SDK
+   * handed on (its `message-dequeued` log lines).
+   */
+  async function queuedBehindBusyRun(queued: { sender: string; text: string }[]) {
     const { model, prompts, busy, release } = heldModel();
     const { server, adapter } = await start(model);
     const conversation = "general";
-    const warnings = await logged(server, "warn", async () => {
-      const first = adapter.receive({
-        conversation,
-        sender: DANIEL,
-        text: "@hex hi",
-        mention: true,
+    const chatLogger = server.mastra.getAgent(CHAT_AGENT_ID).getChannels()?.sdk?.getLogger();
+    if (!chatLogger) throw new Error("no chat logger");
+    const info = spyOn(chatLogger, "info");
+    try {
+      const warnings = await logged(server, "warn", async () => {
+        const first = adapter.receive({
+          conversation,
+          sender: DANIEL,
+          text: "@hex hi",
+          mention: true,
+        });
+        await within(busy, "the first run to start");
+        for (const message of queued) await adapter.receive({ conversation, ...message });
+        release();
+        await first;
       });
-      await within(busy, "the first run to start");
-      // Queued while the run is busy: a batch that mixes both senders.
-      await adapter.receive({ conversation, sender: STRANGER, text: "stranger one" });
-      await adapter.receive({ conversation, sender: STRANGER, text: "stranger two" });
-      await adapter.receive({ conversation, sender: DANIEL, text: "daniel two" });
-      await adapter.receive({ conversation, sender: DANIEL, text: "daniel three" });
-      release();
-      await first;
-    });
+      const batches = info.mock.calls
+        .filter(([event]) => event === "message-dequeued")
+        .map(([, fields]) => fields);
+      return { server, adapter, warnings, prompts, batches };
+    } finally {
+      info.mockRestore();
+    }
+  }
+
+  test("messages queued behind a busy run are one turn per sender: a stranger's is ignored and stays out of Daniel's", async () => {
+    const { server, adapter, warnings, prompts, batches } = await queuedBehindBusyRun([
+      { sender: STRANGER, text: "stranger one" },
+      { sender: STRANGER, text: "stranger two" },
+      { sender: DANIEL, text: "daniel two" },
+      { sender: DANIEL, text: "daniel three" },
+    ]);
+    // All four were handed on as one batch: the latest plus three skipped, none dropped.
+    expect(batches).toEqual([expect.objectContaining({ skippedCount: 3 })]);
     // Both stranger messages reached the guard as one turn: one line, without their text.
     expect(warnings).toEqual([[IGNORED, { platform: "fake", sender: STRANGER }]]);
     expect(JSON.stringify(warnings)).not.toContain("stranger");
@@ -432,7 +455,31 @@ describe("chat conversation queue", () => {
     expect(prompts[1]).toContain("daniel three");
     expect(prompts[1]).not.toContain("stranger");
     expect(adapter.posted.map(({ text }) => text)).toEqual(["reply 1", "reply 2"]);
-    expect(JSON.stringify(await allMessages(server))).not.toContain("stranger");
+    const stored = JSON.stringify(await allMessages(server));
+    expect(stored).toContain("daniel two");
+    expect(stored).toContain("daniel three");
+    expect(stored).not.toContain("stranger");
+  });
+
+  test("a stranger's message queued between two of Daniel's stays out of both of Daniel's turns", async () => {
+    const { server, adapter, warnings, prompts, batches } = await queuedBehindBusyRun([
+      { sender: DANIEL, text: "daniel two" },
+      { sender: STRANGER, text: "stranger one" },
+      { sender: DANIEL, text: "daniel three" },
+    ]);
+    expect(batches).toEqual([expect.objectContaining({ skippedCount: 2 })]);
+    expect(warnings).toEqual([[IGNORED, { platform: "fake", sender: STRANGER }]]);
+    // Not consecutive, so Daniel's two messages are two turns, each answered.
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1]).toContain("daniel two");
+    expect(prompts[1]).not.toContain("daniel three");
+    expect(prompts[2]).toContain("daniel three");
+    for (const prompt of prompts) expect(prompt).not.toContain("stranger");
+    expect(adapter.posted.map(({ text }) => text)).toEqual(["reply 1", "reply 2", "reply 3"]);
+    const stored = JSON.stringify(await allMessages(server));
+    expect(stored).toContain("daniel two");
+    expect(stored).toContain("daniel three");
+    expect(stored).not.toContain("stranger");
   });
 
   test("a message still queued when stop() begins is dropped and logged, not answered", async () => {
