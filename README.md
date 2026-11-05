@@ -98,10 +98,10 @@ a DuckDB file, `<data dir>/observability.duckdb` (see [Traces and Studio](#trace
 The data directory is `HEX_DATA_DIR`, default `.data` relative to the
 working directory (git-ignored at the repository root); it is created on start. Run it from the
 repository root.
-SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first, then
-requests in flight, open streams and chat replies included, get 5 seconds before they are closed
-(the cut-off is logged), then Mastra shuts down. A second signal of the same kind kills it at
-once.
+SIGINT or SIGTERM stops it: hex stops taking chat messages and the channels disconnect first (up to
+5 seconds), then requests in flight, open streams and chat replies included, and a channel still
+disconnecting get 5 more seconds before they are closed (the cut-off is logged), then Mastra shuts
+down. A second signal of the same kind kills it at once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
@@ -471,21 +471,22 @@ it.
 - hex keeps the adapter's receive cursor in its database: the newest event that, with every
   earlier one, hex has finished handling (later finished ones are stored too, to be skipped). A
   restarted hex resumes the event stream there, so signal-cli replays the events whose handling
-  hadn't finished: a reply cut off by the 5-second stop grace or a crash, and messages signal-cli
-  took off Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s,
-  longer when the host itself is gone). Messages sent while no event stream was connected stay at
-  Signal and arrive once hex connects (with `--receive-mode on-connection`). Limits:
+  hadn't finished: a reply cut off by the stop grace (10 seconds in all) or a crash, and messages
+  signal-cli took off Signal after hex was gone (it notices only at its next keep-alive, within
+  about 15-30 s, longer when the host itself is gone). Messages sent while no event stream was
+  connected stay at Signal and arrive once hex connects (with `--receive-mode on-connection`).
+  Limits:
   - lost: everything signal-cli held for replay when signal-cli itself restarts, and anything
     older than its last 1000 events;
   - lost: a message waiting behind a reply in progress in the same conversation when hex stops or
     crashes: its handling counts as finished once it is queued, and the queue lives in memory;
   - lost: until hex has finished its first event and every one before it (on a new database, or
     the first start after this upgrade), there is no cursor, so a restart replays nothing;
-  - lost, during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message
-    arriving after hex began stopping is dropped and the cursor moves past it;
+  - lost, during shutdown: a message arriving after hex began stopping is dropped and the cursor
+    moves past it;
   - answered twice: a message whose reply went out just before a crash, before its handling
-    finished and the cursor was written; and, during shutdown (#29), one whose last cursor write
-    missed the store closing.
+    finished and the cursor was written; and, during shutdown, one whose reply and last cursor
+    write didn't finish within the 10 seconds of both stop graces.
 - If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
   30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
   does while Slack's socket reconnects.
