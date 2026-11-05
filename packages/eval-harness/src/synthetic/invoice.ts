@@ -21,7 +21,8 @@ export type DateStyle = "dot" | "short" | "iso" | "long";
  */
 export type DateLine =
   | { label: string; date: string; document?: true }
-  | { label: string; from: string; to: string };
+  /** A period is never the Document date. */
+  | { label: string; from: string; to: string; document?: never };
 
 export interface Invoice {
   language: Language;
@@ -42,13 +43,16 @@ export interface Invoice {
 
 /**
  * The Document date (ISO) from the one line flagged `document`, or `null` when no line is flagged
- * (the invoice may still print distractor dates). Throws when several lines are flagged.
+ * (the invoice may still print distractor dates). Throws, naming `fileName`, when several lines
+ * are flagged or the flagged line is not a single date.
  */
-export function documentDate(invoice: Invoice): string | null {
-  const lines = invoice.dates.filter((date) => "document" in date);
-  if (lines.length > 1) throw new Error(`${invoice.title}: more than one Document date line`);
+export function documentDate(invoice: Invoice, fileName: string): string | null {
+  const lines = invoice.dates.filter((date) => date.document === true);
+  if (lines.length > 1) throw new Error(`${fileName}: more than one Document date line`);
   const line = lines[0];
-  return line !== undefined && "date" in line ? line.date : null;
+  if (line === undefined) return null;
+  if (!("date" in line)) throw new Error(`${fileName}: the Document date line is a period`);
+  return line.date;
 }
 
 const months = {
@@ -186,7 +190,10 @@ function rows(invoice: Invoice): Row[] {
   ];
 }
 
-/** The invoice's printed text, one string per row (`left` and amount); scans draw exactly this. */
+/**
+ * The invoice's printed text, one string per row (`left` and amount). Scans draw these rows in the
+ * bitmap font, i.e. upper case with `ß` → `SS` and `€` → `EUR` (see `glyphText`).
+ */
 export function printedLines(invoice: Invoice): string[] {
   return rows(invoice).map((row) =>
     row.right === undefined ? row.left : `${row.left} ${row.right}`,

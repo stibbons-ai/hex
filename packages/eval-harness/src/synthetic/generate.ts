@@ -1,8 +1,8 @@
 /** Renders the synthetic Intakes to `.eml` files plus their `expected.json`, byte for byte reproducibly. */
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadExpectedSet, type ExpectedIntake, type ExpectedSet } from "../expected.ts";
+import { readExpectedFile, type ExpectedIntake, type ExpectedSet } from "../expected.ts";
 import { intakes, recipient, type Attachment, type SyntheticIntake } from "./intakes.ts";
 import { documentDate, invoicePdf, scanPdf, scanPng } from "./invoice.ts";
 import {
@@ -21,8 +21,8 @@ import { Bitmap } from "./raster.ts";
 /** The committed set, `packages/eval-harness/fixtures/synthetic/`. */
 export const syntheticFolder = fileURLToPath(new URL("../../fixtures/synthetic", import.meta.url));
 
-/** The names the generator gives its `.eml` files, `NN-<slug>.eml`. */
-const generatedName = /^\d{2}-[a-z0-9-]+\.eml$/;
+/** Domain of every generated `Message-ID`; how a later run recognises the files it may replace. */
+const syntheticDomain = "hex-fixtures.example";
 
 /** A small grey PNG of `text`, two lines at most; large enough (> 20 KB) that only its role excludes it. */
 function decoration(text: string): Uint8Array {
@@ -132,14 +132,19 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
   const labelled: ExpectedIntake[] = [];
   intakes.forEach((intake, index) => {
     const number = String(index + 1).padStart(2, "0");
+    if (!/^[a-z0-9-]+$/.test(intake.slug))
+      throw new Error(`slug must be [a-z0-9-]+: ${intake.slug}`);
+    const names = intake.attachments.map(({ fileName }) => fileName);
+    const repeated = names.filter((name, at) => names.indexOf(name) !== at);
+    if (repeated.length > 0)
+      throw new Error(`${intake.slug}: repeated file names ${repeated.join(", ")}`);
     const file = `${number}-${intake.slug}.eml`;
-    if (!generatedName.test(file)) throw new Error(`slug must be [a-z0-9-]+: ${intake.slug}`);
     const headers = [
       `From: ${mailbox(intake.from)}`,
       `To: ${mailbox(recipient)}`,
       `Subject: ${headerText(intake.subject)}`,
       `Date: ${headerDate(intake.sent)}`,
-      `Message-ID: <synthetic-${number}-${intake.slug}@hex-fixtures.example>`,
+      `Message-ID: <synthetic-${number}-${intake.slug}@${syntheticDomain}>`,
       `Content-Language: ${intake.language}`,
     ];
     files.set(file, renderMessage(headers, messageTree(intake), `=_hex_${number}`));
@@ -148,9 +153,9 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
       description: intake.description,
       documents: intake.attachments
         .filter((attachment) => "invoice" in attachment)
-        .map((attachment) => ({
-          fileName: attachment.fileName,
-          documentDate: documentDate(attachment.invoice),
+        .map(({ fileName, invoice }) => ({
+          fileName,
+          documentDate: documentDate(invoice, fileName),
         })),
     });
   });
@@ -159,31 +164,63 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
   return files;
 }
 
+/** Whether an `.eml`'s header block carries the generator's `Message-ID`. */
+function hasSyntheticMessageId(eml: string): boolean {
+  const end = eml.search(/\r?\n\r?\n/);
+  const headers = end === -1 ? eml : eml.slice(0, end);
+  return new RegExp(
+    `^Message-ID: <synthetic-[^@>\\s]+@${syntheticDomain.replaceAll(".", "\\.")}>\\r?$`,
+    "im",
+  ).test(headers);
+}
+
 /**
- * Whether `name` in `folder` belongs to a set this generator wrote: an `NN-<slug>.eml`, or an
- * `expected.json` that decodes and lists only such files. Anything else may be real mail.
+ * Why `name` in `folder` may not be replaced, or `undefined` when this generator wrote it: a
+ * regular `.eml` file whose headers carry the synthetic `Message-ID`, or a regular `expected.json`
+ * that decodes and whose listed files, where present, are such `.eml` files.
  */
-async function isGenerated(folder: string, name: string): Promise<boolean> {
-  if (name !== "expected.json") return generatedName.test(name);
-  const set = await loadExpectedSet(folder).catch(() => undefined);
-  return set !== undefined && set.intakes.every(({ file }) => generatedName.test(file));
+async function refusal(folder: string, name: string): Promise<string | undefined> {
+  const path = join(folder, name);
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined) return undefined; // listed but absent: nothing to protect
+  if (!stats.isFile()) return "not a regular file";
+  if (name.toLowerCase() !== "expected.json") {
+    return hasSyntheticMessageId(await Bun.file(path).text())
+      ? undefined
+      : `no Message-ID <synthetic-…@${syntheticDomain}>`;
+  }
+  let set: ExpectedSet;
+  try {
+    set = await readExpectedFile(path);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  for (const { file } of set.intakes) {
+    const reason = await refusal(folder, file);
+    if (reason !== undefined) return `lists ${file}, which is ${reason}`;
+  }
+  return undefined;
 }
 
 /**
  * Replaces the generated `.eml` files and `expected.json` in `folder` with a freshly rendered set.
- * Renders first, then refuses, touching nothing, when the folder holds any other `.eml` or a foreign
- * `expected.json`: those may be real fixtures, which git ignores and so cannot restore.
+ * Renders first, then refuses, touching nothing, when the folder holds any `.eml` or
+ * `expected.json` (any letter case) this generator did not write, judged by content: those may be
+ * real fixtures, which git ignores and so cannot restore.
  */
 export async function writeFixtureSet(folder: string): Promise<void> {
   const files = renderFixtureSet();
   await mkdir(folder, { recursive: true });
-  const replaced = (await readdir(folder)).filter(
-    (name) => /\.eml$/i.test(name) || name === "expected.json",
+  const replaced = (await readdir(folder)).filter((name) =>
+    /^(?:.*\.eml|expected\.json)$/i.test(name),
   );
-  const foreign: string[] = [];
-  for (const name of replaced) if (!(await isGenerated(folder, name))) foreign.push(name);
-  if (foreign.length > 0) {
-    throw new Error(`${folder} holds files this generator did not write: ${foreign.join(", ")}`);
+  const refused: string[] = [];
+  for (const name of replaced) {
+    const reason = await refusal(folder, name);
+    if (reason !== undefined) refused.push(`${name} (${reason})`);
+  }
+  if (refused.length > 0) {
+    throw new Error(`${folder} holds files this generator did not write: ${refused.join("; ")}`);
   }
   for (const name of replaced) await rm(join(folder, name));
   for (const [name, bytes] of files) await Bun.write(join(folder, name), bytes);

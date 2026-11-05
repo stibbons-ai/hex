@@ -12,14 +12,15 @@ export interface Mailbox {
 
 const printableAscii = /^[\x20-\x7e]*$/;
 /**
- * UTF-8 bytes per encoded word: 39 bytes are 52 base64 characters, 64 with `=?UTF-8?B?…?=`, so even
- * `Subject: ` plus one word stays within RFC 2047's 76-character line limit.
+ * UTF-8 bytes per encoded word: 39 bytes are 52 base64 characters, 64 with `=?UTF-8?B?…?=`, so a
+ * header name (`Subject: `, `From: `) plus one word stays within RFC 2047's 76-character line limit.
  */
 const wordBytes = 39;
 
 /**
- * `text` as is when it is plain ASCII, else RFC 2047 encoded words of at most 75 characters, folded
- * onto continuation lines. Words split between characters, never inside one.
+ * `text` as is when it is plain ASCII, else RFC 2047 encoded words of at most 75 characters, each
+ * on its own folded line. Words split between code points, so every word is valid UTF-8 (a
+ * combining mark may still land in the next word).
  */
 export function headerText(text: string): string {
   if (printableAscii.test(text)) return text;
@@ -36,13 +37,14 @@ export function headerText(text: string): string {
   return words.map((word) => `=?UTF-8?B?${Buffer.from(word).toString("base64")}?=`).join("\n ");
 }
 
-/** `Name <address>`; the address always stays outside any encoded word. */
+/**
+ * `Name <address>`; the address always stays outside any encoded word. An encoded name is folded
+ * before `<address>`, so no line holding encoded words exceeds 76 characters.
+ */
 export function mailbox({ name, address }: Mailbox): string {
+  if (!printableAscii.test(name)) return `${headerText(name)}\n <${address}>`;
   // A plain name with RFC 5322 specials (".", ",", …) goes into a quoted string.
-  const phrase =
-    printableAscii.test(name) && /[()<>[\]:;@\\,."]/.test(name)
-      ? `"${name.replaceAll(/["\\]/g, "\\$&")}"`
-      : headerText(name);
+  const phrase = /[()<>[\]:;@\\,."]/.test(name) ? `"${name.replaceAll(/["\\]/g, "\\$&")}"` : name;
   return `${phrase} <${address}>`;
 }
 
@@ -51,7 +53,10 @@ export function mailbox({ name, address }: Mailbox): string {
  * The weekday comes from `toUTCString`, whose format ECMAScript fixes; no local time zone is read.
  */
 export function headerDate(sent: string): string {
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})([+-]\d{2}):(\d{2})$/.exec(sent);
+  const match =
+    /^(\d{4}-\d{2}-\d{2})T((?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)([+-](?:0\d|1[0-4])):([0-5]\d)$/.exec(
+      sent,
+    );
   if (match === null || !isCalendarDate(match[1]!)) throw new Error(`bad sent time ${sent}`);
   const [, day, time, offsetHours, offsetMinutes] = match;
   const date = new Date(`${day}T00:00:00Z`).toUTCString().slice(0, 16);

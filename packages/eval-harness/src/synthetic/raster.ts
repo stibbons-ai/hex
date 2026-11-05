@@ -29,7 +29,10 @@ export class Bitmap {
     }
   }
 
-  /** Draws `text` with its top-left corner at (x, y), each font pixel `scale` pixels square. */
+  /**
+   * Draws `text` with the top-left corner of its cap height at (x, y), each font pixel `scale`
+   * pixels square; umlaut dots reach two font pixels above y.
+   */
   drawText(x: number, y: number, text: string, scale: number): void {
     let left = x;
     for (const char of glyphText(text)) {

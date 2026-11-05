@@ -80,15 +80,22 @@ describe("expected.json schema", () => {
   });
 
   test.each([
+    ["is missing", undefined],
     ["is not JSON", "{"],
     ["does not decode", JSON.stringify({ intakes: [dated("2026-02-30")] })],
   ])("loading names the file when it %s", async (_, content) => {
     const folder = await mkdtemp(join(tmpdir(), "hex-expected-"));
     try {
-      await Bun.write(join(folder, "expected.json"), content);
+      if (content !== undefined) await Bun.write(join(folder, "expected.json"), content);
       await expect(loadExpectedSet(folder)).rejects.toThrow(join(folder, "expected.json"));
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
+  });
+
+  test("decoding cannot be loosened by the caller", () => {
+    const loosen = decodeExpectedSet as (input: unknown, options: unknown) => unknown;
+    const result = loosen({ intakes: [intake({ extra: 1 })] }, { onExcessProperty: "ignore" });
+    expect(Result.isFailure(result as Result.Result<unknown, unknown>)).toBe(true);
   });
 });

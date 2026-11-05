@@ -90,16 +90,17 @@ function pdfLines(text: string): string[] {
 }
 
 /**
- * The lines a scanned Document shows. A scan has no text layer, so they come from the generator's
- * model, which is what the raster draws.
+ * The lines a scanned Document shows. A scan has no text layer and this test does no OCR, so they
+ * come from the generator's model, which is what the raster draws: a scan that skipped its date
+ * row would still pass. A part with no invoice in the model (a mislabelled decoration) shows no
+ * lines, so the Document assertions below report it instead of this lookup.
  */
 function scanLines(intake: ExpectedIntake, fileName: string): string[] {
   const source = model.find(({ slug }) => intake.file === `${intake.file.slice(0, 3)}${slug}.eml`);
   const attachment = source?.attachments.find((candidate) => candidate.fileName === fileName);
-  if (attachment === undefined || !("invoice" in attachment)) {
-    throw new Error(`${intake.file}: no model for ${fileName}`);
-  }
-  return printedLines(attachment.invoice);
+  return attachment !== undefined && "invoice" in attachment
+    ? printedLines(attachment.invoice)
+    : [];
 }
 
 const isPdf = (part: Part) => part.contentType === "application/pdf";
@@ -180,7 +181,10 @@ function formats(iso: string): string[] {
   ];
 }
 
-/** Labels that print a Document date; every other date label is a distractor. */
+/**
+ * Labels that print a Document date; every other date label is a distractor. This wording is the
+ * contract between the invoices and their labels: a new Document-date label must be added here.
+ */
 const documentDateLabels = ["Rechnungsdatum", "Invoice date", "Datum"];
 
 describe("committed synthetic fixture set", () => {
@@ -325,5 +329,15 @@ describe("committed synthetic fixture set", () => {
         ({ part }) => part.disposition === "attachment" && !isPdf(part) && !isImage(part),
       ),
     ).toBe(true);
+  });
+
+  test("labels every Document: each unlabelled file part is one of the non-Document traps", () => {
+    const untrapped = nonDocuments
+      .filter(
+        ({ part, html }) =>
+          !referenced(part, html) && part.data.length >= 200 && (isPdf(part) || isImage(part)),
+      )
+      .map(({ part }) => part.fileName);
+    expect(untrapped).toEqual([]);
   });
 });

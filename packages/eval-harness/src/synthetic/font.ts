@@ -1,7 +1,7 @@
 /**
  * A 5×7 uppercase bitmap font for the scanned Documents: enough glyphs for German and English
- * invoices. Lowercase is drawn as uppercase; `ß` becomes `SS` and `€` becomes `EUR` (see
- * {@link glyphText}).
+ * invoices. The umlauts add two accent rows above the 7-row cap height. Lowercase is drawn as
+ * uppercase; `ß` becomes `SS` and `€` becomes `EUR` (see {@link glyphText}).
  */
 export const glyphWidth = 5;
 export const glyphHeight = 7;

@@ -285,12 +285,14 @@ regenerate; a test fails when the committed files drift from the generator's out
 
 ```sh
 bun run fixtures:generate             # rewrites packages/eval-harness/fixtures/synthetic/
-bun run fixtures:generate /tmp/set    # or any other folder; relative to where you run bun
+bun run fixtures:generate /tmp/set    # any other folder; relative paths resolve against your directory
 ```
 
-The generator replaces only what it wrote itself: it refuses, touching nothing, a folder that
-holds any other `.eml` or an `expected.json` naming other files, so it cannot overwrite real
-fixtures.
+The generator replaces only files it recognises as its own by content: regular `.eml` files whose
+headers carry its `Message-ID <synthetic-…@hex-fixtures.example>`, and an `expected.json` that
+decodes and whose listed files, where present, are such files. Before touching anything it refuses
+a folder holding any other `.eml` or `expected.json` (any letter case), naming each file and why.
+Run it from the repo root or a folder below it outside the workspace packages.
 
 | Intake                       | Covers                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------- |

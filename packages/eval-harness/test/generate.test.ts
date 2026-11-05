@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { syntheticFolder, writeFixtureSet } from "../src/synthetic/generate.ts";
@@ -51,9 +51,13 @@ describe("synthetic fixture generator", () => {
     expect(differing(first, committed)).toEqual([]);
   });
 
-  test("regenerating replaces stale Intakes but keeps unrelated files", async () => {
+  /** An `.eml` as this generator writes them, recognisable by its `Message-ID`. */
+  const generatedEml = (slug: string) =>
+    `From: x <x@x.example>\r\nMessage-ID: <synthetic-${slug}@hex-fixtures.example>\r\n\r\nbody\r\n`;
+
+  test("regenerating replaces earlier generated Intakes but keeps unrelated files", async () => {
     const dir = await temp();
-    await Bun.write(join(dir, "99-stale.eml"), "stale");
+    await Bun.write(join(dir, "99-stale.eml"), generatedEml("99-stale"));
     await Bun.write(join(dir, "notes.md"), "kept");
     await writeFixtureSet(dir);
     const names = await readdir(dir);
@@ -62,21 +66,38 @@ describe("synthetic fixture generator", () => {
     expect(names).toContain("expected.json");
   });
 
+  const realMail =
+    "From: Bank <bank@example.com>\r\nMessage-ID: <abc@bank.example>\r\n\r\nreal\r\n";
   test.each([
-    ["a real .eml", "my-real-mail.eml", "From: someone\r\n"],
-    ["an upper-case .EML", "01-scan.EML", "From: someone\r\n"],
-    [
-      "labels for real files",
-      "expected.json",
-      JSON.stringify({ intakes: [{ file: "inbox.eml", documents: [] }] }),
-    ],
+    ["a real .eml", "my-real-mail.eml", realMail],
+    ["a real .eml named like the set", "01-bank-statement.eml", realMail],
+    ["an upper-case .EML", "01-scan.EML", realMail],
+    ["an Expected.json with foreign content", "Expected.json", "REAL LABELS"],
     ["an expected.json that is not JSON", "expected.json", "{"],
   ])("refuses a folder holding %s and leaves it untouched", async (_, name, content) => {
     const dir = await temp();
     await Bun.write(join(dir, name), content);
-    await Bun.write(join(dir, "02-generated.eml"), "older generated Intake");
+    await Bun.write(join(dir, "02-generated.eml"), generatedEml("02-generated"));
     await expect(writeFixtureSet(dir)).rejects.toThrow(name);
     expect((await readdir(dir)).sort()).toEqual(["02-generated.eml", name].sort());
     expect(await Bun.file(join(dir, name)).text()).toBe(content);
+  });
+
+  test("refuses labels that list a real .eml", async () => {
+    const dir = await temp();
+    const labels = JSON.stringify({ intakes: [{ file: "01-real.eml", documents: [] }] });
+    await Bun.write(join(dir, "expected.json"), labels);
+    await Bun.write(join(dir, "01-real.eml"), realMail);
+    await expect(writeFixtureSet(dir)).rejects.toThrow("expected.json (lists 01-real.eml");
+    expect(await Bun.file(join(dir, "expected.json")).text()).toBe(labels);
+    expect(await Bun.file(join(dir, "01-real.eml")).text()).toBe(realMail);
+  });
+
+  test("refuses a directory named like an Intake, deleting nothing", async () => {
+    const dir = await temp();
+    await mkdir(join(dir, "01-x.eml"));
+    await Bun.write(join(dir, "02-generated.eml"), generatedEml("02-generated"));
+    await expect(writeFixtureSet(dir)).rejects.toThrow("01-x.eml (not a regular file)");
+    expect((await readdir(dir)).sort()).toEqual(["01-x.eml", "02-generated.eml"]);
   });
 });
