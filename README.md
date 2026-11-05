@@ -6,7 +6,8 @@ tooling every later slice builds on.
 
 ## Install
 
-Requires Bun 1.4.2 (the `packageManager` pin).
+Requires Bun 1.4.2 (the `packageManager` pin; the
+[development shell](#development-shell-and-model-keys) supplies it).
 
 ```sh
 bun install --frozen-lockfile
@@ -17,6 +18,69 @@ ago. Every external dependency version lives in the root `package.json` `catalog
 depend on externals with `catalog:` and on each other with `workspace:*`, and no manifest may use
 `overrides` or `resolutions` (ADR 0003). To add a dependency, add the catalog entry first, then
 reference it with `catalog:`.
+
+## Development shell and model keys
+
+With **Nix**, **devenv** and **direnv** (its shell hook enabled) installed, authorize the committed
+`.envrc` once from the repository root:
+
+```sh
+direnv allow
+```
+
+or enter the same environment explicitly with `devenv shell`. The shell supplies Bun 1.4.2 (from
+the pinned `devenv-nixpkgs`, matching the `packageManager` pin and CI) and Git, exports
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`, and runs `bun install --frozen-lockfile` before it
+opens. A failed install doesn't stop the shell from opening: check the task output. Nothing
+requires the shell; CI installs Bun directly, and the scripts set the telemetry variables
+themselves.
+
+Live model runs (`bun run eval`, `bun run intake`, the server's chat model) need the model
+provider's API key; tests and CI never do. [SecretSpec](https://secretspec.dev) declares the keys
+in the committed `secretspec.toml`, and the shell exports them from 1Password on entry. The shell
+supplies the `secretspec` command (it ships with devenv); the 1Password CLI (`op`) comes from the
+host. Any other way of setting the variables still works.
+
+The keys are Secure Notes `secretspec/hex/default/<KEY>` in the vault `Hex` of the 1Password
+account `my.1password.com`. The shell reads them as a **read-only service account** (provider
+`onepassword_service`), so no Touch ID is needed and unattended shells get the keys too. One-time
+setup:
+
+1. In 1Password, create the vault `Hex` and a service account with read access to it only.
+2. Store its token in the macOS Keychain: `secretspec config provider login onepassword_service`.
+3. Add each key with your own account; the read-only service account can't write, so
+   `secretspec set` fails. A key is a Secure Note titled `secretspec/hex/default/<KEY>` whose
+   `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
+
+   ```fish
+   read -s -P "OPENAI_API_KEY: " value
+   op item create --account my.1password.com --vault Hex --category "Secure Note" \
+       --title "secretspec/hex/default/OPENAI_API_KEY" --tags automated,hex \
+       "project[text]=hex" "key[text]=OPENAI_API_KEY" "value[concealed]=$value"
+   set -e value
+   ```
+
+4. Check without printing any key, then reload the shell (`direnv reload`, or leave and re-enter
+   `devenv shell`):
+
+   ```sh
+   secretspec check --explain
+   ```
+
+The keys are `OPENAI_API_KEY` (the default Intake and eval model, `openai/gpt-5.1-codex-mini`),
+`ANTHROPIC_API_KEY` (an `anthropic/` `intake.model` or chat model) and `GEMINI_API_KEY` (a
+`google/` one). `GOOGLE_GENERATIVE_AI_API_KEY`, the variable Mastra's model router reads for
+`google/` models, is derived from `GEMINI_API_KEY` and never stored. All are optional, and a
+missing or rejected service token only warns: the shell still opens, and a model call without its
+key fails.
+
+How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
+the live shell. The keys are never set through devenv's `env`, which would write them into the
+world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
+it would fetch the keys a second time and refuse to open the shell when the token is missing.
+Every process in the shell, including an AI coding agent started there, sees the keys. To read
+them from another store, set the provider on entry, for example
+`SECRETSPEC_PROVIDER=keyring devenv shell`.
 
 ## Run
 
@@ -155,8 +219,10 @@ required:
 }
 ```
 
-hex doesn't check at startup that the model's API key is set: without it every Intake with a
-Document hex sends to the model fails until it is.
+The development shell exports the API keys (see
+[Development shell and model keys](#development-shell-and-model-keys)). hex doesn't check at
+startup that the model's key is set: without it every Intake with a Document hex sends to the
+model fails until it is.
 
 Only OpenAI models are exercised (by the tests' fake OpenAI). The answer schema goes to the
 provider as JSON Schema with `additionalProperties: true` and safe-integer bounds (±(2^53−1)); a provider
@@ -231,7 +297,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
 ```
 
 - `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
-  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), which the development
+  shell exports (see [Development shell and model keys](#development-shell-and-model-keys)).
 - `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
   and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
@@ -458,15 +525,17 @@ synthetic folder, any `fixtures/real/` and
 
 `bun run eval` measures hex's two model-relevant decisions on a labelled fixture folder:
 Document detection (`detectDocuments`) and Document date extraction (the DateExtractor on the
-configured model). Run it by hand, with a real API key: it makes at most one model call per
-labelled Document (none for one not sent), plus the DateExtractor's retries of transient provider
-errors (up to 2 per call). No CI job runs it against a real model (`bun run check` runs its test
-against a loopback fake), and it refuses to run (exit 1, nothing written, no model call) when the
-`CI` environment variable is set to a non-empty value.
+configured model). Run it by hand, with a real API key (the
+[development shell](#development-shell-and-model-keys) exports it): it makes at most one model
+call per labelled Document (none for one not sent), plus the DateExtractor's retries of transient
+provider errors (up to 2 per call). No CI job runs it against a real model (`bun run check` runs
+its test against a loopback fake), and it refuses to run (exit 1, nothing written, no model call)
+when the `CI` environment variable is set to a non-empty value.
 
 ```sh
-OPENAI_API_KEY=… bun run eval                                   # the committed synthetic set
-OPENAI_API_KEY=… HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own folder
+bun run eval                                   # the committed synthetic set
+HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own folder
+OPENAI_API_KEY=… bun run eval                  # outside the development shell
 ```
 
 - `HEX_EVAL_FIXTURES`: the fixture folder (`expected.json` and its `.eml` Intakes); default
@@ -539,7 +608,7 @@ Every script that runs code starts with `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRAC
 (`bun run manifests` enforces it), and CI sets both. `MASTRA_TELEMETRY_DISABLED` is read by
 `@mastra/core`'s usage telemetry; `DO_NOT_TRACK` turns off Bun's telemetry and crash reports
 (`bunfig.toml` also sets `telemetry = false`). When you run `bun` or Mastra directly instead of
-through a script, set both yourself.
+through a script, set both yourself, or work in the development shell, which exports both.
 
 `bun run licenses` audits every installed package's manifest plus the lockfile. Only MIT,
 Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, CC0-1.0, Unlicense and BlueOak-1.0.0 pass;
