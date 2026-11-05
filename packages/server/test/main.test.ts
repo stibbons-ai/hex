@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,5 +153,24 @@ describe("bun packages/server/src/main.ts", () => {
       child.kill("SIGTERM");
     }
     expect(await child.exited).toBe(0);
+  });
+
+  test("an Intake ledger that can't be opened fails startup, naming it", async () => {
+    const dataDirectory = join(directory, "broken-ledger");
+    await mkdir(dataDirectory, { recursive: true });
+    // Mastra can open this database, but the ledger table's name is taken by an index.
+    const database = new Database(join(dataDirectory, "mastra.db"));
+    database.run("CREATE TABLE x (a)");
+    database.run("CREATE INDEX hex_intake_ledger ON x (a)");
+    database.close();
+    const child = spawnMain({ HEX_PORT: "0", HEX_DATA_DIR: dataDirectory });
+    try {
+      expect(await child.exited).toBe(1);
+    } finally {
+      child.kill();
+    }
+    const stderr = await new Response(child.stderr).text();
+    expect(stderr).toContain("Intake ledger: opening");
+    expect(stderr).toContain("already an index named hex_intake_ledger");
   });
 });

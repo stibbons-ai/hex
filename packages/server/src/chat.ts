@@ -60,7 +60,9 @@ export interface ChatAgent {
   close(): void;
   /**
    * Resolves once every admitted message run has been handled (answered or failed), including
-   * runs admitted while waiting. Approval-click runs are not covered: core doesn't await them.
+   * runs admitted while waiting. Does not wait for messages still queued behind a run: each is
+   * admitted when its turn comes, or after close() logged and dropped. Approval-click runs are not
+   * covered: core doesn't await them.
    */
   settled(): Promise<void>;
   /** Admitted message runs not yet handled. */
@@ -133,7 +135,9 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
       toolDisplay: "hidden",
     };
   }
-  // Handler promises cover the whole run: core awaits the agent's stream before returning.
+  // Handler promises cover the whole run: core awaits the agent's stream before returning. Under
+  // the "queue" strategy (below) no message joins a run already going; queued messages wait and
+  // are handed over in later turns.
   const inFlight = new Set<Promise<void>>();
   let closing = false;
   const admits = (ctx: ChannelHandlerContext, platform: string, sender: string | undefined) => {
@@ -153,6 +157,11 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
     );
     return handling;
   };
+  // Under "queue", messages queued behind a busy run reach Mastra as one batch per conversation,
+  // senders mixed (chat 4.43 drainQueue). Mastra 1.80 (dispatchBatch, dist/agent-b2Y5GsZg.js:51998)
+  // splits it into runs of consecutive messages from one author and calls this once per run, with
+  // the run's earlier messages in `ctx.skipped`: `message.author` speaks for the whole turn. The
+  // test "messages queued behind a busy run are one turn per sender…" pins it.
   const guard: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
     const platform = thread.adapter.name;
     if (directOnly.has(platform) && !thread.isDM) {
@@ -190,6 +199,17 @@ export function createChatAgent({ model, providerOptions, channels }: ChatOption
         },
         onSlashCommand: false,
       },
+      // One handler at a time per conversation; messages arriving meanwhile wait their turn.
+      // Mastra's default, "concurrent", streams such a message into the busy run and finishes it
+      // in a run nobody awaits (stop() could close storage under it), and races two first
+      // messages of a new conversation into two memory threads; this per-conversation lock fixes
+      // both. Given up on purpose: a message joining the run in progress. hex is single-user, and
+      // one complete history per conversation is worth more. Chat SDK defaults hold, and both
+      // limits lose messages without an answer or a line in hex's log: at most 10 wait per
+      // conversation, anyone's counting (they are queued before the allowlist guard, so others in
+      // a Slack channel thread can push Daniel's out), beyond that the oldest is dropped; a
+      // message still waiting after 90 s is dropped when its turn comes.
+      chatOptions: { concurrency: { strategy: "queue" } },
       // Off: on the first mention in a channel thread, core would store the thread's earlier
       // messages, other people's included, in memory.
       threadContext: { maxMessages: 0 },

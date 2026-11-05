@@ -20,7 +20,7 @@ import {
   fakeSignalCli,
 } from "./fake-signal-cli";
 import { DANIEL as DANIEL_SLACK, directMessage, fakeSlack, slackEnv } from "./fake-slack";
-import { REPLY, mockModel, numberedModel, toolCallingModel } from "./mock-model";
+import { REPLY, heldModel, mockModel, toolCallingModel } from "./mock-model";
 import { serverOptions, stored, warnings } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
@@ -203,7 +203,7 @@ test("a Group hex is still subscribed to (as after a restart) gets no answer eit
       // @mention the mention handler.
       fake.receive({ aci: DANIEL, text: "secret plans", group: { mention: false } });
       fake.receive({ aci: STRANGER, text: "leak it", group: { mention: true } });
-      // The two are handled concurrently, so in either order.
+      // Both are checked by the guard; the test doesn't rely on which comes first.
       const lines = await ignored;
       expect(lines).toHaveLength(2);
       expect(lines).toContainEqual([NOT_DIRECT, { platform: "signal", sender: DANIEL }]);
@@ -217,54 +217,56 @@ test("a Group hex is still subscribed to (as after a restart) gets no answer eit
   });
 });
 
-// Mastra creates the Chat with `concurrency: { strategy: "concurrent" }` (one Chat for all
-// channels), not Chat's default "drop": a message that arrives while its conversation's run is
-// busy is delivered into that run, whose next model call sees it, so it is not dropped.
-test("a Signal message arriving while its conversation's run is busy is answered too", async () => {
-  // Model call 2 (the answer to FIRST) is held until SECOND has been accepted by the agent.
+// hex sets the Chat SDK's "queue" strategy (one Chat for all channels): a message that arrives
+// while its conversation's run is busy waits its turn, then gets its own run and answer.
+test("a Signal message arriving while its conversation's run is busy is answered after it", async () => {
+  // Model call 2 (the answer to FIRST) is held until SECOND has been queued.
   const FIRST = "first message";
   const SECOND = "second message";
-  const answering = Promise.withResolvers<void>();
-  const secondAccepted = Promise.withResolvers<void>();
-  const prompts: string[] = [];
-  const model = numberedModel({
-    before: async (call) => {
-      prompts.push(JSON.stringify(call));
-      if (prompts.length === 2) {
-        answering.resolve();
-        await secondAccepted.promise;
-      }
-    },
-  });
+  const { model, prompts, busy, release } = heldModel(2);
   await withFake(fakeSignalCli(), async (fake) => {
-    const server = await startServer(options("busy", { chat: await chatFor(fake, model) }));
+    const settings = options("busy", { chat: await chatFor(fake, model) });
+    const server = await startServer(settings);
     try {
       await fake.streamOpened();
       // The conversation exists already, as it does after Daniel's first message ever.
       fake.receive({ aci: DANIEL, text: "hello" });
       await fake.sends(1);
-      const agent = server.mastra.getAgent(CHAT_AGENT_ID);
-      const sendMessage = agent.sendMessage.bind(agent);
-      spyOn(agent, "sendMessage").mockImplementation((...args) => {
-        const sending = sendMessage(...args);
-        const [input] = args;
-        if (typeof input === "object" && "contents" in input && input.contents === SECOND) {
-          void sending.accepted.then(() => secondAccepted.resolve());
-        }
-        return sending;
+      const state = server.mastra.getAgent(CHAT_AGENT_ID).getChannels()?.sdk?.getState();
+      if (!state) throw new Error("no chat state");
+      const enqueue = state.enqueue.bind(state);
+      spyOn(state, "enqueue").mockImplementation(async (...args) => {
+        const depth = await enqueue(...args);
+        release();
+        return depth;
       });
       fake.receive({ aci: DANIEL, text: FIRST });
-      await within(answering.promise, "the answer to the first message to start");
+      await within(busy, "the answer to the first message to start");
       fake.receive({ aci: DANIEL, text: SECOND });
-      await fake.sends(2);
+      await fake.sends(3);
     } finally {
       await server.stop();
     }
-    // The run went on with model call 3, which saw both messages; its answer is the one sent.
+    // Call 2 answered FIRST alone; call 3 answered SECOND, with FIRST's exchange as history.
     expect(prompts).toHaveLength(3);
+    expect(prompts[1]).toContain(FIRST);
+    expect(prompts[1]).not.toContain(SECOND);
     expect(prompts[2]).toContain(FIRST);
     expect(prompts[2]).toContain(SECOND);
-    expect(sent(fake)).toEqual(["reply 1", "reply 3"]);
+    expect(sent(fake)).toEqual(["reply 1", "reply 2", "reply 3"]);
+    const { threads, messages } = await stored(settings.databasePath);
+    expect(threads).toHaveLength(1);
+    expect(messages.map((message) => message.role)).toEqual([
+      "signal",
+      "assistant",
+      "signal",
+      "assistant",
+      "signal",
+      "assistant",
+    ]);
+    const said = JSON.stringify(messages);
+    expect(said).toContain(FIRST);
+    expect(said).toContain(SECOND);
   });
 });
 

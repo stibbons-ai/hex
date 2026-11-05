@@ -37,7 +37,7 @@ once.
 
 ```sh
 curl http://127.0.0.1:4111/health        # {"status":"ok"}
-curl -X POST http://127.0.0.1:4111/rpc/workflows/list # {"json":[]}: the oRPC API
+curl -X POST http://127.0.0.1:4111/rpc/workflows/list # {"json":["intake"]}: the oRPC API
 ```
 
 Everything except `GET`/`HEAD /health` is the oRPC API under `/rpc` (ADR 0004), defined in
@@ -60,6 +60,78 @@ await hex.workflows.list();
 
 Mastra's own REST routes (`/api/...`) are not served, so `mastra dev`/Studio clients of those
 routes don't work against this entrypoint.
+
+## Intake (dev command)
+
+```sh
+bun run intake path/to/mail.eml
+```
+
+runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
+Documents it filed (paths relative to the Outbox), that the Intake has no Documents, or that it
+was already processed. It exits with code 1 and a message on a file it can't read or that is no
+mail, an Intake without a Message-ID or without a usable received date, a config it can't use,
+or a failed run. Run it from the repository root. The same workflow is registered with the server
+as `intake` (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger
+at startup and fails to start when it can't.
+
+The workflow, in order:
+
+1. **Ledger check**: an Intake whose Message-ID (trimmed, without `<>`) is in the ledger was
+   processed before; the run ends there and files nothing.
+2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
+   `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
+   TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
+   logos, whatever their Content-Disposition), images under 10 KiB of content
+   (`MIN_IMAGE_DOCUMENT_BYTES`: tracking pixels, icons; a PDF is never dropped for size), SVG,
+   and every other type (`.ics`, text, office files). An attached mail (`message/rfc822`) is
+   one non-Document attachment, never unpacked: the Documents inside it are not filed. An
+   unreferenced `inline` image or PDF counts, since Apple Mail sends scans that way.
+3. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by the Intake's received date
+   as a calendar date in `Europe/Berlin`. The received date is the date after the last `;` of the
+   topmost `Received:` header, else the `Date:` header, each only in the form
+   `[Day,] D Mon YYYY HH:MM[:SS] zone` (four-digit year, two-digit hours, comments such as
+   `(CET)` ignored), a header year of 1000 or later, a valid time (a leap second `:60` is read
+   as `:59`) and a day that exists. The zone is `±HHMM` (up to 23:59) or
+   a name: `UT`, `GMT` and the US names have their offsets, any other name (`UTC`, `Z`, `CET`)
+   counts as UTC, as RFC 5322 §4.3 says. The date must fall in the years 1000 to 9999 in
+   `Europe/Berlin`. The file name is the
+   sender's, made safe: only its last `/` or `\` segment; every control and format character
+   (`\p{Cc}`, `\p{Cf}`: NUL, line breaks, bidi overrides, zero-width characters) removed;
+   leading dots, surrounding whitespace and trailing `.partial` suffixes stripped; at most 200
+   UTF-8 bytes, keeping the extension unless it is over 32 bytes. Nothing left gives
+   `document-<n>.<ext>`, `<n>` being the 1-based position among all of the Intake's attachments.
+   A name already taken becomes `name (1).pdf`, `name (2).pdf`, …; nothing is ever overwritten.
+   Each file is written as `<name>.<id>.partial` in the target folder (hex-sync skips
+   `*.partial`), flushed, then hard-linked into place, which fails instead of replacing a file
+   that appeared meanwhile; the folder is then flushed and the `.partial` removed. Once linked,
+   the Document is filed: a failed flush or a `.partial` that can't be removed only logs a
+   warning. A failed write removes its `.partial` (logging a warning if it can't); a crash or
+   kill mid-write can leave one behind.
+4. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
+   Documents.
+
+| Setting                        | Meaning                                                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                        |
+| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                   |
+| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category` |
+
+The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
+required:
+
+```json
+{
+  "chat": { "model": "anthropic/claude-opus-5-5", "channels": {} },
+  "intake": { "category": "ER" }
+}
+```
+
+The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use: one row per
+Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
+`{ "index": …, "path": … }` per Document: its position among the attachments, 0-based, and where
+it landed). An Intake whose run failed halfway is not recorded, so running it again files the
+Documents that already landed a second time, as `name (1).pdf`.
 
 ## Chat (Slack, Signal)
 
@@ -232,12 +304,15 @@ it.
   would go to all of them. No typing indicator is shown (hex turns Mastra's typing status off on
   every channel). Messages the adapter doesn't support (stickers, view-once messages) are ignored
   and logged only at debug level.
-- Messages sent in a row are not dropped. Mastra creates the Chat SDK instance for all channels
-  with `concurrency: { strategy: "concurrent" }`, not Chat's default `"drop"`, against which the
-  adapter warns: a message that arrives while hex is still answering the same conversation goes
-  into that run, whose next model call sees it, and one answer covers both. A `"queue"` would be
-  possible through `channels.chatOptions`, but it is one setting for the whole Chat instance and so
-  would change Slack too; hex keeps Mastra's default.
+- Messages sent in a row are answered one after another, on every channel: hex sets the Chat SDK's
+  `queue` strategy (Mastra's default is `concurrent`). A message that arrives while hex is still
+  answering the same conversation waits; once the run is done, consecutive waiting messages from
+  one sender are answered together in one turn. At most 10 wait per conversation, anyone's
+  counting (in a Slack channel thread, others' messages too); beyond that the oldest is dropped,
+  and a message still waiting after 90 s is dropped too, both without an answer and without a line
+  in hex's log. Under `concurrent`, a message joined the run in progress, but Mastra
+  finished it in a run that a stop could cut off before it was saved, and two first messages of a
+  new conversation could land in two memory threads.
 - The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
   subscriptions), so a restart starts at live events. Lost are messages hex had received but not
   answered within the 5-second stop grace, or when it crashed, and messages signal-cli took off
@@ -325,12 +400,12 @@ synthetic folder, any `fixtures/real/` and
 
 ## Packages
 
-| Package             | Holds                                                                              |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`     |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage         |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels     |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator |
+| Package             | Holds                                                                                                                                         |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger                              |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                         |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator                                                            |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags
