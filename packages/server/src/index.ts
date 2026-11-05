@@ -76,11 +76,13 @@ export interface RunningServer {
   mastra: Mastra;
   /**
    * Stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
-   * accepting requests and gives in-flight ones (open streams and chat replies included)
-   * `stopGraceMs` before closing them, then shuts Mastra down and closes the store. Mastra closes
-   * the store before its final trace flush, which reopens the DuckDB file, so the last close is
-   * what releases the file's lock. Each step runs even if an earlier one fails; a step cut short
-   * is logged. LibSQL's file handles may stay open until GC.
+   * accepting requests and gives in-flight ones (open streams and chat replies included), and a
+   * channel disconnect still running, `stopGraceMs` more before closing them, then shuts Mastra
+   * down and closes the store. Waiting for the disconnect lets a channel finish its own last
+   * writes (Signal: its receive cursor, once its running replies are done) while the store is
+   * open. Mastra closes the store before its final trace flush, which reopens the DuckDB file, so
+   * the last close is what releases the file's lock. Each step runs even if an earlier one fails;
+   * a step cut short is logged. LibSQL's file handles may stay open until GC.
    */
   stop(): Promise<void>;
 }
@@ -116,23 +118,23 @@ export async function startServer({
       ),
     );
   /**
-   * `disconnectChat`, bounded by `stopGraceMs`: a disconnect that hangs is logged and left behind,
-   * one that fails after the bound is logged when it does, one that fails in time rejects. `when`
-   * names the phase in the log lines.
+   * `disconnectChat`, bounded by `stopGraceMs`: one that fails in time rejects; one that hangs is
+   * logged and returned as `stillDisconnecting`, which settles with it but never rejects: a
+   * failure after the bound is logged when it happens. `when` names the phase in the log lines.
+   * Wrapped in an object: an async function returning the promise itself would wait for it.
    */
   const disconnectChatWithin = async (
     when: string,
     log: (message: string, cause?: unknown) => void,
-  ) => {
+  ): Promise<{ stillDisconnecting?: Promise<void> }> => {
     const disconnecting = disconnectChat();
-    let late = false;
-    disconnecting.catch((error: unknown) => {
-      if (late) log(`hex: ${when}: disconnecting chat channels failed late`, error);
-    });
-    if (!(await settlesWithin(disconnecting, stopGraceMs))) {
-      late = true;
-      log(`hex: ${when}: chat channels did not disconnect within ${stopGraceMs} ms`);
-    }
+    if (await settlesWithin(disconnecting, stopGraceMs)) return {};
+    log(`hex: ${when}: chat channels did not disconnect within ${stopGraceMs} ms`);
+    return {
+      stillDisconnecting: disconnecting.catch((error: unknown) => {
+        log(`hex: ${when}: disconnecting chat channels failed late`, error);
+      }),
+    };
   };
   let chatAgent: ChatAgent | undefined;
   try {
@@ -231,20 +233,27 @@ export async function startServer({
       url: server.url,
       hostname: server.hostname ?? "",
       mastra,
-      stop: () =>
-        closeInOrder([
+      stop: () => {
+        let stillDisconnecting: Promise<void> | undefined;
+        return closeInOrder([
           async () => {
             chatAgent?.close();
-            await disconnectChatWithin("stop", (message, cause) =>
+            ({ stillDisconnecting } = await disconnectChatWithin("stop", (message, cause) =>
               mastra.getLogger().warn(message, ...(cause === undefined ? [] : [cause])),
-            );
+            ));
           },
           async () => {
             let drained = false;
             try {
               // Graceful stop never resolves while a client holds a stream open, so bound it.
               drained = await settlesWithin(
-                Promise.all([server.stop(), chatAgent?.settled()]),
+                Promise.all([
+                  server.stop(),
+                  chatAgent?.settled(),
+                  stillDisconnecting?.then(() => {
+                    stillDisconnecting = undefined;
+                  }),
+                ]),
                 stopGraceMs,
               );
             } finally {
@@ -254,7 +263,8 @@ export async function startServer({
                   .getLogger()
                   .warn(
                     `hex: stop: requests and chat replies still running after ${stopGraceMs} ms were cut off` +
-                      (cutOff > 0 ? ` (${cutOff} chat replies)` : ""),
+                      (cutOff > 0 ? ` (${cutOff} chat replies)` : "") +
+                      (stillDisconnecting ? ", with the chat channels still disconnecting" : ""),
                   );
               }
               await server.stop(true);
@@ -264,7 +274,8 @@ export async function startServer({
           // Required, not a fallback: Mastra 1.80's shutdown() closes the store and then flushes
           // the last spans, reopening DuckDB; only this releases the file's lock.
           () => storage.close(),
-        ]),
+        ]);
+      },
     };
   } catch (error) {
     // Keep the startup error; a failure to close what was half-built is only logged. No new chat

@@ -490,6 +490,37 @@ test("stop() closes the event stream at once and bounds the wait for a running r
   });
 });
 
+test("a reply stop() waits for past the channels' grace still has its receive cursor stored", async () => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const model = mockModel({
+    before: async () => {
+      entered.resolve();
+      await release.promise;
+    },
+  });
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("late-cursor", { chat: await chatFor(fake, model), stopGraceMs: 250 });
+    const server = await startServer(settings);
+    await fake.streamOpened();
+    expect(fake.receive({ aci: DANIEL, text: "think a while" })).toBe("run-1");
+    await within(entered.promise, "the run to start");
+    const gaveUp = warnings(server, "hex: stop: chat channels did not disconnect within 250 ms");
+    const stopping = server.stop();
+    // The run finishes only once stop() has stopped waiting for the channels to disconnect: in
+    // the adapter's drain window, but after stop()'s first grace period.
+    await gaveUp;
+    release.resolve();
+    await within(stopping, "stop()");
+    expect(sent(fake)).toEqual([REPLY]);
+    // The adapter's final cursor write landed before the store closed.
+    expect(await storedChatState(settings.databasePath, CURSOR_KEY)).toEqual({
+      lastEventId: "run-1",
+      processed: [],
+    });
+  });
+});
+
 // The adapter stores its receive cursor in the Chat state under this key, which hex persists in
 // its database: a restarted hex resumes the event stream after the newest event that, with every
 // earlier one, it finished handling.

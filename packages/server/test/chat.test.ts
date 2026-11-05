@@ -634,6 +634,88 @@ describe("chat channel lifecycle", () => {
     }
   });
 
+  test("stop() waits a second grace period for a channel still disconnecting, then cuts it off", async () => {
+    const adapter = new FakeChatAdapter();
+    adapter.disconnect = () => new Promise(() => {});
+    const server = await startServer(serverOptions(chatOptions(adapter), { stopGraceMs: 50 }));
+    const order: string[] = [];
+    const shutdown = server.mastra.shutdown.bind(server.mastra);
+    server.mastra.shutdown = async () => {
+      order.push("mastra");
+      await shutdown();
+    };
+    const warnings = await logged(server, "warn", async () => {
+      await within(server.stop(), "stop()");
+      order.push("stopped");
+    });
+    expect(warnings).toEqual([
+      ["hex: stop: chat channels did not disconnect within 50 ms"],
+      [
+        "hex: stop: requests and chat replies still running after 50 ms were cut off, with the chat channels still disconnecting",
+      ],
+    ]);
+    expect(order).toEqual(["mastra", "stopped"]);
+  });
+
+  test("a channel disconnect failing while stop() waits for a reply is logged once; the reply finishes", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const model = mockModel({
+      before: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+    });
+    const adapter = new FakeChatAdapter();
+    const failing = Promise.withResolvers<void>();
+    adapter.disconnect = () => failing.promise;
+    const server = await startServer(
+      serverOptions(chatOptions(adapter, model), { stopGraceMs: 200 }),
+    );
+    const order: string[] = [];
+    const post = adapter.postMessage.bind(adapter);
+    adapter.postMessage = async (threadId, message) => {
+      order.push("reply");
+      return post(threadId, message);
+    };
+    const shutdown = server.mastra.shutdown.bind(server.mastra);
+    server.mastra.shutdown = async () => {
+      order.push("mastra");
+      await shutdown();
+    };
+    const handled = adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
+    await within(entered.promise, "the run to start");
+    const logger = server.mastra.getLogger();
+    const gaveUp = Promise.withResolvers<void>();
+    const warn = spyOn(logger, "warn");
+    warn.mockImplementation((...args) => {
+      if (args[0] === "hex: stop: chat channels did not disconnect within 200 ms") {
+        gaveUp.resolve();
+      }
+    });
+    const error = spyOn(logger, "error");
+    const failure = new Error("socket refused to close");
+    try {
+      const stopping = server.stop();
+      await within(gaveUp.promise, "stop() to give up on the disconnect");
+      failing.reject(failure);
+      await failing.promise.catch(() => {});
+      // Only now, with the disconnect failed during stop()'s second step, may the run go on.
+      release.resolve();
+      await within(stopping, "stop()");
+      await handled;
+      expect(warn.mock.calls).toEqual([
+        ["hex: stop: chat channels did not disconnect within 200 ms"],
+        ["hex: stop: disconnecting chat channels failed late", failure],
+      ]);
+      expect(error.mock.calls).toEqual([]);
+      expect(order).toEqual(["reply", "mastra"]);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
   test("a channel disconnect that fails after stop() gave up on it is logged", async () => {
     const adapter = new FakeChatAdapter();
     const failing = Promise.withResolvers<void>();
