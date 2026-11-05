@@ -2,27 +2,19 @@
  * A zero-dependency PDF writer for the synthetic Documents: standard Type 1 fonts (Helvetica) in
  * WinAnsiEncoding and uncompressed streams, so the bytes depend only on the input.
  */
-
-/** Raw image samples, rows padded to whole bytes; grey only. */
-export interface PdfImage {
-  width: number;
-  height: number;
-  bitsPerComponent: 1 | 8;
-  rows: readonly Uint8Array[];
-}
+import type { GrayImage } from "./raster.ts";
 
 export interface PdfPage {
   /** Content stream operators (ASCII; build strings with {@link pdfString}). */
   content: string;
   /** Image XObjects the content draws with `/<name> Do`. */
-  images?: Readonly<Record<string, PdfImage>>;
+  images: Readonly<Record<string, GrayImage>>;
 }
 
-/** The characters beyond ASCII the synthetic invoices use, mapped to WinAnsiEncoding. */
+/** The non-ASCII characters of German and English invoices, mapped to WinAnsiEncoding. */
 const winAnsi: Record<string, number> = {
   "€": 0x80,
   "–": 0x96,
-  "·": 0xb7,
   Ä: 0xc4,
   Ö: 0xd6,
   Ü: 0xdc,
@@ -30,7 +22,6 @@ const winAnsi: Record<string, number> = {
   ä: 0xe4,
   ö: 0xf6,
   ü: 0xfc,
-  é: 0xe9,
 };
 
 /** A PDF literal string `( … )` in WinAnsiEncoding, non-ASCII bytes as octal escapes. */
@@ -61,52 +52,46 @@ function stream(dictionary: string, data: Uint8Array): Uint8Array {
   ]);
 }
 
-/** Writes a PDF of `pages` (A4 portrait), with Helvetica as `/F1` and Helvetica-Bold as `/F2`. */
-export function writePdf(pages: readonly PdfPage[]): Uint8Array {
+/** Writes a one-page A4 PDF, with Helvetica as `/F1` and Helvetica-Bold as `/F2`. */
+export function writePdf(page: PdfPage): Uint8Array {
   const objects: Uint8Array[] = [];
   const add = (body: Uint8Array | string): number => {
     objects.push(typeof body === "string" ? ascii(body) : body);
     return objects.length;
   };
   add("<< /Type /Catalog /Pages 2 0 R >>");
-  const pagesId = add(""); // filled in once the page ids are known
+  const pages = add(""); // filled in once the page's id is known
   const regular = add(
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
   );
   const bold = add(
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
   );
-  const pageIds = pages.map((page) => {
-    const images = Object.entries(page.images ?? {}).map(([name, image]) => {
-      const id = add(
-        stream(
-          `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent ${image.bitsPerComponent}`,
-          Buffer.concat(image.rows),
-        ),
-      );
-      return `/${name} ${id} 0 R`;
-    });
-    const content = add(stream("", ascii(page.content)));
-    return add(
-      `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << /F1 ${regular} 0 R /F2 ${bold} 0 R >> /XObject << ${images.join(" ")} >> >> >>`,
+  const images = Object.entries(page.images).map(([name, image]) => {
+    const id = add(
+      stream(
+        `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent ${image.bitDepth}`,
+        Buffer.concat(image.rows),
+      ),
     );
+    return `/${name} ${id} 0 R`;
   });
-  objects[pagesId - 1] = ascii(
-    `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`,
+  const content = add(stream("", ascii(page.content)));
+  const pageId = add(
+    `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << /F1 ${regular} 0 R /F2 ${bold} 0 R >> /XObject << ${images.join(" ")} >> >> >>`,
   );
+  objects[pages - 1] = ascii(`<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`);
 
   // Header with a binary comment line, so transports treat the file as binary.
   const parts: Uint8Array[] = [
-    ascii("%PDF-1.4\n%"),
-    new Uint8Array([0xe2, 0xe3, 0xcf, 0xd3]),
-    ascii("\n"),
+    Buffer.concat([ascii("%PDF-1.4\n%"), new Uint8Array([0xe2, 0xe3, 0xcf, 0xd3]), ascii("\n")]),
   ];
-  let offset = parts.reduce((sum, part) => sum + part.length, 0);
+  let offset = parts[0]!.length;
   const offsets = objects.map((body, index) => {
     const start = offset;
-    const object = [ascii(`${index + 1} 0 obj\n`), body, ascii("\nendobj\n")];
-    parts.push(...object);
-    offset += object.reduce((sum, part) => sum + part.length, 0);
+    const object = Buffer.concat([ascii(`${index + 1} 0 obj\n`), body, ascii("\nendobj\n")]);
+    parts.push(object);
+    offset += object.length;
     return start;
   });
   const xref = [

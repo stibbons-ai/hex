@@ -63,17 +63,16 @@ export function renderMessage(
   boundaryPrefix: string,
 ): Uint8Array {
   let next = 0;
-  const render = (node: MimeNode, top: readonly string[]): string[] => {
-    if ("body" in node) return [...top, ...node.headers, "", node.body];
+  const render = (node: MimeNode): string[] => {
+    if ("body" in node) return [...node.headers, "", node.body];
     const boundary = `${boundaryPrefix}_${++next}`;
     return [
-      ...top,
       `Content-Type: multipart/${node.subtype}; boundary="${boundary}"`,
       "",
-      ...node.parts.flatMap((part) => [`--${boundary}`, ...render(part, [])]),
+      ...node.parts.flatMap((part) => [`--${boundary}`, ...render(part)]),
       `--${boundary}--`,
     ];
   };
-  const text = render(root, [...headers, "MIME-Version: 1.0"]).join("\n");
+  const text = [...headers, "MIME-Version: 1.0", ...render(root)].join("\n");
   return new TextEncoder().encode(`${text.replaceAll("\n", "\r\n")}\r\n`);
 }

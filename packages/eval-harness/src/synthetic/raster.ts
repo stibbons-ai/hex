@@ -1,4 +1,12 @@
-import { glyph, glyphHeight, glyphText, glyphWidth } from "./font.ts";
+import { advance, glyph, glyphText, glyphWidth } from "./font.ts";
+
+/** Grey raster samples, rows padded to whole bytes, as both the PNG and the PDF writer take them. */
+export interface GrayImage {
+  width: number;
+  height: number;
+  bitDepth: 1 | 8;
+  rows: readonly Uint8Array[];
+}
 
 /** A black-and-white page: one byte per pixel, 1 = ink. */
 export class Bitmap {
@@ -31,36 +39,24 @@ export class Bitmap {
             this.fillRect(left + column * scale, y + row * scale, scale, scale);
         }
       });
-      left += (glyphWidth + 1) * scale;
+      left += advance * scale;
     }
   }
 
-  static textWidth(text: string, scale: number): number {
-    return glyphText(text).length * (glyphWidth + 1) * scale;
-  }
-
-  static textHeight(scale: number): number {
-    return glyphHeight * scale;
-  }
-
-  /** Rows of 1-bit grey, most significant bit first, padded to whole bytes; 0 = black (PNG and PDF agree). */
-  toGray1(): Uint8Array[] {
-    const rowBytes = Math.ceil(this.width / 8);
-    return Array.from({ length: this.height }, (_, row) => {
-      const out = new Uint8Array(rowBytes).fill(0xff);
-      for (let column = 0; column < this.width; column++) {
-        if (this.ink[row * this.width + column] === 1) out[column >> 3]! &= ~(0x80 >> (column & 7));
-      }
+  /**
+   * The page as grey samples; 0 is black in both PNG and PDF. 1-bit rows pack pixels most
+   * significant bit first; 8-bit rows hold 0 for ink, 255 for paper.
+   */
+  gray(bitDepth: 1 | 8): GrayImage {
+    const rows = Array.from({ length: this.height }, (_, row) => {
+      const ink = this.ink.subarray(row * this.width, (row + 1) * this.width);
+      if (bitDepth === 8) return ink.map((pixel) => (pixel === 1 ? 0 : 255));
+      const out = new Uint8Array(Math.ceil(this.width / 8)).fill(0xff);
+      ink.forEach((pixel, column) => {
+        if (pixel === 1) out[column >> 3]! &= ~(0x80 >> (column & 7));
+      });
       return out;
     });
-  }
-
-  /** Rows of 8-bit grey: 0 = ink, 255 = paper. */
-  toGray8(): Uint8Array[] {
-    return Array.from({ length: this.height }, (_, row) =>
-      this.ink
-        .subarray(row * this.width, (row + 1) * this.width)
-        .map((ink) => (ink === 1 ? 0 : 255)),
-    );
+    return { width: this.width, height: this.height, bitDepth, rows };
   }
 }

@@ -2,18 +2,16 @@
 import { describe, expect, test } from "bun:test";
 import { repoRoot } from "./paths.ts";
 
-function git(...args: string[]): string {
+/** Output lines of `git <args>`. */
+function git(...args: string[]): string[] {
   const run = Bun.spawnSync(["git", ...args], { cwd: repoRoot, stderr: "pipe" });
   // check-ignore exits 1 when no path is ignored.
   if (run.exitCode !== 0 && run.exitCode !== 1) throw new Error(run.stderr.toString());
-  return run.stdout.toString();
+  return run.stdout.toString().split("\n").filter(Boolean);
 }
 
 /** The subset of `paths` the ignore rules exclude, whether or not the paths are tracked. */
-const ignored = (...paths: string[]) =>
-  git("check-ignore", "--no-index", "--", ...paths)
-    .split("\n")
-    .filter(Boolean);
+const ignored = (...paths: string[]) => git("check-ignore", "--no-index", "--", ...paths);
 
 describe("fixture gitignore safeguard", () => {
   test("ignores real Intakes, labels and eval results anywhere", () => {
@@ -42,9 +40,7 @@ describe("fixture gitignore safeguard", () => {
   });
 
   test("tracks .eml files and expected.json only in the synthetic folder", () => {
-    const tracked = git("ls-files", "--", "*.eml", "expected.json", "*/expected.json")
-      .split("\n")
-      .filter(Boolean);
+    const tracked = git("ls-files", "--", "*.eml", "expected.json", "*/expected.json");
     const outside = tracked.filter(
       (path) => !path.startsWith("packages/eval-harness/fixtures/synthetic/"),
     );

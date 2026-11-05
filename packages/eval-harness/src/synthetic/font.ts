@@ -5,6 +5,8 @@
  */
 export const glyphWidth = 5;
 export const glyphHeight = 7;
+/** Horizontal distance from one glyph to the next, in font pixels: the glyph plus one blank column. */
+export const advance = glyphWidth + 1;
 
 const rows: Record<string, readonly string[]> = {
   " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
@@ -72,4 +74,9 @@ export function glyph(char: string): readonly string[] {
   const found = rows[char];
   if (found === undefined) throw new Error(`no glyph for ${JSON.stringify(char)}`);
   return found;
+}
+
+/** Width in pixels of `text` drawn at `scale`. */
+export function textWidth(text: string, scale: number): number {
+  return glyphText(text).length * advance * scale;
 }

@@ -27,6 +27,8 @@ export interface SyntheticIntake {
   attachments: readonly Attachment[];
 }
 
+/** The `To:` of every Intake. */
+export const recipient = "Erika Mustermann <erika.mustermann@hex.example>";
 const buyerDe = ["Erika Mustermann", "Beispielallee 42", "12345 Musterstadt"];
 const buyerEn = ["Erika Mustermann", "42 Sample Lane", "Testville TV1 0AA"];
 

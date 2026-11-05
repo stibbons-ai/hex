@@ -3,7 +3,7 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExpectedIntake, ExpectedSet } from "../expected.ts";
-import { intakes, type Attachment, type SyntheticIntake } from "./intakes.ts";
+import { intakes, recipient, type Attachment, type SyntheticIntake } from "./intakes.ts";
 import { documentDate, invoicePdf, scanPdf, scanPng } from "./invoice.ts";
 import {
   filePart,
@@ -20,19 +20,11 @@ import { Bitmap } from "./raster.ts";
 /** The committed set, `packages/eval-harness/fixtures/synthetic/`. */
 export const syntheticFolder = fileURLToPath(new URL("../../fixtures/synthetic", import.meta.url));
 
-const recipient = "Erika Mustermann <erika.mustermann@hex.example>";
-
 /** A small grey PNG of `text`, two lines at most; large enough (> 20 KB) that only its role excludes it. */
 function decoration(text: string): Uint8Array {
   const image = new Bitmap(360, 72);
   text.split("\n").forEach((line, index) => image.drawText(8, 8 + index * 32, line, 3));
-  return encodePng({
-    width: image.width,
-    height: image.height,
-    bitDepth: 8,
-    colorType: 0,
-    rows: image.toGray8(),
-  });
+  return encodePng({ ...image.gray(8), colorType: 0 });
 }
 
 /** A transparent 1×1 RGBA PNG. */

@@ -2,6 +2,7 @@
  * The fake invoices: one model, rendered either as a text PDF or as a scan (PNG raster or an
  * image-only PDF wrapping the same raster).
  */
+import { glyphHeight, textWidth } from "./font.ts";
 import { encodePng } from "./png.ts";
 import { pdfString, writePdf } from "./pdf.ts";
 import { Bitmap } from "./raster.ts";
@@ -38,7 +39,7 @@ export interface Invoice {
 
 /** The Document date (ISO), or `null` when the invoice prints none. */
 export function documentDate(invoice: Invoice): string | null {
-  const line = invoice.dates.find((date) => "document" in date && date.document);
+  const line = invoice.dates.find((date) => "document" in date);
   return line !== undefined && "date" in line ? line.date : null;
 }
 
@@ -74,7 +75,7 @@ const months = {
 };
 
 /** Formats an ISO date without Intl, so the output never depends on the machine's locale. */
-export function formatDate(iso: string, style: DateStyle, language: Language): string {
+function formatDate(iso: string, style: DateStyle, language: Language): string {
   const [year, month, day] = iso.split("-").map(Number) as [number, number, number];
   const name = months[language][month - 1]!;
   switch (style) {
@@ -198,19 +199,7 @@ export function invoicePdf(invoice: Invoice): Uint8Array {
       ops.push(`BT /${font} ${size} Tf 430 ${y} Td ${pdfString(row.right)} Tj ET`);
     y -= size + 6;
   }
-  return writePdf([
-    {
-      content: ops.join("\n"),
-      images: {
-        Logo: {
-          width: banner.width,
-          height: banner.height,
-          bitsPerComponent: 8,
-          rows: banner.toGray8(),
-        },
-      },
-    },
-  ]);
+  return writePdf({ content: ops.join("\n"), images: { Logo: banner.gray(8) } });
 }
 
 /** The invoice as a 1000 × 1414 black-and-white scan; body glyphs are 21 px tall. */
@@ -222,13 +211,13 @@ function scanBitmap(invoice: Invoice): Bitmap {
   for (const row of rows(invoice)) {
     const scale = scanScale[row.style ?? "body"];
     const limit = (row.right === undefined ? page.width - margin : amountColumn - 18) - margin;
-    if (Bitmap.textWidth(row.left, scale) > limit)
+    if (textWidth(row.left, scale) > limit)
       throw new Error(`row too wide for the scan: ${row.left}`);
     page.drawText(margin, y, row.left, scale);
     if (row.right !== undefined) page.drawText(amountColumn, y, row.right, scale);
     if (row.style === "bold")
-      page.fillRect(margin, y + Bitmap.textHeight(scale) + 4, page.width - 2 * margin, 2);
-    y += Bitmap.textHeight(scale) + (row.left === "" ? 4 : 14);
+      page.fillRect(margin, y + glyphHeight * scale + 4, page.width - 2 * margin, 2);
+    y += glyphHeight * scale + (row.left === "" ? 4 : 14);
   }
   if (y > page.height - margin)
     throw new Error(`invoice too long for one scanned page: ${invoice.title}`);
@@ -236,25 +225,13 @@ function scanBitmap(invoice: Invoice): Bitmap {
 }
 
 export function scanPng(invoice: Invoice): Uint8Array {
-  const page = scanBitmap(invoice);
-  return encodePng({
-    width: page.width,
-    height: page.height,
-    bitDepth: 1,
-    colorType: 0,
-    rows: page.toGray1(),
-  });
+  return encodePng({ ...scanBitmap(invoice).gray(1), colorType: 0 });
 }
 
 /** An image-only PDF: the scan raster fills the A4 page, there is no text layer. */
 export function scanPdf(invoice: Invoice): Uint8Array {
-  const page = scanBitmap(invoice);
-  return writePdf([
-    {
-      content: "q 595 0 0 842 0 0 cm /Scan Do Q",
-      images: {
-        Scan: { width: page.width, height: page.height, bitsPerComponent: 1, rows: page.toGray1() },
-      },
-    },
-  ]);
+  return writePdf({
+    content: "q 595 0 0 842 0 0 cm /Scan Do Q",
+    images: { Scan: scanBitmap(invoice).gray(1) },
+  });
 }

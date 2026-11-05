@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadExpectedSet, type ExpectedIntake } from "../src/index.ts";
-import { syntheticFolder } from "./paths.ts";
+import { syntheticFolder } from "../src/synthetic/generate.ts";
 
 interface Part {
   contentType: string;

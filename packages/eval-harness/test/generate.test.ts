@@ -2,15 +2,20 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeFixtureSet } from "../src/synthetic/generate.ts";
-import { repoRoot, syntheticFolder } from "./paths.ts";
+import { syntheticFolder, writeFixtureSet } from "../src/synthetic/generate.ts";
+import { repoRoot } from "./paths.ts";
 
-async function readTree(folder: string): Promise<Map<string, Uint8Array>> {
+async function readTree(folder: string): Promise<Map<string, Buffer>> {
   const names = (await readdir(folder)).sort();
-  const files = new Map<string, Uint8Array>();
-  for (const name of names) files.set(name, await Bun.file(join(folder, name)).bytes());
+  const files = new Map<string, Buffer>();
+  for (const name of names)
+    files.set(name, Buffer.from(await Bun.file(join(folder, name)).bytes()));
   return files;
 }
+
+/** Names of the files in `a` whose bytes differ from the same file in `b`. */
+const differing = (a: Map<string, Buffer>, b: Map<string, Buffer>) =>
+  [...a].filter(([name, bytes]) => !bytes.equals(b.get(name)!)).map(([name]) => name);
 
 describe("synthetic fixture generator", () => {
   const temps: string[] = [];
@@ -32,17 +37,9 @@ describe("synthetic fixture generator", () => {
     const committed = await readTree(syntheticFolder);
     expect([...first.keys()]).toEqual([...second.keys()]);
     expect([...first.keys()]).toEqual([...committed.keys()]);
-    for (const [name, bytes] of first) {
-      expect({ name, same: Buffer.from(bytes).equals(second.get(name)!) }).toEqual({
-        name,
-        same: true,
-      });
-      // Drift: the committed files are exactly what the generator produces (rerun `bun run fixtures:generate`).
-      expect({ name, same: Buffer.from(bytes).equals(committed.get(name)!) }).toEqual({
-        name,
-        same: true,
-      });
-    }
+    expect(differing(first, second)).toEqual([]);
+    // Drift: the committed files are exactly what the generator produces (rerun `bun run fixtures:generate`).
+    expect(differing(first, committed)).toEqual([]);
   });
 
   test("regenerating replaces stale Intakes but keeps unrelated files", async () => {
