@@ -6,7 +6,10 @@ import { localDatabaseUrl } from "./storage";
 
 /** One Document's Filing: which attachment it was and where it landed, relative to the Outbox. */
 export const Filing = Schema.Struct({
-  /** The Document's index among the Intake's attachments. */
+  /**
+   * The Document's 0-based index among the Intake's attachments; a nameless one is filed as
+   * `document-<index + 1>`.
+   */
   index: Schema.Int,
   path: Schema.String,
 });
@@ -37,12 +40,13 @@ export class IntakeLedger extends Context.Service<
     /** The entry for this Message-ID, or undefined when the Intake was not processed yet. */
     readonly find: (messageId: string) => Effect.Effect<LedgerEntry | undefined, LedgerError>;
     /**
-     * Records the Intake as processed now, with its Document count and Filings. Fails when it is
-     * already recorded (processed by someone else meanwhile).
+     * Records the Intake as processed now with its Filings, one per Document (so its Document
+     * count is their number). Fails when it is already recorded (processed by someone else
+     * meanwhile).
      */
     readonly record: (
       messageId: string,
-      outcome: { readonly documentCount: number; readonly filings: readonly Filing[] },
+      filings: readonly Filing[],
     ) => Effect.Effect<void, LedgerError>;
   }
 >()("hex/IntakeLedger") {}
@@ -127,7 +131,7 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
               filings: row.filings,
             };
           }),
-        record: (messageId, { documentCount, filings }) =>
+        record: (messageId, filings) =>
           Effect.gen(function* () {
             const id = yield* key(messageId);
             const now = yield* Clock.currentTimeMillis;
@@ -135,7 +139,7 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
               try: () =>
                 client.execute({
                   sql: "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",
-                  args: [id, new Date(now).toISOString(), documentCount, JSON.stringify(filings)],
+                  args: [id, new Date(now).toISOString(), filings.length, JSON.stringify(filings)],
                 }),
               catch: ledgerError(`recording ${id}`),
             });

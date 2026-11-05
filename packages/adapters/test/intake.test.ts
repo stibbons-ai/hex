@@ -195,6 +195,41 @@ describe("readEml", () => {
       "from a by b;\r\n\tTue, 4 Nov 2026 23:30:00 GMT",
       "2026-11-04T23:30:00.000Z",
     ],
+    ["EST", "from a by b; Tue, 4 Nov 2026 10:00:00 EST", "2026-11-04T15:00:00.000Z"],
+    ["PST", "from a by b; Tue, 4 Nov 2026 10:00:00 PST", "2026-11-04T18:00:00.000Z"],
+    [
+      "UTC (unknown name, read as -0000)",
+      "from a by b; Tue, 4 Nov 2026 10:00:00 UTC",
+      "2026-11-04T10:00:00.000Z",
+    ],
+    [
+      "Z (military, read as -0000)",
+      "from a by b; Tue, 4 Nov 2026 10:00:00 Z",
+      "2026-11-04T10:00:00.000Z",
+    ],
+    [
+      "offset minutes 99",
+      "from a by b; Tue, 4 Nov 2026 10:00:00 +0099",
+      "2026-10-30T09:00:00.000Z",
+    ],
+    ["offset hours 99", "from a by b; Tue, 4 Nov 2026 10:00:00 +9999", "2026-10-30T09:00:00.000Z"],
+    ["minute 60", "from a by b; Tue, 4 Nov 2026 23:60:00 +0000", "2026-10-30T09:00:00.000Z"],
+    ["second 61", "from a by b; Tue, 4 Nov 2026 23:59:61 +0000", "2026-10-30T09:00:00.000Z"],
+    [
+      "year 0050 (not 1950)",
+      "from a by b; Tue, 4 Nov 0050 10:00:00 +0000",
+      "2026-10-30T09:00:00.000Z",
+    ],
+    [
+      "year 10000 in Berlin",
+      "from a by b; Fri, 31 Dec 9999 23:30:00 +0000",
+      "2026-10-30T09:00:00.000Z",
+    ],
+    [
+      "year 0999 in Berlin",
+      "from a by b; Mon, 1 Jan 1000 00:30:00 +0200",
+      "2026-10-30T09:00:00.000Z",
+    ],
   ])("Received %s → %s", async (_case, received, expected) => {
     const intake = await read(eml(`Received: ${received}`, ...headers.slice(2), "", "body"));
     expect(intake.receivedAt).toBe(expected);

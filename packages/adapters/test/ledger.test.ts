@@ -43,7 +43,7 @@ describe("IntakeLedger", () => {
     success(
       await withLedger(databasePath, (ledger) =>
         TestClock.setTime(Date.UTC(2026, 10, 5, 12, 30)).pipe(
-          Effect.andThen(ledger.record("<a@x>", { documentCount: 1, filings })),
+          Effect.andThen(ledger.record("<a@x>", filings)),
           Effect.provide(TestClock.layer()),
         ),
       ),
@@ -58,11 +58,7 @@ describe("IntakeLedger", () => {
 
   test("the Message-ID is normalised: brackets and whitespace don't make a new Intake", async () => {
     const databasePath = freshDatabase();
-    success(
-      await withLedger(databasePath, (ledger) =>
-        ledger.record(" <b@x> ", { documentCount: 0, filings: [] }),
-      ),
-    );
+    success(await withLedger(databasePath, (ledger) => ledger.record(" <b@x> ", [])));
     for (const form of ["b@x", "<b@x>", "  b@x"]) {
       const entry = success(await withLedger(databasePath, (ledger) => ledger.find(form)));
       expect(entry).toMatchObject({ messageId: "b@x", documentCount: 0, filings: [] });
@@ -73,15 +69,10 @@ describe("IntakeLedger", () => {
     const databasePath = freshDatabase();
     success(
       await withLedger(databasePath, (ledger) =>
-        ledger.record("c@x", {
-          documentCount: 1,
-          filings: [{ index: 0, path: "2026-11/ER/c.pdf" }],
-        }),
+        ledger.record("c@x", [{ index: 0, path: "2026-11/ER/c.pdf" }]),
       ),
     );
-    const again = await withLedger(databasePath, (ledger) =>
-      ledger.record("<c@x>", { documentCount: 0, filings: [] }),
-    );
+    const again = await withLedger(databasePath, (ledger) => ledger.record("<c@x>", []));
     expect(Exit.isFailure(again)).toBe(true);
     expect(String(again)).toContain("Intake ledger: recording c@x");
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("c@x")))).toMatchObject({

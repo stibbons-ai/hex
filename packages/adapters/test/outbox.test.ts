@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Exit } from "effect";
+import { Effect, Exit, Logger } from "effect";
 import { Outbox, outboxLayer } from "../src";
 
 let directory: string;
@@ -122,11 +122,41 @@ describe("Outbox", () => {
     const { file } = freshOutbox();
     const exit = await file("../escaped", "x.pdf", "x");
     expect(Exit.isFailure(exit)).toBe(true);
-    expect(String(exit)).toContain("not a safe file name in the Outbox");
+    expect(String(exit)).toContain('folder "../escaped" is outside the Outbox');
     expect(Object.keys(await contents(directory)).filter((path) => /x\.pdf/.test(path))).toEqual(
       [],
     );
   });
+
+  // Root reads every folder, so the flush can't be made to fail.
+  test.skipIf(process.getuid?.() === 0)(
+    "a folder that can't be flushed after the link still files the Document, with a warning",
+    async () => {
+      const { root } = freshOutbox();
+      const folder = join(root, "2026-11/ER");
+      await mkdir(folder, { recursive: true });
+      // Writable and searchable, not readable: open(folder) for the flush fails with EACCES.
+      await chmod(folder, 0o300);
+      try {
+        const warnings: string[] = [];
+        const logger = Logger.make(({ message }) => {
+          warnings.push(String(message));
+        });
+        const exit = await Effect.runPromiseExit(
+          Outbox.use((outbox) =>
+            outbox.file("2026-11/ER", "scan.pdf", new TextEncoder().encode("pdf")),
+          ).pipe(Effect.provide(outboxLayer(root)), Effect.provide(Logger.layer([logger]))),
+        );
+        expect(success(exit)).toBe("2026-11/ER/scan.pdf");
+        expect(warnings.join("\n")).toContain(
+          "filed 2026-11/ER/scan.pdf, but flushing its folder failed",
+        );
+      } finally {
+        await chmod(folder, 0o700);
+      }
+      expect(await contents(root)).toEqual({ "2026-11/ER/scan.pdf": "pdf" });
+    },
+  );
 
   test("a write that fails after the .partial was created leaves no .partial behind", async () => {
     const root = join(directory, `outbox-${outboxes++}`);

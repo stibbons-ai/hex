@@ -1,4 +1,9 @@
-import { contentIdReferences, normalizeMessageId } from "@hex/domain";
+import {
+  FILING_TIME_ZONE,
+  calendarDateIn,
+  contentIdReferences,
+  normalizeMessageId,
+} from "@hex/domain";
 import { Data, Effect, Schema } from "effect";
 import PostalMime from "postal-mime";
 import { messageOf } from "./errors";
@@ -13,24 +18,34 @@ export const IntakeAttachment = Schema.Struct({
   disposition: Schema.optionalKey(Schema.String),
   /** Content-ID as sent, usually in angle brackets. */
   contentId: Schema.optionalKey(Schema.String),
-  /** Decoded content, base64; its size is what detection goes by. */
-  content: Schema.String,
+  /**
+   * Decoded content as canonical, padded base64 (no whitespace), so its decoded size, which
+   * detection goes by, follows from its length.
+   */
+  content: Schema.String.check(Schema.isBase64()),
 });
 export type IntakeAttachment = typeof IntakeAttachment.Type;
 
 /** One incoming email: what the Intake workflow processes once, keyed by its Message-ID. */
 export const Intake = Schema.Struct({
-  messageId: Schema.String.check(Schema.isNonEmpty()),
+  /** Not blank once trimmed and unbracketed (see `normalizeMessageId`). */
+  messageId: Schema.String.check(
+    Schema.makeFilter(
+      (value) => normalizeMessageId(value) !== "" || "a Message-ID that is not blank",
+    ),
+  ),
   /**
-   * When the mail was received: a UTC instant as `Date.toISOString()` writes it, year 1000 or
-   * later, that names a real moment (no 30 February).
+   * When the mail was received: a UTC instant as `Date.toISOString()` writes it that names a
+   * real moment (no 30 February) whose calendar date in the filing time zone has a year from
+   * 1000 to 9999.
    */
   receivedAt: Schema.String.check(
-    Schema.isPattern(/^[1-9]\d{3}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+    Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
     Schema.makeFilter((value) => {
       const date = new Date(value);
       return (
-        (!Number.isNaN(date.getTime()) && date.toISOString() === value) || "a real UTC instant"
+        (!Number.isNaN(date.getTime()) && date.toISOString() === value && isFilable(date)) ||
+        "a real UTC instant whose year in Europe/Berlin is 1000 to 9999"
       );
     }),
   ),
@@ -48,9 +63,19 @@ export class IntakeReadError extends Data.TaggedError("IntakeReadError")<{
   readonly cause?: unknown;
 }> {}
 
+/** Whether an instant can be filed: its calendar year in the filing time zone is 1000 to 9999. */
+function isFilable(instant: Date): boolean {
+  const { year } = calendarDateIn(instant, FILING_TIME_ZONE);
+  return year >= 1000 && year <= 9999;
+}
+
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-/** RFC 5322 obsolete zone names, as minutes east of UTC. */
+/**
+ * Zone names with a defined offset, as minutes east of UTC (RFC 5322 §4.3). Every other
+ * alphabetic zone (`UTC`, `Z`, `CET`, military letters) is read as `-0000`, i.e. UTC, as §4.3
+ * says.
+ */
 const ZONES: Readonly<Record<string, number>> = {
   ut: 0,
   gmt: 0,
@@ -65,30 +90,41 @@ const ZONES: Readonly<Record<string, number>> = {
 };
 
 /**
- * `[Day,] D Mon YYYY HH:MM[:SS] zone`, the zone `±HHMM` or an obsolete name. Comments such as
- * `(CET)` are removed before matching.
+ * The date-time forms accepted: `[Day,] D Mon YYYY HH:MM[:SS] zone`, a four-digit year, two-digit
+ * hours, the zone `±HHMM` or a name. Comments without nested parentheses, such as `(CET)`, are
+ * removed before matching; two-digit years and nested comments are not accepted.
  */
-const RFC5322_DATE =
-  /^(?:[a-z]{3},\s*)?(\d{1,2})\s+([a-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s+([+-]\d{4}|[a-z]+)$/i;
+const MAIL_DATE =
+  /^(?:[a-z]{3},\s*)?(\d{1,2})\s+([a-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s+(?:([+-])(\d{2})(\d{2})|([a-z]+))$/i;
 
 /**
- * The instant an RFC 5322 date-time names, or undefined unless it has that exact shape with a
- * zone (so it never depends on the host's time zone), a year from 1000 to 9999 and a day that
- * exists in its month.
+ * The instant a mail header date-time names (see {@link MAIL_DATE}), or undefined unless it has
+ * that shape with a zone (so it never depends on the host's time zone), a valid time (hours up
+ * to 23, minutes up to 59, seconds up to 60; zone offsets up to 23:59), a day that exists in its
+ * month, and a calendar year in the filing time zone from 1000 to 9999.
  */
 function parseMailDate(value: string): Date | undefined {
-  const match = RFC5322_DATE.exec(
+  const match = MAIL_DATE.exec(
     value
       .replace(/\([^()]*\)/g, " ")
       .replace(/\s+/g, " ")
       .trim(),
   );
   if (!match) return undefined;
-  const [, day, monthName, year, hour, minute, second = "0", zone] = match;
+  const [
+    ,
+    day,
+    monthName,
+    year,
+    hour,
+    minute,
+    second = "0",
+    sign,
+    offsetHours,
+    offsetMinutes,
+    name,
+  ] = match;
   const month = MONTHS.indexOf(monthName!.toLowerCase());
-  const offset = /^[+-]\d{4}$/.test(zone!)
-    ? (zone!.startsWith("-") ? -1 : 1) * (Number(zone!.slice(1, 3)) * 60 + Number(zone!.slice(3)))
-    : ZONES[zone!.toLowerCase()];
   const [y, d, h, m, s] = [year, day, hour, minute, second].map(Number) as [
     number,
     number,
@@ -96,13 +132,30 @@ function parseMailDate(value: string): Date | undefined {
     number,
     number,
   ];
-  if (month === -1 || offset === undefined || y < 1000 || h > 23 || m > 59 || s > 60) {
+  const [zoneHours, zoneMinutes] = [Number(offsetHours ?? 0), Number(offsetMinutes ?? 0)];
+  // Below 1000 also keeps Date.UTC from reading years 0-99 as 1900-1999.
+  if (
+    month === -1 ||
+    y < 1000 ||
+    h > 23 ||
+    m > 59 ||
+    s > 60 ||
+    zoneHours > 23 ||
+    zoneMinutes > 59
+  ) {
     return undefined;
   }
+  const offset =
+    name === undefined
+      ? (sign === "-" ? -1 : 1) * (zoneHours * 60 + zoneMinutes)
+      : Object.hasOwn(ZONES, name.toLowerCase())
+        ? ZONES[name.toLowerCase()]!
+        : 0;
   const local = new Date(Date.UTC(y, month, d, h, m, Math.min(s, 59)));
   // Date.UTC rolls 31 February over into March; such a day does not exist.
   if (local.getUTCMonth() !== month || local.getUTCDate() !== d) return undefined;
-  return new Date(local.getTime() - offset * 60_000);
+  const instant = new Date(local.getTime() - offset * 60_000);
+  return isFilable(instant) ? instant : undefined;
 }
 
 /**

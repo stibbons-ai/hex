@@ -16,5 +16,6 @@ export {
   planFiling,
 } from "./filing";
 export type { CalendarDate, Category, FilingPlan } from "./filing";
-export { detectDocuments, normalizeMessageId } from "./intake";
+export { normalizeMessageId } from "./ids";
+export { detectDocuments } from "./intake";
 export type { DetectedDocument, IntakeAttachmentFacts } from "./intake";

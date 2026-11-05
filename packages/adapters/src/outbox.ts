@@ -32,14 +32,19 @@ export class Outbox extends Context.Service<
 const isErrno = (error: unknown, code: string) =>
   error instanceof Error && "code" in error && error.code === code;
 
-/** Flushes a directory, so the entries just created in it survive a power loss. */
+/**
+ * Flushes a directory, so the entries just created in it survive a power loss; a close error
+ * never hides a flush error.
+ */
 async function syncDirectory(directory: string) {
   const handle = await open(directory, "r");
   try {
     await handle.sync();
-  } finally {
-    await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw error;
   }
+  await handle.close();
 }
 
 /** Writes `content` to the new file `path` and flushes it; a close error never hides a write error. */
@@ -78,28 +83,44 @@ async function linkToFreeName(partial: string, directory: string, name: string) 
  * in the target folder first (hex-sync skips `*.partial`), is flushed, then hard-linked to the
  * final name. `link()` fails with EEXIST instead of replacing an existing file (a `rename()`
  * would replace it), so a name taken meanwhile, by a concurrent write or anything else, moves
- * on to the next free name. The folder (and every folder created for it) is flushed after the
- * link. On an error the `.partial` is removed and the first error is kept; once the link exists
- * the Document is filed, and a `.partial` that can't be removed is only reported in
- * `leftover`. A crash or kill can still leave a `.partial` behind.
+ * on to the next free name. Before the link exists, an error removes the `.partial` and is
+ * rethrown. Once it exists the Document is filed: the folder (and every folder created for it)
+ * is flushed and the `.partial` removed, and a failure of either only adds to `warnings`. A
+ * crash or kill can still leave a `.partial` behind.
  */
-async function writeNew(root: string, folder: string, name: string, content: Uint8Array) {
+async function writeNew(
+  root: string,
+  folder: string,
+  name: string,
+  content: Uint8Array,
+  warnings: string[],
+) {
   const directory = resolve(root, folder);
   const inside = relative(root, directory);
-  if (
-    !isSafeFileName(name) ||
-    inside === ".." ||
-    inside.startsWith(`..${sep}`) ||
-    isAbsolute(inside)
-  ) {
+  if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+    throw new Error(`folder ${JSON.stringify(folder)} is outside the Outbox`);
+  }
+  if (!isSafeFileName(name)) {
     throw new Error(`not a safe file name in the Outbox: ${JSON.stringify(name)}`);
   }
   const created = await mkdir(directory, { recursive: true });
   const partial = join(directory, `${name}.${randomUUID()}.partial`);
+  const removePartial = () =>
+    unlink(partial).catch((error: unknown) => {
+      if (!isErrno(error, "ENOENT")) {
+        warnings.push(`${partial} stays behind: ${messageOf(error)}`);
+      }
+    });
   let filed: string;
   try {
     await writeFlushed(partial, content);
     filed = await linkToFreeName(partial, directory, name);
+  } catch (error) {
+    await removePartial();
+    throw error;
+  }
+  const path = relative(root, join(directory, filed)).split(/[/\\]/).join("/");
+  try {
     await syncDirectory(directory);
     // Each folder mkdir created is an entry in its parent: flush those parents too.
     for (let parent = directory; created !== undefined && parent !== dirname(created);) {
@@ -107,14 +128,10 @@ async function writeNew(root: string, folder: string, name: string, content: Uin
       await syncDirectory(parent);
     }
   } catch (error) {
-    await unlink(partial).catch(() => {});
-    throw error;
+    warnings.push(`filed ${path}, but flushing its folder failed: ${messageOf(error)}`);
   }
-  const leftover = await unlink(partial).then(
-    () => undefined,
-    (error: unknown) => (isErrno(error, "ENOENT") ? undefined : error),
-  );
-  return { path: relative(root, join(directory, filed)).split(/[/\\]/).join("/"), leftover };
+  await removePartial();
+  return path;
 }
 
 /** The Outbox at `root` (created on first use). */
@@ -122,22 +139,22 @@ export function outboxLayer(root: string): Layer.Layer<Outbox> {
   const absoluteRoot = resolve(root);
   return Layer.succeed(Outbox, {
     file: (folder, name, content) =>
-      Effect.tryPromise({
-        try: () => writeNew(absoluteRoot, folder, name, content),
-        catch: (cause) =>
-          new OutboxError({
-            message: `filing ${JSON.stringify(name)} into ${folder} failed: ${messageOf(cause)}`,
-            cause,
-          }),
-      }).pipe(
-        Effect.tap(({ path, leftover }) =>
-          leftover === undefined
-            ? Effect.void
-            : Effect.logWarning(
-                `Outbox: filed ${path}, but its .partial stays behind: ${messageOf(leftover)}`,
-              ),
-        ),
-        Effect.map(({ path }) => path),
-      ),
+      Effect.suspend(() => {
+        const warnings: string[] = [];
+        return Effect.tryPromise({
+          try: () => writeNew(absoluteRoot, folder, name, content, warnings),
+          catch: (cause) =>
+            new OutboxError({
+              message: `filing ${JSON.stringify(name)} into ${folder} failed: ${messageOf(cause)}`,
+              cause,
+            }),
+        }).pipe(
+          Effect.ensuring(
+            Effect.forEach(warnings, (warning) => Effect.logWarning(`Outbox: ${warning}`), {
+              discard: true,
+            }),
+          ),
+        );
+      }),
   });
 }

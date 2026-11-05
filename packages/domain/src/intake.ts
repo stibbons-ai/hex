@@ -1,15 +1,6 @@
 import { isDocument, normalizeContentId } from "./document";
 import type { AttachmentFacts } from "./document";
 import { safeFileName } from "./file-name";
-import { unbracket } from "./ids";
-
-/**
- * The key an Intake is processed once by: its Message-ID trimmed, without surrounding angle
- * brackets. Empty when the Message-ID is blank.
- */
-export function normalizeMessageId(messageId: string): string {
-  return unbracket(messageId);
-}
 
 /** One attachment as an Intake carries it. */
 export type IntakeAttachmentFacts = Omit<AttachmentFacts, "referencedByCid"> & {
@@ -19,7 +10,7 @@ export type IntakeAttachmentFacts = Omit<AttachmentFacts, "referencedByCid"> & {
 
 /** A Document found among an Intake's attachments. */
 export interface DetectedDocument {
-  /** Its index among the attachments. */
+  /** Its 0-based index among the attachments (a fallback name uses `index + 1`). */
   readonly index: number;
   /** The safe name to file it under (see `safeFileName`). */
   readonly fileName: string;

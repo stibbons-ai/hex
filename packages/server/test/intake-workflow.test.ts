@@ -268,6 +268,30 @@ describe("Intake workflow", () => {
       expect(await hex.outbox()).toEqual({});
     });
 
+    test("content that is not canonical base64 is rejected, so padding can't fake a size", async () => {
+      const hex = freshHex();
+      const padded = {
+        mimeType: "image/png",
+        fileName: "pixel.png",
+        content: `AAAA${" ".repeat(30_000)}`,
+      };
+      await expect(
+        runIntake({ ...base, attachments: [padded] }, { paths: hex, category: "ER" }),
+      ).rejects.toThrow("content");
+      expect(await hex.outbox()).toEqual({});
+    });
+
+    test("a Message-ID that is blank once unbracketed is rejected as input", async () => {
+      const hex = freshHex();
+      await expect(
+        runIntake(
+          { ...base, messageId: "<>", attachments: [apiPdf] },
+          { paths: hex, category: "ER" },
+        ),
+      ).rejects.toThrow("a Message-ID that is not blank");
+      expect(await hex.outbox()).toEqual({});
+    });
+
     test("the result names the normalised Message-ID, on both runs", async () => {
       const hex = freshHex();
       const intake = { ...base, attachments: [apiPdf] };

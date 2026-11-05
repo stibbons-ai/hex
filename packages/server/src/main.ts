@@ -33,10 +33,20 @@ const paths = dataPaths(process.env);
 // Built now, so a ledger that can't be opened fails startup instead of every later Intake run
 // (the runtime keeps a failed build); disposed after the server stopped.
 const intakeRuntime = createIntakeRuntime(paths);
-await intakeRuntime.context().catch(async (error: unknown) => {
-  await intakeRuntime.dispose();
-  throw error;
-});
+/** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
+const disposeAfterFailure = (error: unknown) =>
+  intakeRuntime
+    .dispose()
+    .catch((disposeError: unknown) => {
+      console.error(
+        "hex: closing the Intake ledger after a failed start also failed",
+        disposeError,
+      );
+    })
+    .then(() => {
+      throw error;
+    });
+await intakeRuntime.context().catch(disposeAfterFailure);
 const starting = startServer({
   databasePath: paths.databasePath,
   port,
@@ -49,13 +59,11 @@ const starting = startServer({
     ...server,
     stop: () => closeInOrder([() => server.stop(), () => intakeRuntime.dispose()]),
   }),
-  async (error: unknown) => {
-    await intakeRuntime.dispose();
-    throw error;
-  },
+  disposeAfterFailure,
 );
-// Registered before startup finishes, so a signal during startup still shuts down cleanly. A
-// signal that arrives while the modules are still loading gets the default (kill).
+// Registered before the server finishes starting, so a signal from here on still shuts down
+// cleanly. A signal that arrives earlier, while the modules load, the config is read or the
+// Intake ledger opens (up to its 5 s busy timeout), gets the default (kill).
 const shutdown = shutdownOnce(starting, {
   exit: (code) => process.exit(code),
   error: (message, cause) => console.error(message, cause),

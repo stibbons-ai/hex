@@ -148,9 +148,9 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
       const { filings } = inputData;
       return run(
         IntakeResult,
-        IntakeLedger.use((ledger) =>
-          ledger.record(messageId, { documentCount: filings.length, filings }),
-        ).pipe(Effect.as({ messageId, status: "processed", filings })),
+        IntakeLedger.use((ledger) => ledger.record(messageId, filings)).pipe(
+          Effect.as({ messageId, status: "processed", filings }),
+        ),
       );
     },
   });
