@@ -21,9 +21,12 @@ const DocumentVerdicts = {
   fileName: Schema.String,
   /** The labelled Document date, `YYYY-MM-DD`; `null`: the Document carries none. */
   expected: Schema.NullOr(Schema.String),
-  /** Whether the prediction is the labelled day. */
+  /**
+   * Whether the prediction is the labelled day; for a `null` label, whether no date was predicted
+   * (answered none, or not sent). Never for a failed call.
+   */
   exact: Schema.Boolean,
-  /** Whether the prediction lies in the labelled month. */
+  /** The same as `exact` for the labelled year and month. */
   month: Schema.Boolean,
 };
 

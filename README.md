@@ -403,7 +403,9 @@ none). `@hex/eval-harness` exports their types plus `decodeExpectedSet` and
 `loadExpectedSet(folder)`, which decode strictly: they reject malformed or impossible dates,
 duplicate `file` or `fileName` entries and unknown (mistyped) keys, report every problem at once
 (a duplicate `fileName` is checked per Intake, once that Intake decodes; a duplicate `file` only
-once every Intake decodes), and `loadExpectedSet` names the file in its errors.
+once every Intake decodes), and `loadExpectedSet` names the file in its errors. How a label names
+an attachment without a file name, and why two attachments of one name can't be labelled, is in
+[Evals](#evals).
 
 `packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
 without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
@@ -456,9 +458,11 @@ synthetic folder, any `fixtures/real/` and
 
 `bun run eval` measures hex's two model-relevant decisions on a labelled fixture folder:
 Document detection (`detectDocuments`) and Document date extraction (the DateExtractor on the
-configured model). Run it by hand, with a real API key; it costs one model call per labelled
-Document. No CI job runs it, and it refuses to run (exit 1, nothing written, no model call) when
-the `CI` environment variable is set.
+configured model). Run it by hand, with a real API key: it makes at most one model call per
+labelled Document (none for one not sent), plus the DateExtractor's retries of transient provider
+errors (up to 2 per call). No CI job runs it against a real model (`bun run check` runs its test
+against a loopback fake), and it refuses to run (exit 1, nothing written, no model call) when the
+`CI` environment variable is set to a non-empty value.
 
 ```sh
 OPENAI_API_KEY=… bun run eval                                   # the committed synthetic set
@@ -469,14 +473,18 @@ OPENAI_API_KEY=… HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own fol
   `packages/eval-harness/fixtures/synthetic/`. Only read, never written.
 - `HEX_EVAL_RESULTS`: where reports go; default `eval-results/` in the repo root (git-ignored).
   It must not lie inside the fixture folder.
-- `HEX_CONFIG`: the model is the one hex files with, `intake.model` (default
-  `openai/gpt-5.1-codex-mini`); its API key comes from the provider's usual variable
-  (`OPENAI_API_KEY`, …).
+- `HEX_CONFIG`: the path of hex's config file; the model is its `intake.model`, or
+  `openai/gpt-5.1-codex-mini` when the variable is unset or the file names none. Its API key
+  comes from the provider's usual variable (`OPENAI_API_KEY`, …).
 
 Relative paths resolve against the directory you ran it from, as for `fixtures:generate`. A label
-naming no attachment (or several) of its `.eml`, or an `.eml` that can't be read, fails the run
-before any model call, naming the file. A failed model call is recorded on its Document and the run
-goes on; the command exits 1 after writing the reports.
+names an attachment by its original file name or, when it has none, by the name hex files it under
+(`document-<position>.<ext>`, its 1-based position among the mail's attachments, as the report
+lists it). A label naming no attachment of its `.eml`, or one of several attachments with that name
+(such an Intake can't be labelled), or an `.eml` that can't be read, fails the run before any model
+call, naming the file and the label; so does a results folder that can't be created. A failed model
+call is recorded on its Document and the run goes on; the command exits 1 after writing the
+reports.
 
 What it measures, per attachment matched to the labels by its file name:
 
@@ -496,7 +504,8 @@ deterministic Mastra scorers (`createScorer`, run through the scorer's `run`):
 set of attachments and a calendar day have exact right answers.
 
 Each run writes `report.json` and `report.md` into its own folder,
-`<results>/<UTC start time>_<model>/` (`-2`, `-3`… if taken, never overwritten): the fixture
+`<results>/<UTC start time>_<model>/`, e.g. `2026-11-05T15-26-39-000Z_openai-gpt-5.1-codex-mini/`
+(`-2`, `-3`… if taken, never overwritten): the fixture
 folder, model, start time and duration; detection precision and recall with true positive,
 false positive and false negative counts; exact and month accuracy with counts (`11/13 (84.6 %)`)
 and the counts of Documents not sent and failed; and per Intake the attachment names by detection

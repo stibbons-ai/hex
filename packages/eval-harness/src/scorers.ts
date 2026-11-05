@@ -30,8 +30,8 @@ export const documentDetectionScorer = createScorer<unknown, boolean>({
 /**
  * A scorer of one labelled Document: `output` its {@link Prediction}, `groundTruth` its labelled
  * Document date (`YYYY-MM-DD`, `null` when it carries none). Scores 1 when the predicted date's
- * `key` equals the label's, no date (not answered or not sent) matching only `null`; a failed
- * model call is never correct, even for a Document labelled undated.
+ * `key` equals the label's; no date (answered none, or not sent) matches only a `null` label; a
+ * failed model call is never correct, even for a Document labelled undated.
  */
 function documentDateScorer(id: string, description: string, key: (date: string) => string) {
   const keyOf = (date: string | null) => (date === null ? null : key(date));

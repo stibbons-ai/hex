@@ -3,7 +3,7 @@
  * asserting the computed figures and the reports it writes.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DateExtractionError, DateExtractor } from "@hex/adapters";
@@ -53,10 +53,19 @@ let folders = 0;
 /** A fresh, not yet created path under the temp directory. */
 const newFolder = (name: string) => join(directory, `${name}-${++folders}`);
 
-/** A fixture folder with copies of the synthetic `.eml`s `intakes` names, labelled by them. */
-async function fixtureFolder(intakes: ExpectedSet["intakes"]): Promise<string> {
+/**
+ * A fixture folder with copies of the synthetic `.eml`s `intakes` names, labelled by them; `edit`
+ * rewrites a mail's text (byte for byte as latin1), or leaves it out by returning undefined.
+ */
+async function fixtureFolder(
+  intakes: ExpectedSet["intakes"],
+  edit: (file: string, mail: string) => string | undefined = (_, mail) => mail,
+): Promise<string> {
   const folder = await mkdtemp(join(directory, "fixtures-"));
-  for (const { file } of intakes) await copyFile(join(syntheticFolder, file), join(folder, file));
+  for (const { file } of intakes) {
+    const mail = edit(file, await readFile(join(syntheticFolder, file), "latin1"));
+    if (mail !== undefined) await writeFile(join(folder, file), mail, "latin1");
+  }
   await writeFile(join(folder, "expected.json"), JSON.stringify({ intakes }));
   return folder;
 }
@@ -246,20 +255,96 @@ describe("runEval on edited labels", () => {
     expect(markdown).toContain("| Exact (year-month-day) | 0/0 (n/a) |");
   });
 
-  test("fails on a label naming no attachment, before any model call, writing nothing", async () => {
+  test("collects every fixture error, before any model call, writing nothing", async () => {
     const invoice = label("01-de-pdf-invoice.eml");
-    const fixtures = await fixtureFolder([
-      label("02-en-pdf-invoice.eml"),
-      { ...invoice, documents: [{ fileName: "Missing.pdf", documentDate: "2026-11-02" }] },
-    ]);
+    const multiple = label("13-de-multiple-documents.eml");
+    const fixtures = await fixtureFolder(
+      [
+        { ...invoice, documents: [{ fileName: "Missing.pdf", documentDate: "2026-11-02" }] },
+        multiple,
+        label("02-en-pdf-invoice.eml"),
+      ],
+      (file, mail) => {
+        if (file === "02-en-pdf-invoice.eml") return undefined;
+        // Two attachments named like the invoice.
+        return mail.replaceAll("Gutschrift-GS-2026-0031.pdf", "Rechnung-RE-2026-0612.pdf");
+      },
+    );
     const { layer, calls } = scriptedExtractor();
     const resultsRoot = newFolder("results");
     const run = runEval({ fixtures, model: "scripted/model", dateExtractor: layer, resultsRoot });
-    await expect(run).rejects.toThrow(
-      `${join(fixtures, "01-de-pdf-invoice.eml")}: expected.json labels "Missing.pdf", but the mail has no attachment of that name`,
+    const message = await run.then(
+      () => "resolved",
+      (error: Error) => error.message,
     );
+    expect(message.split("\n")).toEqual([
+      "fixture errors:",
+      `${join(fixtures, "01-de-pdf-invoice.eml")}: expected.json labels "Missing.pdf", but the mail has no attachment of that name`,
+      `${join(fixtures, "13-de-multiple-documents.eml")}: expected.json labels "Rechnung-RE-2026-0612.pdf", but the mail has 2 attachments of that name`,
+      `${join(fixtures, "13-de-multiple-documents.eml")}: expected.json labels "Gutschrift-GS-2026-0031.pdf", but the mail has no attachment of that name`,
+      expect.stringContaining(
+        `ENOENT: no such file or directory, open '${join(fixtures, "02-en-pdf-invoice.eml")}'`,
+      ),
+    ]);
     expect(calls).toEqual([]);
     expect(await readdir(resultsRoot).catch(() => "missing")).toBe("missing");
+  });
+
+  test("labels a nameless attachment by the name hex files it under", async () => {
+    const invoice = label("01-de-pdf-invoice.eml");
+    const fixtures = await fixtureFolder(
+      [{ ...invoice, documents: [{ fileName: "document-1.pdf", documentDate: "2026-11-02" }] }],
+      (_, mail) => mail.replaceAll(/; (?:file)?name="Rechnung-RE-2026-1042\.pdf"/g, ""),
+    );
+    const { layer, calls } = scriptedExtractor({ "document-1.pdf": answer("2026-11-02") });
+    const { report } = await runEval({
+      fixtures,
+      model: "scripted/model",
+      dateExtractor: layer,
+      resultsRoot: newFolder("results"),
+    });
+    expect(calls).toEqual(["document-1.pdf"]);
+    expect(report.intakes[0]!.detection.truePositives).toEqual(["document-1.pdf"]);
+    expect(report.intakes[0]!.documents[0]).toMatchObject({ status: "answered", exact: true });
+  });
+
+  test("a sent Document labelled undated is right when the model finds no date", async () => {
+    const fixtures = await fixtureFolder([label("14-de-undated-document.eml")]);
+    const { layer, calls } = scriptedExtractor({ "Kostenvoranschlag.pdf": answer(null) });
+    const { report } = await runEval({
+      fixtures,
+      model: "scripted/model",
+      dateExtractor: layer,
+      resultsRoot: newFolder("results"),
+    });
+    expect(calls).toEqual(["Kostenvoranschlag.pdf"]);
+    expect(report.intakes[0]!.documents).toEqual([
+      {
+        fileName: "Kostenvoranschlag.pdf",
+        expected: null,
+        status: "answered",
+        predicted: null,
+        exact: true,
+        month: true,
+      },
+    ]);
+    expect(report.extraction.exact).toEqual({ count: 1, total: 1, value: 1 });
+    expect(report.extraction.month).toEqual({ count: 1, total: 1, value: 1 });
+  });
+
+  test("fails before any model call when the results folder can't be created", async () => {
+    const resultsRoot = newFolder("results-file");
+    await writeFile(resultsRoot, "not a folder");
+    const { layer, calls } = scriptedExtractor();
+    const run = runEval({
+      fixtures: syntheticFolder,
+      model: "scripted/model",
+      dateExtractor: layer,
+      resultsRoot,
+    });
+    await expect(run).rejects.toThrow();
+    expect(calls).toEqual([]);
+    expect(await readFile(resultsRoot, "utf8")).toBe("not a folder");
   });
 
   test("refuses a results folder inside the fixture folder", async () => {

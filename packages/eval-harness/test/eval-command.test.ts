@@ -1,9 +1,9 @@
 // Walkthrough: Daniel runs `bun run eval` by hand and reads the summary and both reports; the model
 // is a fake OpenAI on loopback that answers 2 November 2026 for every Document.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { Schema } from "effect";
 import { fakeOpenAI } from "../../server/test/fake-openai.ts";
 import type { FakeOpenAI } from "../../server/test/fake-openai.ts";
@@ -29,12 +29,18 @@ afterAll(async () => {
 
 let runs = 0;
 
-/** `bun run eval` from the repository root, outside CI unless `env` says so; HEX_* only from `env`. */
-async function evalCommand(env: Record<string, string>, openai: FakeOpenAI = model) {
-  const { CI: _, ...inherited } = process.env;
+/**
+ * `bun run eval` from `cwd` (default the repository root), outside CI unless `env` says so;
+ * HEX_* only from `env`.
+ */
+async function evalCommand(
+  env: Record<string, string>,
+  { openai = model, cwd = repoRoot }: { openai?: FakeOpenAI; cwd?: string } = {},
+) {
+  const { CI: _, INIT_CWD: __, ...inherited } = process.env;
   const results = join(directory, `results-${++runs}`);
   const child = Bun.spawn(["bun", "run", "--silent", "eval"], {
-    cwd: repoRoot,
+    cwd,
     env: {
       ...inherited,
       HEX_CONFIG: "",
@@ -118,13 +124,58 @@ describe("bun run eval", () => {
     expect(await readdir(results).catch(() => "missing")).toBe("missing");
   });
 
+  test("resolves relative HEX_EVAL_FIXTURES and HEX_EVAL_RESULTS against the caller's directory", async () => {
+    const caller = join(repoRoot, "docs");
+    const results = join(directory, "results-relative");
+    const { code, stdout } = await evalCommand(
+      {
+        HEX_EVAL_FIXTURES: relative(caller, fixtures),
+        HEX_EVAL_RESULTS: relative(caller, results),
+      },
+      { cwd: caller },
+    );
+    expect(code).toBe(0);
+    const { folder, report } = await onlyReport(results);
+    expect(report.fixtures).toBe(fixtures);
+    expect(stdout).toContain(`on ${fixtures}\n`);
+    expect(stdout).toContain(join(folder, "report.json"));
+  });
+
+  test("fails on a fixture error: exit 1, no model call, nothing written", async () => {
+    const broken = join(directory, "broken");
+    await mkdir(broken);
+    await copyFile(join(fixtures, "01-de-pdf-invoice.eml"), join(broken, "01-de-pdf-invoice.eml"));
+    await writeFile(
+      join(broken, "expected.json"),
+      JSON.stringify({
+        intakes: [
+          {
+            file: "01-de-pdf-invoice.eml",
+            documents: [{ fileName: "Missing.pdf", documentDate: null }],
+          },
+        ],
+      }),
+    );
+    const requests = model.requests.length;
+    const { stdout, stderr, code, results } = await evalCommand({ HEX_EVAL_FIXTURES: broken });
+    expect({ code, stdout }).toEqual({ code: 1, stdout: "" });
+    expect(stderr).toBe(
+      `hex eval: fixture errors:\n${join(broken, "01-de-pdf-invoice.eml")}: expected.json labels "Missing.pdf", but the mail has no attachment of that name\n`,
+    );
+    expect(model.requests.length).toBe(requests);
+    expect(await readdir(results).catch(() => "missing")).toBe("missing");
+  });
+
   test("records a failed model call, writes the reports and exits 1", async () => {
     let calls = 0;
     const failing = fakeOpenAI(() =>
       ++calls === 1 ? { status: 400, message: "file rejected" } : NOVEMBER_2,
     );
     try {
-      const { stderr, code, results } = await evalCommand({ HEX_EVAL_FIXTURES: fixtures }, failing);
+      const { stderr, code, results } = await evalCommand(
+        { HEX_EVAL_FIXTURES: fixtures },
+        { openai: failing },
+      );
       expect(code).toBe(1);
       expect(stderr).toBe("hex eval: 1 model call(s) failed; see the report\n");
       const { folder, report } = await onlyReport(results);

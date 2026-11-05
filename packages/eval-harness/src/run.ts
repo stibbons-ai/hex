@@ -9,7 +9,7 @@ import {
   readEml,
 } from "@hex/adapters";
 import type { IntakeAttachment } from "@hex/adapters";
-import { detectDocuments, documentMediaType } from "@hex/domain";
+import { detectDocuments, documentMediaType, safeFileName } from "@hex/domain";
 import type { CalendarDate, DetectedDocument } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadExpectedSet } from "./expected.ts";
@@ -45,6 +45,8 @@ interface PreparedIntake {
   readonly label: ExpectedIntake;
   readonly attachments: readonly IntakeAttachment[];
   readonly detected: readonly DetectedDocument[];
+  /** Per attachment: the name labels and the report give it (see {@link labelName}). */
+  readonly names: readonly string[];
   /** Per labelled Document, in label order: the index of its attachment. */
   readonly labelled: readonly number[];
 }
@@ -56,9 +58,16 @@ const isoDate = ({ year, month, day }: CalendarDate) =>
     .join("-");
 
 /**
+ * The name a label gives an attachment: its original file name, or, when it has none, the name
+ * hex files it under (`document-<position>.<ext>`, `safeFileName`).
+ */
+const labelName = ({ fileName, mimeType }: IntakeAttachment, index: number) =>
+  fileName ?? safeFileName(undefined, mimeType, index + 1);
+
+/**
  * Reads every labelled Intake and detects its Documents as the workflow's `detect-documents` step
  * does. Fails, before any model call, naming each `.eml` that can't be read and each label that
- * names no attachment (or more than one) of its mail.
+ * names no attachment (or more than one) of its mail by {@link labelName}.
  */
 async function prepare(fixtures: string): Promise<PreparedIntake[]> {
   const { intakes } = await loadExpectedSet(fixtures);
@@ -79,10 +88,9 @@ async function prepare(fixtures: string): Promise<PreparedIntake[]> {
       ...attachment,
       size: Buffer.byteLength(content, "base64"),
     }));
+    const names = attachments.map(labelName);
     const labelled = label.documents.flatMap(({ fileName }) => {
-      const matches = attachments.flatMap((attachment, index) =>
-        attachment.fileName === fileName ? [index] : [],
-      );
+      const matches = names.flatMap((name, index) => (name === fileName ? [index] : []));
       if (matches.length === 1) return matches;
       problems.push(
         `${path}: expected.json labels ${JSON.stringify(fileName)}, but the mail has ${matches.length === 0 ? "no attachment" : `${matches.length} attachments`} of that name`,
@@ -93,6 +101,7 @@ async function prepare(fixtures: string): Promise<PreparedIntake[]> {
       label,
       attachments,
       detected: detectDocuments(facts, cidReferences),
+      names,
       labelled,
     });
   }
@@ -129,7 +138,7 @@ function predict(intakes: readonly PreparedIntake[]) {
 
 /** The verdicts on one Intake's attachments and labelled Documents, by the scorers. */
 async function score(
-  { label, attachments, detected, labelled }: PreparedIntake,
+  { label, detected, names, labelled }: PreparedIntake,
   predictions: readonly Prediction[],
 ): Promise<IntakeRow> {
   const detection: Record<DetectionVerdict, string[]> = {
@@ -138,15 +147,12 @@ async function score(
     "false-negative": [],
     "true-negative": [],
   };
-  for (const [index, attachment] of attachments.entries()) {
-    const document = detected.find((candidate) => candidate.index === index);
+  for (const index of names.keys()) {
     const { analyzeStepResult } = await documentDetectionScorer.run({
-      output: document !== undefined,
+      output: detected.some((document) => document.index === index),
       groundTruth: labelled.includes(index),
     });
-    detection[analyzeStepResult!.verdict].push(
-      attachment.fileName ?? document?.fileName ?? `attachment ${index + 1}`,
-    );
+    detection[analyzeStepResult!.verdict].push(names[index]!);
   }
   const documents: DocumentRow[] = [];
   for (const [position, { fileName, documentDate }] of label.documents.entries()) {
@@ -175,10 +181,12 @@ async function score(
   };
 }
 
-/** The run's own new folder under `root`: `<UTC time>_<model>`, suffixed `-2`, `-3`… if taken. */
+/**
+ * The run's own new folder under `root` (which exists): `<UTC time>_<model>`, suffixed `-2`,
+ * `-3`… if taken.
+ */
 async function createRunFolder(root: string, startedAt: Date, model: string): Promise<string> {
   const id = `${startedAt.toISOString().replace(/[:.]/g, "-")}_${model.replace(/[^\w.-]+/g, "-")}`;
-  await mkdir(root, { recursive: true });
   for (let attempt = 1; ; attempt++) {
     const folder = join(root, attempt === 1 ? id : `${id}-${attempt}`);
     try {
@@ -208,6 +216,8 @@ export async function runEval({
   }
   const startedAt = new Date();
   const intakes = await prepare(fixtures);
+  // Before any paid model call: a results root that can't be a folder fails the run now.
+  await mkdir(resultsRoot, { recursive: true });
   const predictions = await Effect.runPromise(predict(intakes).pipe(Effect.provide(dateExtractor)));
   const rows = await Promise.all(
     intakes.map((intake, position) => score(intake, predictions[position]!)),
