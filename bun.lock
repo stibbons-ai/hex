@@ -37,6 +37,10 @@
       "name": "@hex/eval-harness",
       "version": "0.0.0",
       "dependencies": {
+        "@hex/adapters": "workspace:*",
+        "@hex/domain": "workspace:*",
+        "@hex/server": "workspace:*",
+        "@mastra/core": "catalog:",
         "effect": "catalog:",
       },
     },

@@ -6,7 +6,8 @@ tooling every later slice builds on.
 
 ## Install
 
-Requires Bun 1.4.2 (the `packageManager` pin).
+Requires Bun 1.4.2 (the `packageManager` pin; the
+[development shell](#development-shell-and-model-keys) supplies it).
 
 ```sh
 bun install --frozen-lockfile
@@ -17,6 +18,71 @@ ago. Every external dependency version lives in the root `package.json` `catalog
 depend on externals with `catalog:` and on each other with `workspace:*`, and no manifest may use
 `overrides` or `resolutions` (ADR 0003). To add a dependency, add the catalog entry first, then
 reference it with `catalog:`.
+
+## Development shell and model keys
+
+With **Nix**, **devenv** and **direnv** (its shell hook enabled) installed, authorize the committed
+`.envrc` once from the repository root:
+
+```sh
+direnv allow
+```
+
+or enter the same environment explicitly with `devenv shell`. The shell supplies Bun 1.4.2 (from
+the pinned `devenv-nixpkgs`, matching the `packageManager` pin and CI) and Git, exports
+`MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`, and runs `bun install --frozen-lockfile` before it
+opens. A failed install doesn't stop the shell from opening: check the task output. Nothing
+requires the shell; CI installs Bun directly, and the scripts set the telemetry variables
+themselves.
+
+Live model runs (`bun run eval`, `bun run intake`, the server's chat model) need the model
+provider's API key; tests and CI never do. [SecretSpec](https://secretspec.dev) declares the keys
+in the committed `secretspec.toml`, and the shell exports them from 1Password on entry.
+`secretspec` comes with devenv itself; the 1Password CLI (`op`) comes from the host. Any other way
+of setting the variables still works.
+
+The keys are Secure Notes `secretspec/hex/default/<KEY>` in the vault `Hex` of the 1Password
+account `my.1password.com`. The shell reads them as a **read-only service account** (provider
+`onepassword_service`), so no Touch ID is needed and unattended shells get the keys too. One-time
+setup:
+
+1. In 1Password, create the vault `Hex` and a service account with read access to it only.
+2. Store its token in the macOS Keychain: `secretspec config provider login onepassword_service`.
+3. Add each key with your own account; the read-only service account can't write, so
+   `secretspec set` fails. A key is a Secure Note titled `secretspec/hex/default/<KEY>` whose
+   `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
+
+   ```fish
+   read -s -P "OPENAI_API_KEY: " value
+   op item create --account my.1password.com --vault Hex --category "Secure Note" \
+       --title "secretspec/hex/default/OPENAI_API_KEY" --tags automated,hex \
+       "project[text]=hex" "key[text]=OPENAI_API_KEY" "value[concealed]=$value"
+   set -e value
+   ```
+
+4. Check without printing any key, then reload the shell (`direnv reload`, or leave and re-enter
+   `devenv shell`):
+
+   ```sh
+   secretspec check --explain
+   ```
+
+The keys are `OPENAI_API_KEY` (the default Intake and eval model, `openai/gpt-5.1-codex-mini`),
+`ANTHROPIC_API_KEY` (an `anthropic/` `intake.model` or chat model) and `GEMINI_API_KEY` (a
+`google/` one). `GOOGLE_GENERATIVE_AI_API_KEY`, the variable Mastra's model router reads for
+`google/` models, is derived from `GEMINI_API_KEY` and never stored. All are optional, and a
+missing or rejected service token only warns: the shell still opens, and a model call without its
+key fails.
+
+How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
+the live shell. The keys are never set through devenv's `env`, which would write them into the
+world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
+it would fetch the keys a second time and refuse to open the shell when the token is missing.
+Every process in the shell, including an AI coding agent started there, sees the keys. To read
+them from another store, set the provider on entry. Setting `SECRETSPEC_PROVIDER` also makes
+devenv resolve the keys itself, a second fetch on top of `enterShell`'s; in an AI agent session
+devenv then refuses to open the shell unless a reason is set too, for example
+`SECRETSPEC_PROVIDER=keyring SECRETSPEC_REASON="devenv shell: hex model keys" devenv shell`.
 
 ## Run
 
@@ -200,8 +266,10 @@ required:
 }
 ```
 
-hex doesn't check at startup that the model's API key is set: without it every Intake with a
-Document hex sends to the model fails until it is.
+The development shell exports the API keys (see
+[Development shell and model keys](#development-shell-and-model-keys)). hex doesn't check at
+startup that the model's key is set: without it every Intake with a Document hex sends to the
+model fails until it is.
 
 Only OpenAI models are exercised (by the tests' fake OpenAI). The answer schema goes to the
 provider as JSON Schema with `additionalProperties: true` and safe-integer bounds (±(2^53−1)); a provider
@@ -276,7 +344,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
 ```
 
 - `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
-  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), which the development
+  shell exports (see [Development shell and model keys](#development-shell-and-model-keys)).
 - `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
   and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
@@ -448,7 +517,9 @@ none). `@hex/eval-harness` exports their types plus `decodeExpectedSet` and
 `loadExpectedSet(folder)`, which decode strictly: they reject malformed or impossible dates,
 duplicate `file` or `fileName` entries and unknown (mistyped) keys, report every problem at once
 (a duplicate `fileName` is checked per Intake, once that Intake decodes; a duplicate `file` only
-once every Intake decodes), and `loadExpectedSet` names the file in its errors.
+once every Intake decodes), and `loadExpectedSet` names the file in its errors. How a label names
+an attachment without a file name, and why two attachments of one name can't be labelled, is in
+[Evals](#evals).
 
 `packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
 without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
@@ -490,20 +561,83 @@ refused with a message naming the folder and why, so real fixtures elsewhere are
 | `14-de-undated-document`     | A Document without any date: `documentDate` is `null`                              |
 
 Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
-folder. The root `.gitignore` guards against committing them by accident (`git add -f` still
+folder with `HEX_EVAL_FIXTURES` (see [Evals](#evals)). The root `.gitignore` guards against
+committing them by accident (`git add -f` still
 can): it ignores every `.eml` (any letter case) and `expected.json` except the `.eml` files
 (lower case; on case-insensitive file systems any case) and `expected.json` directly in the
 synthetic folder, any `fixtures/real/` and
 `fixtures/private/` folder, and eval results in any `eval-results/` folder.
 
+## Evals
+
+`bun run eval` measures hex's two model-relevant decisions on a labelled fixture folder:
+Document detection (`detectDocuments`) and Document date extraction (the DateExtractor on the
+configured model). Run it by hand, with a real API key (the
+[development shell](#development-shell-and-model-keys) exports it): it makes at most one model
+call per labelled Document (none for one not sent), plus the DateExtractor's retries of transient
+provider errors (up to 2 per call). No CI job runs it against a real model (`bun run check` runs
+its test against a loopback fake), and it refuses to run (exit 1, nothing written, no model call)
+when the `CI` environment variable is set to a non-empty value.
+
+```sh
+bun run eval                                   # the committed synthetic set
+HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own folder
+OPENAI_API_KEY=… bun run eval                  # outside the development shell
+```
+
+- `HEX_EVAL_FIXTURES`: the fixture folder (`expected.json` and its `.eml` Intakes); default
+  `packages/eval-harness/fixtures/synthetic/`. Only read, never written.
+- `HEX_EVAL_RESULTS`: where reports go; default `eval-results/` in the repo root (git-ignored).
+  It must not lie inside the fixture folder.
+- `HEX_CONFIG`: the path of hex's config file; the model is its `intake.model`, or
+  `openai/gpt-5.1-codex-mini` when the variable is unset or the file names none. Its API key
+  comes from the provider's usual variable (`OPENAI_API_KEY`, …).
+
+Relative paths resolve against the directory you ran it from, as for `fixtures:generate`. A label
+names an attachment by its original file name or, when it has none, by the name hex would file it
+under: `document-<position>.<ext>`, its 1-based position among the mail's attachments and `.pdf`
+unless it is an image type. `report.json` lists every attachment by the exact name a label must
+use (`report.md` collapses whitespace in names). A label naming no attachment of its `.eml`, or
+one of several attachments with that name (such an Intake can't be labelled), or an `.eml` that
+can't be read, fails the run before any model call, naming the file and the label; so does a
+results folder that can't be created or written to. A failed model call is recorded on its
+Document and the run goes on; the command exits 1 after writing the reports.
+
+What it measures, per attachment matched to the labels by its file name:
+
+- **Detection precision**: detected attachments that are labelled Documents / detected
+  attachments. **Recall**: labelled Documents detected / labelled Documents. A zero denominator
+  is not applicable (`null` in JSON, `n/a` in Markdown).
+- **Exact accuracy**: labelled Documents whose predicted Document date is the labelled day /
+  labelled Documents. **Month accuracy**: the same for year and month. A Document labelled
+  undated is right only when no date is predicted; a failed call is always wrong.
+
+Extraction runs on every labelled Document, whatever detection decided, so detection errors don't
+reach its figures, and as the Intake workflow runs it: a Document whose content
+`documentMediaType` rejects is not sent (predicted no date, counted as not sent), and the answer
+is decoded by `documentDateOf`, so no date or no real day is no date. The verdicts come from
+deterministic Mastra scorers (`createScorer`, run through the scorer's `run`):
+`document-detection`, `document-date-exact` and `document-date-month`. No model judges them: a
+set of attachments and a calendar day have exact right answers.
+
+Each run writes `report.json` and `report.md` into its own folder,
+`<results>/<UTC start time>_<model>/`, e.g. `2026-11-05T15-26-39-000Z_openai-gpt-5.1-codex-mini/`
+(`-2`, `-3`… if taken, never overwritten): the fixture
+folder, model, start time and duration; detection precision and recall with true positive,
+false positive and false negative counts; exact and month accuracy with counts (`11/13 (84.6 %)`)
+and the counts of Documents not sent and failed; and per Intake the attachment names by detection
+verdict and per labelled Document the expected and predicted date (none, not sent, or the error)
+with both verdicts. `report.json` decodes with `Report`, exported by `@hex/eval-harness`; `runEval`
+takes the DateExtractor as a Layer, so a test can script the model.
+
 ## Packages
 
-| Package             | Holds                                                                                                                                          |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names  |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router) |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                          |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator                                                             |
+| Package             | Holds                                                                                                                                           |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names   |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)  |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                           |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers) |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags
@@ -521,7 +655,7 @@ Every script that runs code starts with `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRAC
 (`bun run manifests` enforces it), and CI sets both. `MASTRA_TELEMETRY_DISABLED` is read by
 `@mastra/core`'s usage telemetry; `DO_NOT_TRACK` turns off Bun's telemetry and crash reports
 (`bunfig.toml` also sets `telemetry = false`). When you run `bun` or Mastra directly instead of
-through a script, set both yourself.
+through a script, set both yourself, or work in the development shell, which exports both.
 
 `bun run licenses` audits every installed package's manifest plus the lockfile. Only MIT,
 Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, CC0-1.0, Unlicense and BlueOak-1.0.0 pass;

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readdir, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { freeFileName, isSafeFileName } from "@hex/domain";
 import { Context, Data, Effect, Layer } from "effect";
-import { messageOf } from "./errors";
+import { isErrno, messageOf } from "./errors";
+import { isWithin } from "./paths";
 
 /** A Document that could not be filed; the message says where and why. */
 export class OutboxError extends Data.TaggedError("OutboxError")<{
@@ -28,9 +29,6 @@ export class Outbox extends Context.Service<
     ) => Effect.Effect<string, OutboxError>;
   }
 >()("hex/Outbox") {}
-
-const isErrno = (error: unknown, code: string) =>
-  error instanceof Error && "code" in error && error.code === code;
 
 /**
  * Flushes a directory, so the entries just created in it survive a power loss; a close error
@@ -97,8 +95,7 @@ async function writeNew(
   warnings: string[],
 ) {
   const directory = resolve(root, folder);
-  const inside = relative(root, directory);
-  if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+  if (!isWithin(root, directory)) {
     throw new Error(`folder ${JSON.stringify(folder)} is outside the Outbox`);
   }
   if (!isSafeFileName(name)) {

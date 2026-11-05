@@ -1,11 +1,11 @@
 import {
   DateExtractor,
-  DocumentDateAnswer,
   Filing,
   Intake,
   IntakeLedger,
   Outbox,
   createLocalStore,
+  documentDateOf,
   intakeLedgerLayer,
   outboxLayer,
   toMastraSchema,
@@ -19,10 +19,10 @@ import {
   normalizeMessageId,
   planFiling,
 } from "@hex/domain";
-import type { CalendarDate, Category } from "@hex/domain";
+import type { Category } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
 
@@ -45,10 +45,10 @@ const Unprocessed = Schema.Struct({ messageId: Schema.String });
 /** A Document among the Intake's attachments: its index and the name to file it under. */
 const DetectedDocument = Schema.Struct({ index: Schema.Int, fileName: Schema.String });
 const Documents = Schema.Struct({ documents: Schema.Array(DetectedDocument) });
-/** A Document date as the model answered it: whole numbers, not yet checked to be a real day. */
+/** A Document date as the model answered it, a real day (`documentDateOf`). */
 const AnsweredDate = Schema.Struct({ year: Schema.Int, month: Schema.Int, day: Schema.Int });
 const Dated = Schema.Struct({
-  /** The Documents, each with the Document date the model answered, if it answered one. */
+  /** The Documents, each with the Document date the model answered, if it answered a real one. */
   documents: Schema.Array(
     Schema.Struct({ ...DetectedDocument.fields, documentDate: Schema.optionalKey(AnsweredDate) }),
   ),
@@ -57,18 +57,6 @@ const Dated = Schema.Struct({
 const Filed = Schema.Struct({
   filings: Schema.Array(Schema.Struct({ ...Filing.fields, fellBack: Schema.Boolean })),
 });
-
-/**
- * The Document date in a model's answer: present only when the answer decodes as
- * {@link DocumentDateAnswer} with no `null`. Anything else (no date found, malformed) is none.
- */
-function documentDateOf(answer: unknown): { documentDate?: CalendarDate } {
-  const decoded = Schema.decodeUnknownOption(DocumentDateAnswer)(answer);
-  if (Option.isNone(decoded)) return {};
-  const { year, month, day } = decoded.value;
-  if (year === null || month === null || day === null) return {};
-  return { documentDate: { year, month, day } };
-}
 
 type IntakeServices = Outbox | IntakeLedger | DateExtractor;
 
@@ -172,9 +160,12 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
             // Never sent (no Document date) when its content is no valid PDF or image (Mastra
             // would send a placeholder instead) or OpenAI and Anthropic refuse its image type.
             if (mediaType === undefined) return Effect.succeed(document);
-            return extractor
-              .extract({ content, mediaType, fileName: document.fileName })
-              .pipe(Effect.map((answer) => ({ ...document, ...documentDateOf(answer) })));
+            return extractor.extract({ content, mediaType, fileName: document.fileName }).pipe(
+              Effect.map((answer) => {
+                const documentDate = documentDateOf(answer);
+                return documentDate ? { ...document, documentDate } : document;
+              }),
+            );
           }),
         ).pipe(Effect.map((documents) => ({ documents }))),
       );

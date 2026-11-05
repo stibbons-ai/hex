@@ -1,15 +1,17 @@
+import { isCalendarDate } from "@hex/domain";
+import type { CalendarDate } from "@hex/domain";
 import { Agent } from "@mastra/core/agent";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { StreamErrorRetryProcessor } from "@mastra/core/processors";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { messageOf } from "./errors";
 import { toMastraSchema } from "./schema";
 
 /**
  * The model's answer to "what is this Document's date": all three `null` when it found none.
- * Plain integers, not checked to be a real day: the caller decodes the answer with this schema
- * and leaves that to the domain (`isCalendarDate`/`planFiling`).
+ * Plain integers, not checked to be a real day: {@link documentDateOf} decodes an answer with
+ * this schema and checks that.
  */
 export const DocumentDateAnswer = Schema.Struct({
   year: Schema.NullOr(Schema.Int),
@@ -17,6 +19,22 @@ export const DocumentDateAnswer = Schema.Struct({
   day: Schema.NullOr(Schema.Int),
 });
 export type DocumentDateAnswer = typeof DocumentDateAnswer.Type;
+
+const decodeAnswer = Schema.decodeUnknownOption(DocumentDateAnswer);
+
+/**
+ * The Document date in a model's answer: present only when the answer decodes as
+ * {@link DocumentDateAnswer} with no `null` and names a real day (`isCalendarDate`). Anything else
+ * (no date found, malformed, 30 February) is none, as `planFiling` would fall back on it.
+ */
+export function documentDateOf(answer: unknown): CalendarDate | undefined {
+  const decoded = decodeAnswer(answer);
+  if (Option.isNone(decoded)) return undefined;
+  const { year, month, day } = decoded.value;
+  if (year === null || month === null || day === null) return undefined;
+  const date = { year, month, day };
+  return isCalendarDate(date) ? date : undefined;
+}
 
 /** One Document as the model reads it. */
 export interface DocumentFile {
