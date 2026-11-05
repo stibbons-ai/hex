@@ -59,7 +59,9 @@ const API_KEY = "sk-hex-walkthrough-0123456789";
 
 /**
  * `bun run intake <args>` from the repository root; HEX_* come only from `env`, the config file
- * is {@link modelConfig} unless `env` names one, and the model is the fake OpenAI `openai`.
+ * is {@link modelConfig} unless `env` names one, and the model is the fake OpenAI `openai`. The
+ * other providers' keys and Mastra's provider refresh are blanked, so a developer's real keys
+ * never reach a test; a test that needs one sets it in `env`.
  */
 async function intake(args: string[], env: Record<string, string>, openai: FakeOpenAI = model) {
   const child = Bun.spawn(["bun", "run", "--silent", "intake", ...args], {
@@ -76,6 +78,11 @@ async function intake(args: string[], env: Record<string, string>, openai: FakeO
       HEX_SMTP_PASSWORD: "",
       OPENAI_BASE_URL: openai.baseUrl,
       OPENAI_API_KEY: API_KEY,
+      ANTHROPIC_API_KEY: "",
+      GOOGLE_GENERATIVE_AI_API_KEY: "",
+      GEMINI_API_KEY: "",
+      MASTRA_AUTO_REFRESH_PROVIDERS: "",
+      MASTRA_DEV: "",
       ...env,
     },
     stdout: "pipe",
@@ -333,6 +340,32 @@ describe("bun run intake", () => {
     } finally {
       await rejecting.server.stop(true);
     }
+  });
+
+  test("without a config file the default model, anthropic/claude-haiku-5-5, reads the Documents", async () => {
+    const dataDirectory = join(directory, "no-config");
+    const outbox = join(directory, "no-config-outbox");
+    const eml = await writeMail("no-config.eml", {
+      messageId: "no-config@shop.example",
+      received: RECEIVED,
+      parts: [pdf("a.pdf", DATED_PDF)],
+    });
+    const asked = model.requests.length;
+    // No Anthropic key (the helper blanks it) and a base URL nobody listens on: the call fails
+    // before anything leaves the machine, naming the model it was for.
+    const run = await intake([eml], {
+      HEX_CONFIG: "",
+      HEX_DATA_DIR: dataDirectory,
+      HEX_OUTBOX_DIR: outbox,
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9/v1",
+    });
+    expect(run).toMatchObject({ code: 1, stdout: "" });
+    expect(run.stderr).toContain(
+      'hex intake: the Intake workflow did not finish: filing: reading the Document date of "a.pdf" with anthropic/claude-haiku-5-5 failed',
+    );
+    expect(model.requests.length).toBe(asked);
+    expect(await readdir(outbox).catch(() => [])).toEqual([]);
+    expect(await ledgerEntry(dataDirectory, "no-config@shop.example")).toBeUndefined();
   });
 
   test("a Filing that fails mid-run exits 1 naming the Outbox failure, and records nothing", async () => {

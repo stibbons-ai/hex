@@ -59,6 +59,8 @@ let runs = 0;
  * `bun run test` sets the last, and Bun 1.4.2 keeps an inherited one instead of the caller's
  * directory). `HEX_CONFIG` {@link intakeModelConfig}, `HEX_EVAL_FIXTURES` blank, `HEX_EVAL_RESULTS`
  * a fresh temp folder and `HEX_EVAL_PRICES_URL` the loopback price data unless `env` sets them.
+ * The other providers' keys and Mastra's provider refresh are blanked, so a developer's real keys
+ * never reach a test; a test that needs one sets it in `env`.
  */
 async function evalCommand(
   env: Record<string, string>,
@@ -80,6 +82,11 @@ async function evalCommand(
       HEX_EVAL_PRICES_URL: priceData.url,
       OPENAI_BASE_URL: openai.baseUrl,
       OPENAI_API_KEY: "sk-hex-eval-walkthrough-0123456789",
+      ANTHROPIC_API_KEY: "",
+      GOOGLE_GENERATIVE_AI_API_KEY: "",
+      GEMINI_API_KEY: "",
+      MASTRA_AUTO_REFRESH_PROVIDERS: "",
+      MASTRA_DEV: "",
       ...env,
     },
     stdout: "pipe",
@@ -157,11 +164,11 @@ describe("bun run eval", () => {
 
   test("without HEX_CONFIG evaluates the default model, anthropic/claude-haiku-5-5", async () => {
     const requests = model.requests.length;
-    // No Anthropic key and a base URL nobody listens on: each call fails, none leaves the machine.
+    // No Anthropic key (the helper blanks it) and a base URL nobody listens on: each call fails,
+    // none leaves the machine.
     const { stdout, code, results } = await evalCommand({
       HEX_CONFIG: "",
       HEX_EVAL_FIXTURES: fixtures,
-      ANTHROPIC_API_KEY: "",
       ANTHROPIC_BASE_URL: "http://127.0.0.1:9/v1",
     });
     expect(code).toBe(1);
