@@ -3,6 +3,7 @@ export {
   DateExtractor,
   DocumentDateAnswer,
   dateExtractorLayer,
+  documentDateOf,
 } from "./date-extractor";
 export type { DocumentFile } from "./date-extractor";
 export { messageOf } from "./errors";

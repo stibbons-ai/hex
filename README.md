@@ -445,11 +445,64 @@ refused with a message naming the folder and why, so real fixtures elsewhere are
 | `14-de-undated-document`     | A Document without any date: `documentDate` is `null`                              |
 
 Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
-folder. The root `.gitignore` guards against committing them by accident (`git add -f` still
+folder with `HEX_EVAL_FIXTURES` (see [Evals](#evals)). The root `.gitignore` guards against
+committing them by accident (`git add -f` still
 can): it ignores every `.eml` (any letter case) and `expected.json` except the `.eml` files
 (lower case; on case-insensitive file systems any case) and `expected.json` directly in the
 synthetic folder, any `fixtures/real/` and
 `fixtures/private/` folder, and eval results in any `eval-results/` folder.
+
+## Evals
+
+`bun run eval` measures hex's two model-relevant decisions on a labelled fixture folder:
+Document detection (`detectDocuments`) and Document date extraction (the DateExtractor on the
+configured model). Run it by hand, with a real API key; it costs one model call per labelled
+Document. No CI job runs it, and it refuses to run (exit 1, nothing written, no model call) when
+the `CI` environment variable is set.
+
+```sh
+OPENAI_API_KEY=… bun run eval                                   # the committed synthetic set
+OPENAI_API_KEY=… HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own folder
+```
+
+- `HEX_EVAL_FIXTURES`: the fixture folder (`expected.json` and its `.eml` Intakes); default
+  `packages/eval-harness/fixtures/synthetic/`. Only read, never written.
+- `HEX_EVAL_RESULTS`: where reports go; default `eval-results/` in the repo root (git-ignored).
+  It must not lie inside the fixture folder.
+- `HEX_CONFIG`: the model is the one hex files with, `intake.model` (default
+  `openai/gpt-5.1-codex-mini`); its API key comes from the provider's usual variable
+  (`OPENAI_API_KEY`, …).
+
+Relative paths resolve against the directory you ran it from, as for `fixtures:generate`. A label
+naming no attachment (or several) of its `.eml`, or an `.eml` that can't be read, fails the run
+before any model call, naming the file. A failed model call is recorded on its Document and the run
+goes on; the command exits 1 after writing the reports.
+
+What it measures, per attachment matched to the labels by its file name:
+
+- **Detection precision**: detected attachments that are labelled Documents / detected
+  attachments. **Recall**: labelled Documents detected / labelled Documents. A zero denominator
+  is not applicable (`null` in JSON, `n/a` in Markdown).
+- **Exact accuracy**: labelled Documents whose predicted Document date is the labelled day /
+  labelled Documents. **Month accuracy**: the same for year and month. A Document labelled
+  undated is right only when no date is predicted; a failed call is always wrong.
+
+Extraction runs on every labelled Document, whatever detection decided, so detection errors don't
+reach its figures, and as the Intake workflow runs it: a Document whose content
+`documentMediaType` rejects is not sent (predicted no date, counted as not sent), and the answer
+is decoded by `documentDateOf`, so no date or no real day is no date. The verdicts come from
+deterministic Mastra scorers (`createScorer`, run through the scorer's `run`):
+`document-detection`, `document-date-exact` and `document-date-month`. No model judges them: a
+set of attachments and a calendar day have exact right answers.
+
+Each run writes `report.json` and `report.md` into its own folder,
+`<results>/<UTC start time>_<model>/` (`-2`, `-3`… if taken, never overwritten): the fixture
+folder, model, start time and duration; detection precision and recall with true positive,
+false positive and false negative counts; exact and month accuracy with counts (`11/13 (84.6 %)`)
+and the counts of Documents not sent and failed; and per Intake the attachment names by detection
+verdict and per labelled Document the expected and predicted date (none, not sent, or the error)
+with both verdicts. `report.json` decodes with `Report`, exported by `@hex/eval-harness`; `runEval`
+takes the DateExtractor as a Layer, so a test can script the model.
 
 ## Packages
 
@@ -458,7 +511,7 @@ synthetic folder, any `fixtures/real/` and
 | `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names  |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router) |
 | `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                          |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator                                                             |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, scorers, reports)               |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags

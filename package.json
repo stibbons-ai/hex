@@ -21,6 +21,7 @@
     "manifests": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-manifests.ts",
     "licenses": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun scripts/check-licenses.ts",
     "fixtures:generate": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/synthetic/main.ts",
+    "eval": "MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 bun packages/eval-harness/src/main.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run manifests && bun run licenses && bun run test"
   },
   "catalog": {
