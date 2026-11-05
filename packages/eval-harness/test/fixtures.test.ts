@@ -82,9 +82,6 @@ function pdfText(data: Uint8Array): string {
 
 const isPdf = (part: Part) => part.contentType === "application/pdf";
 const isImage = (part: Part) => part.contentType.startsWith("image/");
-const isTextPdf = (part: Part) => isPdf(part) && pdfText(part.data).includes(") Tj");
-const isImageOnlyPdf = (part: Part) =>
-  isPdf(part) && !isTextPdf(part) && pdfText(part.data).includes("/Subtype /Image");
 
 const intakes = (await loadExpectedSet(syntheticFolder)).intakes;
 const mails = new Map<string, Mail>();
@@ -92,10 +89,18 @@ for (const intake of intakes)
   mails.set(intake.file, parseMail(await Bun.file(join(syntheticFolder, intake.file)).text()));
 
 const mailOf = (intake: ExpectedIntake) => mails.get(intake.file)!;
-const documentParts = (intake: ExpectedIntake) =>
-  intake.documents.map((document) =>
-    mailOf(intake).parts.find((part) => part.fileName === document.fileName)!,
-  );
+/** Every labelled Document: its part, its label and, for a PDF, its text. */
+const documents = intakes.flatMap((intake) =>
+  intake.documents.map(({ fileName, documentDate }) => {
+    const part = mailOf(intake).parts.find((candidate) => candidate.fileName === fileName);
+    if (part === undefined) throw new Error(`${intake.file} has no part named ${fileName}`);
+    return { part, date: documentDate, intake, text: isPdf(part) ? pdfText(part.data) : "" };
+  }),
+);
+const textPdfs = documents.filter(({ text }) => text.includes(") Tj"));
+const imageOnlyPdfs = documents.filter(
+  ({ part, text }) => isPdf(part) && !text.includes(") Tj") && text.includes("/Subtype /Image"),
+);
 /** Every attachment-like part of the set that is not labelled a Document. */
 const nonDocuments = intakes.flatMap((intake) => {
   const labelled = new Set(intake.documents.map((document) => document.fileName));
@@ -103,13 +108,6 @@ const nonDocuments = intakes.flatMap((intake) => {
     .parts.filter((part) => part.fileName !== undefined && !labelled.has(part.fileName))
     .map((part) => ({ part, html: mailOf(intake).html }));
 });
-const datedDocuments = intakes.flatMap((intake) =>
-  documentParts(intake).map((part, index) => ({
-    part,
-    date: intake.documents[index]!.documentDate,
-    intake,
-  })),
-);
 
 const months = [
   "January",
@@ -151,22 +149,21 @@ describe("committed synthetic fixture set", () => {
 
   test("every Document is an attachment part of its .eml, in MIME order, PDF or image, over 20 KB", () => {
     for (const intake of intakes) {
-      const parts = mailOf(intake).parts;
       const positions = intake.documents.map((document) =>
-        parts.findIndex((part) => part.fileName === document.fileName),
+        mailOf(intake).parts.findIndex((part) => part.fileName === document.fileName),
       );
       expect({ file: intake.file, positions }).toEqual({
         file: intake.file,
-        positions: positions.filter((at) => at >= 0).sort((a, b) => a - b),
+        positions: [...positions].sort((a, b) => a - b),
       });
-      for (const part of documentParts(intake)) {
-        expect({ fileName: part.fileName, disposition: part.disposition }).toEqual({
-          fileName: part.fileName,
-          disposition: "attachment",
-        });
-        expect(isPdf(part) || isImage(part)).toBe(true);
-        expect(part.data.length).toBeGreaterThan(20 * 1024);
-      }
+    }
+    for (const { part } of documents) {
+      expect({ fileName: part.fileName, disposition: part.disposition }).toEqual({
+        fileName: part.fileName,
+        disposition: "attachment",
+      });
+      expect(isPdf(part) || isImage(part)).toBe(true);
+      expect(part.data.length).toBeGreaterThan(20 * 1024);
     }
   });
 
@@ -175,19 +172,16 @@ describe("committed synthetic fixture set", () => {
       intakes.map((intake) => mailOf(intake).headers.get("content-language")),
     );
     expect([...languages].sort()).toEqual(["de", "en"]);
-    const invoiceTexts = datedDocuments
-      .filter(({ part }) => isTextPdf(part))
-      .map(({ part }) => pdfText(part.data));
-    expect(invoiceTexts.some((text) => text.includes("(Rechnungsdatum:"))).toBe(true);
-    expect(invoiceTexts.some((text) => text.includes("(Invoice date:"))).toBe(true);
+    expect(textPdfs.some(({ text }) => text.includes("(Rechnungsdatum:"))).toBe(true);
+    expect(textPdfs.some(({ text }) => text.includes("(Invoice date:"))).toBe(true);
   });
 
   test("prints Document dates as 02.11.2026, 2 Nov 2026, 2026-11-02 and written out", () => {
     const printed = (format: (year: string, month: number, day: number) => string) =>
-      datedDocuments.some(({ part, date }) => {
-        if (date === null || !isTextPdf(part)) return false;
+      textPdfs.some(({ date, text }) => {
+        if (date === null) return false;
         const [year, month, day] = date.split("-");
-        return pdfText(part.data).includes(`: ${format(year!, Number(month), Number(day))})`);
+        return text.includes(`: ${format(year!, Number(month), Number(day))})`);
       });
     expect(
       printed(
@@ -209,15 +203,11 @@ describe("committed synthetic fixture set", () => {
   });
 
   test("has scanned Documents: a PNG and an image-only PDF", () => {
-    const parts = datedDocuments.map(({ part }) => part);
-    expect(parts.some((part) => part.contentType === "image/png")).toBe(true);
-    expect(parts.some(isImageOnlyPdf)).toBe(true);
+    expect(documents.some(({ part }) => part.contentType === "image/png")).toBe(true);
+    expect(imageOnlyPdfs.length).toBeGreaterThan(0);
   });
 
   test("sets due-date, service-date and month-boundary traps", () => {
-    const texts = datedDocuments
-      .filter(({ part }) => isTextPdf(part))
-      .map(({ part }) => pdfText(part.data));
     for (const label of [
       "Fälligkeitsdatum",
       "Due date",
@@ -225,12 +215,12 @@ describe("committed synthetic fixture set", () => {
       "Lieferdatum",
       "Service period",
     ]) {
-      expect({ label, found: texts.some((text) => text.includes(`(${label}:`)) }).toEqual({
+      expect({ label, found: textPdfs.some(({ text }) => text.includes(`(${label}:`)) }).toEqual({
         label,
         found: true,
       });
     }
-    const monthBoundary = datedDocuments.some(({ date, intake }) => {
+    const monthBoundary = documents.some(({ date, intake }) => {
       const sent = /^\w{3}, \d{2} (\w{3}) (\d{4})/.exec(mailOf(intake).headers.get("date")!)!;
       const sentMonth = `${sent[2]}-${String(months.findIndex((name) => name.startsWith(sent[1]!)) + 1).padStart(2, "0")}`;
       return date !== null && date.slice(0, 7) !== sentMonth;
@@ -241,7 +231,7 @@ describe("committed synthetic fixture set", () => {
   test("has multiple-Document, zero-Document and undated-Document Intakes", () => {
     expect(intakes.some((intake) => intake.documents.length >= 2)).toBe(true);
     expect(intakes.some((intake) => intake.documents.length === 0)).toBe(true);
-    expect(datedDocuments.some(({ date }) => date === null)).toBe(true);
+    expect(documents.some(({ date }) => date === null)).toBe(true);
   });
 
   test("has non-Documents that are never labelled: inline logo, Outlook signature, tracking pixel, non-PDF/non-image file", () => {

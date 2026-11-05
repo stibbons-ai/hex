@@ -1,39 +1,26 @@
 /** Renders the synthetic Intakes to `.eml` files plus their `expected.json`, byte for byte reproducibly. */
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExpectedIntake, ExpectedSet } from "../expected.ts";
 import { intakes, type Attachment, type SyntheticIntake } from "./intakes.ts";
 import { documentDate, invoicePdf, scanPdf, scanPng } from "./invoice.ts";
-import { filePart, headerText, renderMessage, textPart, type MimeNode } from "./mime.ts";
+import {
+  filePart,
+  headerDate,
+  headerText,
+  renderMessage,
+  textPart,
+  type FilePart,
+  type MimeNode,
+} from "./mime.ts";
 import { encodePng } from "./png.ts";
 import { Bitmap } from "./raster.ts";
 
-const recipient = "Erika Mustermann <erika.mustermann@hex.example>";
-const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const monthNames = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
+/** The committed set, `packages/eval-harness/fixtures/synthetic/`. */
+export const syntheticFolder = fileURLToPath(new URL("../../fixtures/synthetic", import.meta.url));
 
-/** `2026-11-02T09:14:00+01:00` → `Mon, 02 Nov 2026 09:14:00 +0100`, without the local time zone. */
-function mailDate(sent: string): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2}:\d{2})([+-]\d{2}):(\d{2})$/.exec(sent);
-  if (match === null) throw new Error(`bad sent time ${sent}`);
-  const [, year, month, day, time, offsetHours, offsetMinutes] = match as unknown as string[];
-  const weekday =
-    weekdays[new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).getUTCDay()];
-  return `${weekday}, ${day} ${monthNames[Number(month) - 1]} ${year} ${time} ${offsetHours}${offsetMinutes}`;
-}
+const recipient = "Erika Mustermann <erika.mustermann@hex.example>";
 
 /** A small grey PNG of `text`, two lines at most; large enough (> 20 KB) that only its role excludes it. */
 function decoration(text: string): Uint8Array {
@@ -57,70 +44,60 @@ const pixel = encodePng({
   rows: [new Uint8Array(4)],
 });
 
-function isDocument(
-  attachment: Attachment,
-): attachment is Extract<Attachment, { invoice: unknown }> {
-  return "invoice" in attachment;
-}
-
-function attachmentNode(attachment: Attachment): MimeNode {
-  const { fileName } = attachment;
+/** How each kind of attachment goes on the wire. */
+function wireFormat(attachment: Attachment): Omit<FilePart, "fileName"> {
   switch (attachment.kind) {
     case "pdf":
-      return filePart({
+      return {
         contentType: "application/pdf",
-        fileName,
         disposition: "attachment",
         data: invoicePdf(attachment.invoice),
-      });
+      };
     case "scan-pdf":
-      return filePart({
+      return {
         contentType: "application/pdf",
-        fileName,
         disposition: "attachment",
         data: scanPdf(attachment.invoice),
-      });
+      };
     case "scan-png":
-      return filePart({
+      return {
         contentType: "image/png",
-        fileName,
         disposition: "attachment",
         data: scanPng(attachment.invoice),
-      });
+      };
     case "logo":
-      return filePart({
+      return {
         contentType: "image/png",
-        fileName,
         disposition: "inline",
         contentId: attachment.contentId,
         data: decoration(attachment.text),
-      });
+      };
     case "signature":
       // Outlook style: referenced from the HTML via cid:, yet marked as an attachment.
-      return filePart({
+      return {
         contentType: "image/png",
-        fileName,
         disposition: "attachment",
         contentId: attachment.contentId,
         data: decoration(attachment.text),
-      });
+      };
     case "pixel":
-      return filePart({
+      return {
         contentType: "image/png",
-        fileName,
         disposition: "inline",
         contentId: attachment.contentId,
         data: pixel,
-      });
+      };
     case "file":
-      return filePart({
+      return {
         contentType: attachment.contentType,
-        fileName,
         disposition: "attachment",
         data: new TextEncoder().encode(attachment.content),
-      });
+      };
   }
 }
+
+const attachmentNode = (attachment: Attachment) =>
+  filePart({ fileName: attachment.fileName, ...wireFormat(attachment) });
 
 /**
  * The MIME tree: `cid:` decorations sit with the HTML in multipart/related, every other
@@ -132,8 +109,9 @@ function messageTree(intake: SyntheticIntake): MimeNode {
   let body: MimeNode = textPart("text/plain", intake.text);
   if (intake.html !== undefined) {
     for (const attachment of referenced) {
-      if (!intake.html.includes(`cid:${attachment.contentId}`))
+      if (!intake.html.includes(`cid:${attachment.contentId}`)) {
         throw new Error(`${intake.slug}: HTML misses cid:${attachment.contentId}`);
+      }
     }
     const alternative: MimeNode = {
       subtype: "alternative",
@@ -162,7 +140,7 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
       `From: ${headerText(intake.from)}`,
       `To: ${recipient}`,
       `Subject: ${headerText(intake.subject)}`,
-      `Date: ${mailDate(intake.sent)}`,
+      `Date: ${headerDate(intake.sent)}`,
       `Message-ID: <synthetic-${number}-${intake.slug}@hex-fixtures.example>`,
       `Content-Language: ${intake.language}`,
     ];
@@ -170,10 +148,12 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
     labelled.push({
       file,
       description: intake.description,
-      documents: intake.attachments.filter(isDocument).map((attachment) => ({
-        fileName: attachment.fileName,
-        documentDate: documentDate(attachment.invoice),
-      })),
+      documents: intake.attachments
+        .filter((attachment) => "invoice" in attachment)
+        .map((attachment) => ({
+          fileName: attachment.fileName,
+          documentDate: documentDate(attachment.invoice),
+        })),
     });
   });
   const expected: ExpectedSet = { intakes: labelled };

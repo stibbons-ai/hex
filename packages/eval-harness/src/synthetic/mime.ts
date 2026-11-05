@@ -11,6 +11,18 @@ export function headerText(text: string): string {
     : `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
 }
 
+/**
+ * An RFC 5322 date from `YYYY-MM-DDTHH:MM:SS±HH:MM`, e.g. `Mon, 02 Nov 2026 09:14:00 +0100`.
+ * The weekday comes from `toUTCString`, whose format ECMAScript fixes; no local time zone is read.
+ */
+export function headerDate(sent: string): string {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})([+-]\d{2}):(\d{2})$/.exec(sent);
+  if (match === null) throw new Error(`bad sent time ${sent}`);
+  const [, day, time, offsetHours, offsetMinutes] = match;
+  const date = new Date(`${day}T00:00:00Z`).toUTCString().slice(0, 16);
+  return `${date} ${time} ${offsetHours}${offsetMinutes}`;
+}
+
 /** A UTF-8 text part sent as 8bit (every line of the synthetic mails is far below 998 bytes). */
 export function textPart(type: "text/plain" | "text/html", text: string): MimeNode {
   return {

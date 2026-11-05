@@ -26,7 +26,7 @@ function unique<T>(key: (item: T) => string, label: string) {
   });
 }
 
-export const DocumentDate = Schema.String.check(
+const DocumentDate = Schema.String.check(
   Schema.makeFilter((value: string) =>
     isCalendarDate(value) ? undefined : `expected a real calendar date YYYY-MM-DD, got "${value}"`,
   ),
@@ -46,14 +46,14 @@ export const ExpectedIntake = Schema.Struct({
   /** What the Intake covers, which trap it sets. */
   description: Schema.optionalKey(Schema.String),
   documents: Schema.Array(ExpectedDocument).check(
-    unique((document: typeof ExpectedDocument.Type) => document.fileName, "fileName"),
+    unique((document: ExpectedDocument) => document.fileName, "fileName"),
   ),
 });
 
 /** The labels of one fixture folder: its `expected.json`. */
 export const ExpectedSet = Schema.Struct({
   intakes: Schema.Array(ExpectedIntake).check(
-    unique((intake: typeof ExpectedIntake.Type) => intake.file, "file"),
+    unique((intake: ExpectedIntake) => intake.file, "file"),
   ),
 });
 
@@ -62,9 +62,9 @@ export type ExpectedIntake = typeof ExpectedIntake.Type;
 export type ExpectedSet = typeof ExpectedSet.Type;
 
 export const decodeExpectedSet = Schema.decodeUnknownResult(ExpectedSet);
+const decodeExpectedSetPromise = Schema.decodeUnknownPromise(ExpectedSet);
 
 /** Reads and decodes `<folder>/expected.json`; rejects with the decode error when it is malformed. */
 export async function loadExpectedSet(folder: string): Promise<ExpectedSet> {
-  const json: unknown = await Bun.file(join(folder, "expected.json")).json();
-  return Schema.decodeUnknownPromise(ExpectedSet)(json);
+  return decodeExpectedSetPromise(await Bun.file(join(folder, "expected.json")).json());
 }

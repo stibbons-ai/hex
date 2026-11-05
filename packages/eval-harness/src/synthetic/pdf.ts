@@ -2,7 +2,6 @@
  * A zero-dependency PDF writer for the synthetic Documents: standard Type 1 fonts (Helvetica) in
  * WinAnsiEncoding and uncompressed streams, so the bytes depend only on the input.
  */
-import { concat } from "./png.ts";
 
 /** Raw image samples, rows padded to whole bytes; grey only. */
 export interface PdfImage {
@@ -51,11 +50,11 @@ export function pdfString(text: string): string {
 
 function ascii(text: string): Uint8Array {
   if (!/^[\x20-\x7e\n]*$/.test(text)) throw new Error("PDF syntax must be printable ASCII");
-  return new TextEncoder().encode(text);
+  return Buffer.from(text, "latin1");
 }
 
 function stream(dictionary: string, data: Uint8Array): Uint8Array {
-  return concat([
+  return Buffer.concat([
     ascii(`<< ${dictionary} /Length ${data.length} >>\nstream\n`),
     data,
     ascii("\nendstream"),
@@ -82,7 +81,7 @@ export function writePdf(pages: readonly PdfPage[]): Uint8Array {
       const id = add(
         stream(
           `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent ${image.bitsPerComponent}`,
-          concat(image.rows),
+          Buffer.concat(image.rows),
         ),
       );
       return `/${name} ${id} 0 R`;
@@ -98,14 +97,16 @@ export function writePdf(pages: readonly PdfPage[]): Uint8Array {
 
   // Header with a binary comment line, so transports treat the file as binary.
   const parts: Uint8Array[] = [
-    concat([ascii("%PDF-1.4\n%"), new Uint8Array([0xe2, 0xe3, 0xcf, 0xd3]), ascii("\n")]),
+    ascii("%PDF-1.4\n%"),
+    new Uint8Array([0xe2, 0xe3, 0xcf, 0xd3]),
+    ascii("\n"),
   ];
-  let offset = parts[0]!.length;
+  let offset = parts.reduce((sum, part) => sum + part.length, 0);
   const offsets = objects.map((body, index) => {
     const start = offset;
-    const object = concat([ascii(`${index + 1} 0 obj\n`), body, ascii("\nendobj\n")]);
-    parts.push(object);
-    offset += object.length;
+    const object = [ascii(`${index + 1} 0 obj\n`), body, ascii("\nendobj\n")];
+    parts.push(...object);
+    offset += object.reduce((sum, part) => sum + part.length, 0);
     return start;
   });
   const xref = [
@@ -115,5 +116,5 @@ export function writePdf(pages: readonly PdfPage[]): Uint8Array {
     `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${offset}\n%%EOF\n`,
   ].join("");
   parts.push(ascii(xref));
-  return concat(parts);
+  return Buffer.concat(parts);
 }

@@ -119,12 +119,23 @@ const labels = {
   },
 };
 
+type Style = "title" | "heading" | "bold" | "body";
+
 /** A printed line: `left` text, optional right-hand amount column, and its weight. */
 interface Row {
   left: string;
   right?: string;
-  style?: "title" | "heading" | "bold";
+  style?: Style;
 }
+
+/** PDF font and size, scan glyph scale per row style. */
+const pdfFont: Record<Style, readonly [string, number]> = {
+  title: ["F2", 16],
+  heading: ["F2", 14],
+  bold: ["F2", 10],
+  body: ["F1", 10],
+};
+const scanScale: Record<Style, number> = { title: 5, heading: 4, bold: 3, body: 3 };
 
 function rows(invoice: Invoice): Row[] {
   const { language: lang } = invoice;
@@ -144,7 +155,7 @@ function rows(invoice: Invoice): Row[] {
       left: `${line.label}: ${"date" in line ? format(line.date) : `${format(line.from)} – ${format(line.to)}`}`,
     })),
     { left: "" },
-    { left: label.item, right: label.amount, style: "bold" as const },
+    { left: label.item, right: label.amount, style: "bold" },
     ...invoice.items.map((item) => ({
       left: item.description,
       right: formatMoney(item.cents, lang),
@@ -156,7 +167,7 @@ function rows(invoice: Invoice): Row[] {
           { left: label.net, right: formatMoney(net, lang) },
           { left: `${label.vat} ${invoice.vat} %`, right: formatMoney(tax, lang) },
         ]),
-    { left: label.total, right: formatMoney(net + tax, lang), style: "bold" as const },
+    { left: label.total, right: formatMoney(net + tax, lang), style: "bold" },
     { left: "" },
     ...invoice.notes.map((left) => ({ left })),
     { left: "" },
@@ -181,14 +192,7 @@ export function invoicePdf(invoice: Invoice): Uint8Array {
   let y = 730;
   for (const row of rows(invoice)) {
     if (row.left.length > 95) throw new Error(`row too long for the PDF: ${row.left}`);
-    const [font, size] =
-      row.style === "title"
-        ? ["F2", 16]
-        : row.style === "heading"
-          ? ["F2", 14]
-          : row.style === "bold"
-            ? ["F2", 10]
-            : ["F1", 10];
+    const [font, size] = pdfFont[row.style ?? "body"];
     if (row.left !== "") ops.push(`BT /${font} ${size} Tf 56 ${y} Td ${pdfString(row.left)} Tj ET`);
     if (row.right !== undefined)
       ops.push(`BT /${font} ${size} Tf 430 ${y} Td ${pdfString(row.right)} Tj ET`);
@@ -216,7 +220,7 @@ function scanBitmap(invoice: Invoice): Bitmap {
   const amountColumn = 690;
   let y = margin;
   for (const row of rows(invoice)) {
-    const scale = row.style === "title" ? 5 : row.style === "heading" ? 4 : 3;
+    const scale = scanScale[row.style ?? "body"];
     const limit = (row.right === undefined ? page.width - margin : amountColumn - 18) - margin;
     if (Bitmap.textWidth(row.left, scale) > limit)
       throw new Error(`row too wide for the scan: ${row.left}`);

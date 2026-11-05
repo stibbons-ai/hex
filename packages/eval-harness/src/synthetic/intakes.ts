@@ -2,7 +2,7 @@
  * The synthetic Intakes: every company, address, number, IBAN and tax ID is fictitious. Each Intake
  * is the single source of truth for both its `.eml` and its `expected.json` entry.
  */
-import type { Invoice } from "./invoice.ts";
+import type { Invoice, Language } from "./invoice.ts";
 
 export type Attachment =
   /** Documents: a text PDF, a scanned PNG, an image-only PDF. */
@@ -16,7 +16,7 @@ export type Attachment =
 export interface SyntheticIntake {
   slug: string;
   description: string;
-  language: "de" | "en";
+  language: Language;
   from: string;
   subject: string;
   /** Mail `Date:` as `YYYY-MM-DDTHH:MM:SS±HH:MM`. */
