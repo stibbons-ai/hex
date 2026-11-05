@@ -6,11 +6,14 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NetworkError } from "@chat-adapter/shared";
+import { MastraError } from "@mastra/core/error";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { ConsoleLogger } from "@mastra/core/logger";
+import { ThreadStateLibSQL } from "@mastra/libsql";
 import type { Adapter } from "chat";
-import { type ServerOptions, startServer } from "../src";
+import { type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
+import { CHAT_STATE_TYPE } from "../src/chat-state";
 import { loadChatConfig } from "../src/config";
 import {
   BOT_ACCOUNT,
@@ -21,7 +24,7 @@ import {
 } from "./fake-signal-cli";
 import { DANIEL as DANIEL_SLACK, directMessage, fakeSlack, slackEnv } from "./fake-slack";
 import { REPLY, heldModel, mockModel, toolCallingModel } from "./mock-model";
-import { serverOptions, stored, warnings } from "./server-helpers";
+import { chatStateRows, serverOptions, stored, storedChatState, warnings } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 const STRANGER = "5e5e5e5e-0000-4000-8000-00000000057a";
@@ -232,8 +235,7 @@ test("a Signal message arriving while its conversation's run is busy is answered
       // The conversation exists already, as it does after Daniel's first message ever.
       fake.receive({ aci: DANIEL, text: "hello" });
       await fake.sends(1);
-      const state = server.mastra.getAgent(CHAT_AGENT_ID).getChannels()?.sdk?.getState();
-      if (!state) throw new Error("no chat state");
+      const state = chatState(server);
       const enqueue = state.enqueue.bind(state);
       spyOn(state, "enqueue").mockImplementation(async (...args) => {
         const depth = await enqueue(...args);
@@ -321,13 +323,11 @@ test("an unreachable signal-cli fails startup and leaves nothing open", async ()
 });
 
 /**
- * Starts a server against `fake` with `account` as SIGNAL_ACCOUNT and expects the start to fail.
- * Returns the error and everything printed or logged meanwhile: console output and the Mastra
- * logger's calls, all as one inspected string.
+ * Captures every console call and every call of the returned debug-level Mastra logger into
+ * `printed`, one argument list each, until `restore()`.
  */
-async function failedStart(fake: FakeSignalCli, account: string, name: string) {
-  const port = await freePort();
-  const printed: unknown[] = [];
+function captureOutput() {
+  const printed: unknown[][] = [];
   const logger = new ConsoleLogger({ level: "debug" });
   const spies = [
     ...(["log", "info", "warn", "error", "debug"] as const).map((level) =>
@@ -337,6 +337,23 @@ async function failedStart(fake: FakeSignalCli, account: string, name: string) {
       spyOn(logger, level).mockImplementation((...args) => void printed.push(args)),
     ),
   ];
+  return {
+    printed,
+    logger,
+    restore: () => {
+      for (const spy of spies) spy.mockRestore();
+    },
+  };
+}
+
+/**
+ * Starts a server against `fake` with `account` as SIGNAL_ACCOUNT and expects the start to fail.
+ * Returns the error and everything printed or logged meanwhile: console output and the Mastra
+ * logger's calls, all as one inspected string.
+ */
+async function failedStart(fake: FakeSignalCli, account: string, name: string) {
+  const port = await freePort();
+  const { printed, logger, restore } = captureOutput();
   try {
     const chat = await loadChatConfig(configPath, {
       SIGNAL_ACCOUNT: account,
@@ -357,7 +374,7 @@ async function failedStart(fake: FakeSignalCli, account: string, name: string) {
       output: `${String(failure)} ${(failure as Error).stack} ${Bun.inspect(failure)} ${Bun.inspect(printed)}`,
     };
   } finally {
-    for (const spy of spies) spy.mockRestore();
+    restore();
   }
 }
 
@@ -471,4 +488,304 @@ test("stop() closes the event stream at once and bounds the wait for a running r
     await stopping;
     await fake.streamsClosed();
   });
+});
+
+// The adapter stores its receive cursor in the Chat state under this key, which hex persists in
+// its database: a restarted hex resumes the event stream after the newest event that, with every
+// earlier one, it finished handling.
+const CURSOR_KEY = `signal:receive-cursor:${BOT_ACCOUNT}`;
+/** A second allowlisted sender, for a conversation of its own. */
+const OTHER = "07e07e07-0000-4000-8000-0000000000e1";
+/** A message saying this starts a run that never finishes, as when hex stops or crashes mid-run. */
+const STALL = "think hard";
+
+/**
+ * A {@link mockModel} recording, per call, the text of the prompt's last message: the one the
+ * call answers (earlier ones are history).
+ */
+function answeringModel() {
+  const answered: string[] = [];
+  const model = mockModel({
+    before: async (call) => {
+      const { prompt } = call as { prompt: { content: { type: string; text?: string }[] }[] };
+      const parts = prompt.at(-1)?.content ?? [];
+      answered.push(parts.map((part) => part.text ?? "").join(""));
+    },
+  });
+  return { model, answered };
+}
+
+/** A {@link mockModel} that stalls on {@link STALL}; `stalled` resolves once such a run started. */
+function stallingModel() {
+  const stalled = Promise.withResolvers<void>();
+  const model = mockModel({
+    before: async (call) => {
+      if (!JSON.stringify(call).includes(STALL)) return;
+      stalled.resolve();
+      await new Promise(() => {});
+    },
+  });
+  return { model, stalled: stalled.promise };
+}
+
+function chatState(server: RunningServer) {
+  const state = server.mastra.getAgent(CHAT_AGENT_ID).getChannels()?.sdk?.getState();
+  if (!state) throw new Error("no chat state");
+  return state;
+}
+
+/**
+ * Spies on the server's receive-cursor writes; the returned function resolves once `cursor` has
+ * been written, before or after it was called.
+ */
+function cursorWrites(server: RunningServer) {
+  const state = chatState(server);
+  const written: unknown[] = [];
+  let changed = () => {};
+  const set = state.set.bind(state);
+  spyOn(state, "set").mockImplementation(async (key, value, ttlMs) => {
+    await set(key, value, ttlMs);
+    if (key !== CURSOR_KEY) return;
+    written.push(value);
+    changed();
+  });
+  return (cursor: { lastEventId: string; processed: string[] }) => {
+    const done = Promise.withResolvers<void>();
+    changed = () => {
+      if (written.some((value) => Bun.deepEquals(value, cursor))) done.resolve();
+    };
+    changed();
+    return within(done.promise, `the receive cursor ${JSON.stringify(cursor)} to be written`);
+  };
+}
+
+test("a Signal DM hex had not answered when it stopped is answered after a restart on the same database", async () => {
+  const { model, stalled } = stallingModel();
+  await withFake(fakeSignalCli(), async (fake) => {
+    const first = options("replay", { chat: await chatFor(fake, model), stopGraceMs: 100 });
+    const before = await startServer(first);
+    try {
+      await fake.streamOpened();
+      const cursorWritten = cursorWrites(before);
+      expect(fake.receive({ aci: DANIEL, text: "hello" })).toBe("run-1");
+      await fake.sends(1);
+      await cursorWritten({ lastEventId: "run-1", processed: [] });
+      // Received, never answered: its run is still going when hex stops.
+      expect(fake.receive({ aci: DANIEL, text: STALL })).toBe("run-2");
+      await within(stalled, "the run to stall");
+    } finally {
+      await before.stop();
+    }
+    // The default stop grace: the final cursor write lands before the store closes.
+    const restarted = answeringModel();
+    const after = await startServer(
+      options("replay", { chat: await chatFor(fake, restarted.model) }),
+    );
+    try {
+      await fake.streamOpened(2);
+      const [, replayed] = await fake.sends(2);
+      expect(replayed?.params).toEqual({
+        account: BOT_ACCOUNT,
+        recipient: [DANIEL],
+        message: REPLY,
+      });
+    } finally {
+      await after.stop();
+    }
+    // The restarted hex resumed after the last event the first one finished, and answered run-2,
+    // and only run-2: not run-1 again.
+    expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    expect(restarted.answered).toEqual([expect.stringContaining(STALL)]);
+    expect(sent(fake)).toEqual([REPLY, REPLY]);
+    expect(await storedChatState(first.databasePath, CURSOR_KEY)).toEqual({
+      lastEventId: "run-2",
+      processed: [],
+    });
+  });
+});
+
+test("of the Chat state, only the Signal receive cursor reaches the database", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("persisted-keys", { chat: await chatFor(fake) });
+    const server = await startServer(settings);
+    try {
+      await fake.streamOpened();
+      fake.receive({ aci: DANIEL, text: "hello" });
+      await fake.sends(1);
+      // Keys the adapter (an edit's target) and Chat (a turn to cancel) set; nothing in a hex
+      // conversation sets them today, so they are set here.
+      const state = chatState(server);
+      await state.set(`signal:edit:${BOT_ACCOUNT}:1700000000001`, "1700000000000", 60_000);
+      await state.set(`active-turn:signal:dm:${DANIEL}`, "turn-1", 60_000);
+      expect(await state.get(`active-turn:signal:dm:${DANIEL}`)).toBe("turn-1");
+    } finally {
+      await server.stop();
+    }
+    expect(chatStateRows(settings.databasePath)).toEqual([
+      { threadId: CURSOR_KEY, type: CHAT_STATE_TYPE },
+    ]);
+  });
+});
+
+test("after a restart, a replayed Signal DM hex already answered is skipped", async () => {
+  const { model, stalled } = stallingModel();
+  await withFake(fakeSignalCli(), async (fake) => {
+    const withOther = async (chatModel?: MastraModelConfig) => {
+      const chat = await chatFor(fake, chatModel);
+      const signal = { ...chat.channels["signal"]!, allowlist: [DANIEL, OTHER] };
+      return { ...chat, channels: { signal } };
+    };
+    const first = options("skip", { chat: await withOther(model), stopGraceMs: 100 });
+    const before = await startServer(first);
+    try {
+      await fake.streamOpened();
+      const cursorWritten = cursorWrites(before);
+      fake.receive({ aci: DANIEL, text: "hello" });
+      await cursorWritten({ lastEventId: "run-1", processed: [] });
+      // run-2 never finishes, so the cursor stays at run-1; run-3, in another conversation, is
+      // answered and stored as processed.
+      fake.receive({ aci: OTHER, text: STALL });
+      await within(stalled, "the run to stall");
+      fake.receive({ aci: DANIEL, text: "again" });
+      await cursorWritten({ lastEventId: "run-1", processed: ["run-3"] });
+    } finally {
+      await before.stop();
+    }
+    // The default stop grace: stopping waits for both replayed events (run-2, run-3) to be
+    // handled and their cursor written.
+    const after = await startServer(options("skip", { chat: await withOther() }));
+    try {
+      await fake.streamOpened(2);
+      await fake.sends(3);
+    } finally {
+      await after.stop();
+    }
+    expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    expect(await storedChatState(first.databasePath, CURSOR_KEY)).toEqual({
+      lastEventId: "run-3",
+      processed: [],
+    });
+    // run-2 answered once, by the restarted hex; run-3 not again.
+    const recipients = fake.calls
+      .filter((call) => call.method === "send")
+      .map((call) => call.params["recipient"]);
+    expect(recipients).toEqual([[DANIEL], [DANIEL], [OTHER]]);
+  });
+});
+
+test("after a restart, a Signal DM that arrived while hex was gone is answered", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("away", {});
+    const before = await startServer({ ...settings, chat: await chatFor(fake) });
+    try {
+      await fake.streamOpened();
+      fake.receive({ aci: DANIEL, text: "hello" });
+      await fake.sends(1);
+    } finally {
+      await before.stop();
+    }
+    // No stream open: as a message signal-cli took off Signal before it noticed hex was gone.
+    expect(fake.receive({ aci: DANIEL, text: "still there?" })).toBe("run-2");
+    const restarted = answeringModel();
+    const after = await startServer({ ...settings, chat: await chatFor(fake, restarted.model) });
+    try {
+      await fake.streamOpened(2);
+      const [, answer] = await fake.sends(2);
+      expect(answer?.params["recipient"]).toEqual([DANIEL]);
+    } finally {
+      await after.stop();
+    }
+    expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    // run-2 answered, and only run-2: not run-1 again.
+    expect(restarted.answered).toEqual([expect.stringContaining("still there?")]);
+    expect(sent(fake)).toEqual([REPLY, REPLY]);
+  });
+});
+
+test("a Signal conversation subscribed through hex's chat state is hex's and survives a restart", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("subscription", {});
+    const conversation = `signal:dm:${DANIEL}`;
+    const run = async (use: (server: RunningServer) => Promise<void>) => {
+      const server = await startServer({ ...settings, chat: await chatFor(fake) });
+      try {
+        await use(server);
+      } finally {
+        await server.stop();
+      }
+    };
+    await run(async (server) => {
+      // A memory thread no agent has claimed yet: subscribing stamps the owner the state adapter
+      // was built with.
+      const store = await server.mastra.getStorage()?.getStore("memory");
+      const now = new Date();
+      await store?.saveThread({
+        thread: {
+          id: "dm-thread",
+          resourceId: CHAT_RESOURCE_ID,
+          title: "",
+          createdAt: now,
+          updatedAt: now,
+          metadata: { channel_platform: "signal", channel_externalThreadId: conversation },
+        },
+      });
+      await chatState(server).subscribe(conversation);
+    });
+    await run(async (server) => {
+      expect(await chatState(server).isSubscribed(conversation)).toBe(true);
+    });
+    const [thread] = (await stored(settings.databasePath)).threads;
+    expect(thread?.metadata).toMatchObject({
+      channel_subscribed: "true",
+      channel_ownerId: CHAT_AGENT_ID,
+    });
+  });
+});
+
+test("a receive cursor the store can neither read nor write fails neither startup nor answering", async () => {
+  const { printed, logger, restore } = captureOutput();
+  // As the LibSQL store fails: a MastraError whose details name the key, so the bot account.
+  const failure = ({ threadId, type }: { threadId: string; type: string }) =>
+    Promise.reject(
+      new MastraError(
+        {
+          id: "MASTRA_STORAGE_LIBSQL_THREAD_STATE_FAILED",
+          domain: "STORAGE",
+          category: "THIRD_PARTY",
+          details: { threadId, type },
+        },
+        new Error("SQLITE_IOERR: disk I/O error"),
+      ),
+    );
+  const spies = [
+    spyOn(ThreadStateLibSQL.prototype, "getState").mockImplementation(failure),
+    spyOn(ThreadStateLibSQL.prototype, "setState").mockImplementation(failure),
+  ];
+  try {
+    await withFake(fakeSignalCli(), async (fake) => {
+      const server = await startServer(
+        options("cursor-failure", { logger, chat: await chatFor(fake) }),
+      );
+      try {
+        await fake.streamOpened();
+        fake.receive({ aci: DANIEL, text: "hi hex" });
+        await fake.sends(1);
+      } finally {
+        await server.stop();
+      }
+      // The adapter's handling: it starts from live events and keeps answering.
+      expect(fake.lastEventIds).toEqual([null]);
+    });
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+    restore();
+  }
+  // Mastra's debug lines quote messages; the cursor's warnings must not, nor name the account.
+  const cursorLines = Bun.inspect(
+    printed.filter((args) => String(args[0]).includes("receive cursor")),
+  );
+  expect(cursorLines).toContain("Could not read the Signal receive cursor");
+  expect(cursorLines).toContain("Could not store the Signal receive cursor");
+  expect(cursorLines).not.toContain("hi hex");
+  for (const form of forms(BOT_ACCOUNT)) expect(cursorLines).not.toContain(form);
 });

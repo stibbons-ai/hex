@@ -313,12 +313,24 @@ it.
   in hex's log. Under `concurrent`, a message joined the run in progress, but Mastra
   finished it in a run that a stop could cut off before it was saved, and two first messages of a
   new conversation could land in two memory threads.
-- The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
-  subscriptions), so a restart starts at live events. Lost are messages hex had received but not
-  answered within the 5-second stop grace, or when it crashed, and messages signal-cli took off
-  Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s, longer
-  when the host itself is gone). Messages sent while no event stream was connected stay at Signal
-  and arrive once hex connects (with `--receive-mode on-connection`).
+- hex keeps the adapter's receive cursor in its database: the newest event that, with every
+  earlier one, hex has finished handling (later finished ones are stored too, to be skipped). A
+  restarted hex resumes the event stream there, so signal-cli replays the events whose handling
+  hadn't finished: a reply cut off by the 5-second stop grace or a crash, and messages signal-cli
+  took off Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s,
+  longer when the host itself is gone). Messages sent while no event stream was connected stay at
+  Signal and arrive once hex connects (with `--receive-mode on-connection`). Limits:
+  - lost: everything signal-cli held for replay when signal-cli itself restarts, and anything
+    older than its last 1000 events;
+  - lost: a message waiting behind a reply in progress in the same conversation when hex stops or
+    crashes: its handling counts as finished once it is queued, and the queue lives in memory;
+  - lost: until hex has finished its first event and every one before it (on a new database, or
+    the first start after this upgrade), there is no cursor, so a restart replays nothing;
+  - lost, during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message
+    arriving after hex began stopping is dropped and the cursor moves past it;
+  - answered twice: a message whose reply went out just before a crash, before its handling
+    finished and the cursor was written; and, during shutdown (#29), one whose last cursor write
+    missed the store closing.
 - If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
   30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
   does while Slack's socket reconnects.

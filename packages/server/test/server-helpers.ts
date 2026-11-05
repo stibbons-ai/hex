@@ -1,9 +1,11 @@
 // Helpers for tests that start the real server: its options, what it persisted, its warnings.
 import { spyOn } from "bun:test";
+import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { createLocalStore } from "@hex/adapters";
 import type { RunningServer, ServerOptions } from "../src";
 import { CHAT_RESOURCE_ID } from "../src/chat";
+import { CHAT_STATE_TYPE, chatStores } from "../src/chat-state";
 import { within } from "./timeouts";
 
 /** Server options with a fresh database `<directory>/<name>/mastra.db`, a free port, no log. */
@@ -34,6 +36,28 @@ export async function stored(databasePath: string) {
     return { threads, messages, workingMemory: resource?.workingMemory };
   } finally {
     await storage.close();
+  }
+}
+
+/** The Chat state value a stopped server persisted at `databasePath` under `key`, if any. */
+export async function storedChatState(databasePath: string, key: string) {
+  const storage = await createLocalStore(databasePath);
+  try {
+    await storage.init();
+    const { threadState } = await chatStores(storage);
+    return await threadState.getState({ threadId: key, type: CHAT_STATE_TYPE });
+  } finally {
+    await storage.close();
+  }
+}
+
+/** Every row of Mastra's thread-state table a stopped server left at `databasePath`. */
+export function chatStateRows(databasePath: string) {
+  const database = new Database(databasePath, { readonly: true });
+  try {
+    return database.query('SELECT "threadId", "type" FROM mastra_thread_state').all();
+  } finally {
+    database.close();
   }
 }
 

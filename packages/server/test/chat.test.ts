@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConsoleLogger } from "@mastra/core/logger";
 import type { IMastraLogger } from "@mastra/core/logger";
+import { InMemoryStore } from "@mastra/core/storage";
 import { LibSQLStore } from "@mastra/libsql";
 import { type ChatOptions, type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
+import { chatStores } from "../src/chat-state";
 import { FakeChatAdapter } from "./fake-chat-adapter";
 import { REPLY, heldModel, mockModel, numberedModel, toolCallingModel } from "./mock-model";
 import { stored } from "./server-helpers";
@@ -331,7 +333,8 @@ describe("chat channels (fake adapter)", () => {
   });
 
   test("the agent's memory has working memory on, scoped to the resource", async () => {
-    const { agent } = createChatAgent(chatOptions(new FakeChatAdapter()));
+    const stores = await chatStores(new InMemoryStore());
+    const { agent } = createChatAgent(chatOptions(new FakeChatAdapter()), stores);
     const memory = await agent.getMemory();
     expect(memory?.getMergedThreadConfig().workingMemory).toMatchObject({
       enabled: true,
@@ -339,13 +342,14 @@ describe("chat channels (fake adapter)", () => {
     });
   });
 
-  test("a channel whose key differs from its adapter's platform is rejected", () => {
+  test("a channel whose key differs from its adapter's platform is rejected", async () => {
     const adapter = new FakeChatAdapter();
+    const stores = await chatStores(new InMemoryStore());
     expect(() =>
-      createChatAgent({
-        model: mockModel(),
-        channels: { slack: { adapter, allowlist: [DANIEL] } },
-      }),
+      createChatAgent(
+        { model: mockModel(), channels: { slack: { adapter, allowlist: [DANIEL] } } },
+        stores,
+      ),
     ).toThrow('chat channel "slack": its adapter reports platform "fake"');
   });
 });
@@ -774,8 +778,9 @@ describe("chat channel lifecycle", () => {
     ]);
   });
 
-  test("chat without channels is rejected", () => {
-    expect(() => createChatAgent({ model: mockModel(), channels: {} })).toThrow(
+  test("chat without channels is rejected", async () => {
+    const stores = await chatStores(new InMemoryStore());
+    expect(() => createChatAgent({ model: mockModel(), channels: {} }, stores)).toThrow(
       "chat needs at least one channel",
     );
   });

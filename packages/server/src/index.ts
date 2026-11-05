@@ -6,6 +6,7 @@ import { ORPCError, onError, onSuccess } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { createChatAgent } from "./chat";
 import type { ChatAgent, ChatOptions } from "./chat";
+import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
 import { allowedHosts } from "./hosts";
 import { router } from "./router";
@@ -128,7 +129,7 @@ export async function startServer({
   let chatAgent: ChatAgent | undefined;
   try {
     await storage.init();
-    chatAgent = chat ? createChatAgent(chat) : undefined;
+    chatAgent = chat ? createChatAgent(chat, await chatStores(storage)) : undefined;
     const mastra = new Mastra({
       storage,
       ...(logger === undefined ? {} : { logger }),
