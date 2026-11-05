@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IntakeLedger, intakeLedgerLayer } from "@hex/adapters";
 import { Effect } from "effect";
-import { RECEIVED, buildEml, pdf } from "./eml";
+import { RECEIVED, buildEml, bytes, pdf } from "./eml";
 import { fakeOpenAI, inputFiles } from "./fake-openai";
 import type { FakeOpenAI } from "./fake-openai";
 
@@ -106,7 +106,7 @@ describe("bun run intake", () => {
           contentType: "image/png",
           disposition: "inline",
           contentId: "logo@shop",
-          content: new Uint8Array(20_000),
+          content: bytes(20_000),
         },
       ],
     });

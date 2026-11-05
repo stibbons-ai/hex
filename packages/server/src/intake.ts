@@ -21,8 +21,9 @@ function describe({ messageId, status, filings }: IntakeResult, outboxDirectory:
   const count = filings.length === 1 ? "1 Document" : `${filings.length} Documents`;
   return [
     `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
-    ...filings.map(({ path, fellBack }) =>
-      fellBack ? `  ${path} (no Document date found; filed by received date)` : `  ${path}`,
+    ...filings.map(
+      ({ path, fellBack }) =>
+        `  ${path}${fellBack ? " (no Document date found; filed by received date)" : ""}`,
     ),
   ].join("\n");
 }
@@ -38,8 +39,10 @@ async function main(argv: readonly string[]): Promise<string> {
   const { category, model } = await loadIntakeConfig(configPath ? resolve(configPath) : undefined);
   const paths = dataPaths(process.env);
   const dateExtractor = dateExtractorLayer(model);
-  const result = await runIntake(intake, { paths, category, dateExtractor });
-  return describe(result, paths.outboxDirectory);
+  return describe(
+    await runIntake(intake, { paths, category, dateExtractor }),
+    paths.outboxDirectory,
+  );
 }
 
 try {

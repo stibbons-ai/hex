@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { createClient } from "@libsql/client";
 import { Effect, Exit } from "effect";
 import { TestClock } from "effect/testing";
 import { IntakeLedger, intakeLedgerLayer } from "../src";
+import { localDatabaseUrl } from "../src/storage";
 
 let directory: string;
 let databases = 0;
@@ -93,7 +93,7 @@ describe("IntakeLedger", () => {
   test("an entry recorded before Document dates were read still reads back, flag absent", async () => {
     const databasePath = freshDatabase();
     success(await withLedger(databasePath, (ledger) => ledger.find("<new@x>")));
-    const client = createClient({ url: pathToFileURL(databasePath).href });
+    const client = createClient({ url: await localDatabaseUrl(databasePath) });
     try {
       await client.execute({
         sql: "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",

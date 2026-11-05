@@ -39,12 +39,6 @@ const NO_DATE = { year: null, month: null, day: null };
  */
 type Script = (document: DocumentFile) => unknown;
 
-/** Answers by file name from `answers`, {@link NO_DATE} for any other Document. */
-const byName =
-  (answers: Record<string, unknown>): Script =>
-  ({ fileName }) =>
-    Object.hasOwn(answers, fileName) ? answers[fileName] : NO_DATE;
-
 /**
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
  * DateExtractor that answers by `script` and records every Document it was asked about.
@@ -167,7 +161,9 @@ describe("Intake workflow", () => {
   });
 
   test("a mixed Intake: one Document by its date, one by the received date", async () => {
-    const hex = freshHex(byName({ "dated.pdf": { year: 2025, month: 12, day: 31 } }));
+    const hex = freshHex(({ fileName }) =>
+      fileName === "dated.pdf" ? { year: 2025, month: 12, day: 31 } : NO_DATE,
+    );
     const result = await hex.process({
       messageId: "mixed-dates@shop.example",
       received,

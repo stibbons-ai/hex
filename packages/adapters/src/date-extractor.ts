@@ -40,9 +40,8 @@ export class DateExtractor extends Context.Service<
   DateExtractor,
   {
     /**
-     * The model's answer for `document`, undecoded (the step decodes it with
-     * {@link DocumentDateAnswer}): undefined when the model's output didn't match the schema.
-     * Fails only when the model call itself fails, never for an unusable answer.
+     * The model's answer for `document`, undecoded: undefined when the model's output didn't
+     * match the schema. Fails only when the model call itself fails, never for an unusable answer.
      */
     readonly extract: (document: DocumentFile) => Effect.Effect<unknown, DateExtractionError>;
   }

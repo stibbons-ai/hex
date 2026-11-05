@@ -39,23 +39,15 @@ export const IntakeResult = Schema.Struct({
 export type IntakeResult = typeof IntakeResult.Type;
 
 const Unprocessed = Schema.Struct({ messageId: Schema.String });
-const Documents = Schema.Struct({
-  /** The Documents among the Intake's attachments: their index and the name to file under. */
-  documents: Schema.Array(Schema.Struct({ index: Schema.Int, fileName: Schema.String })),
-});
+/** A Document among the Intake's attachments: its index and the name to file it under. */
+const DetectedDocument = Schema.Struct({ index: Schema.Int, fileName: Schema.String });
+const Documents = Schema.Struct({ documents: Schema.Array(DetectedDocument) });
+/** A Document date as the model answered it: whole numbers, not yet checked to be a real day. */
+const AnsweredDate = Schema.Struct({ year: Schema.Int, month: Schema.Int, day: Schema.Int });
 const Dated = Schema.Struct({
-  /**
-   * The Documents, each with the Document date the model answered, if it answered one: whole
-   * numbers, not yet checked to be a real day (Filing does that).
-   */
+  /** The Documents, each with the Document date the model answered, if it answered one. */
   documents: Schema.Array(
-    Schema.Struct({
-      index: Schema.Int,
-      fileName: Schema.String,
-      documentDate: Schema.optionalKey(
-        Schema.Struct({ year: Schema.Int, month: Schema.Int, day: Schema.Int }),
-      ),
-    }),
+    Schema.Struct({ ...DetectedDocument.fields, documentDate: Schema.optionalKey(AnsweredDate) }),
   ),
 });
 const Filed = Schema.Struct({ filings: Schema.Array(Filing) });
@@ -64,13 +56,12 @@ const Filed = Schema.Struct({ filings: Schema.Array(Filing) });
  * The Document date in a model's answer: present only when the answer decodes as
  * {@link DocumentDateAnswer} with no `null`. Anything else (no date found, malformed) is none.
  */
-function documentDateOf(answer: unknown) {
-  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(DocumentDateAnswer)(answer));
-  if (!decoded) return {};
-  const { year, month, day } = decoded;
-  return year === null || month === null || day === null
-    ? {}
-    : { documentDate: { year, month, day } };
+function documentDateOf(answer: unknown): { documentDate?: typeof AnsweredDate.Type } {
+  const decoded = Schema.decodeUnknownOption(DocumentDateAnswer)(answer);
+  if (Option.isNone(decoded)) return {};
+  const { year, month, day } = decoded.value;
+  if (year === null || month === null || day === null) return {};
+  return { documentDate: { year, month, day } };
 }
 
 type IntakeServices = Outbox | IntakeLedger | DateExtractor;
@@ -171,7 +162,7 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
           Effect.forEach(inputData.documents, (document) => {
             const attachment = attachments[document.index]!;
             const mediaType = documentMediaType(attachment);
-            // A type models don't take is filed by the received date, never sent.
+            // A type models don't take is never sent: it has no Document date.
             if (mediaType === undefined) return Effect.succeed(document);
             return extractor
               .extract({
