@@ -51,8 +51,11 @@ export function fakeSmtp(): FakeSmtp {
       .toString("utf8")
       .split("\0");
     logins.push({ user, password });
-    if (fake.refuseLogins) reply(socket, `535 5.7.8 authentication failed for ${encoded}`);
-    else reply(socket, "235 2.7.0 Authentication successful");
+    if (fake.refuseLogins) {
+      reply(socket, `535 5.7.8 authentication failed for ${encoded} (password ${password})`);
+    } else {
+      reply(socket, "235 2.7.0 Authentication successful");
+    }
   };
 
   function handle(socket: Socket<Session>, line: string) {

@@ -13,14 +13,14 @@ const USER = "hex@example.com";
 const PASSWORD = "smtp-secret-0123456789";
 const TO = "autobox@sevdesk.example";
 
-/** Sends one mail with one attachment through the fake, secured as `security` says. */
-function send(security: SmtpSecurity) {
+/** Sends one mail with one attachment through the fake (or `host`), secured as `security` says. */
+function send(security: SmtpSecurity, { password = PASSWORD, host = "127.0.0.1" } = {}) {
   const layer = smtpMailerLayer({
-    host: "127.0.0.1",
+    host,
     port: smtp.port,
     security,
     user: Redacted.make(USER),
-    password: Redacted.make(PASSWORD),
+    password: Redacted.make(password),
   });
   return Effect.runPromiseExit(
     Mailer.use((mailer) =>
@@ -60,20 +60,37 @@ describe("smtpMailerLayer", () => {
     expect(smtp.mails).toHaveLength(mails);
   });
 
-  test("a refused login names the stage, never the credentials the server echoed", async () => {
-    smtp.refuseLogins = true;
-    try {
-      const message = failure(await send("plain"));
-      expect(message).toContain(
-        `sending to ${TO} via 127.0.0.1:${smtp.port} failed (EAUTH at AUTH PLAIN)`,
-      );
-      expect(message).toContain("535 5.7.8 authentication failed for ***");
-      const encoded = Buffer.from(`\u0000${USER}\u0000${PASSWORD}`).toString("base64");
-      for (const secret of [PASSWORD, encoded, Buffer.from(PASSWORD).toString("base64")]) {
-        expect(message).not.toContain(secret);
+  test.each([
+    ["a long password", PASSWORD],
+    ["a short password", "pw1"],
+  ])(
+    "a refused login names the stage, never the credentials the server echoed (%s)",
+    async (_case, password) => {
+      smtp.refuseLogins = true;
+      try {
+        const message = failure(await send("plain", { password }));
+        expect(message).toContain(
+          `sending to ${TO} via 127.0.0.1:${smtp.port} failed (EAUTH at AUTH PLAIN)`,
+        );
+        expect(message).toContain("535 5.7.8 authentication failed for *** (password ***)");
+        const encoded = Buffer.from(`\u0000${USER}\u0000${password}`).toString("base64");
+        for (const secret of [password, encoded, Buffer.from(password).toString("base64")]) {
+          expect(message).not.toContain(secret);
+        }
+      } finally {
+        smtp.refuseLogins = false;
       }
-    } finally {
-      smtp.refuseLogins = false;
-    }
+    },
+  );
+
+  test("plain to a host other than this machine sends nothing and never connects", async () => {
+    const logins = smtp.logins.length;
+    // 0.0.0.0 reaches the fake on this machine, but isn't a loopback address hex accepts for
+    // plaintext: had hex connected, the fake would have recorded a login.
+    const message = failure(await send("plain", { host: "0.0.0.0" }));
+    expect(message).toContain(
+      `sending to ${TO} via 0.0.0.0:${smtp.port} refused: plaintext SMTP is only allowed for a loopback host`,
+    );
+    expect(smtp.logins).toHaveLength(logins);
   });
 });

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IntakeLedger, intakeLedgerLayer, readEml } from "@hex/adapters";
 import { Effect } from "effect";
-import { RECEIVED, buildEml, bytes, pdf } from "./eml";
+import { RECEIVED, buildEml, bytes, invoiceMail, pdf } from "./eml";
 import { fakeOpenAI, inputFiles } from "./fake-openai";
 import type { FakeOpenAI } from "./fake-openai";
 import { fakeSmtp } from "./fake-smtp";
@@ -306,7 +306,7 @@ describe("bun run intake", () => {
       );
       expect(run).toMatchObject({ code: 1, stdout: "" });
       expect(run.stderr).toContain(
-        'hex intake: the Intake workflow did not finish: reading the Document date of "a.pdf" with openai/gpt-5-mini failed (HTTP 401): Incorrect API key provided: OPENAI_API_KEY.',
+        'hex intake: the Intake workflow did not finish: filing: reading the Document date of "a.pdf" with openai/gpt-5-mini failed (HTTP 401): Incorrect API key provided: OPENAI_API_KEY.',
       );
       expect(run.stderr).not.toContain(API_KEY);
       // Exactly one model call: a refused key is never retried.
@@ -336,7 +336,7 @@ describe("bun run intake", () => {
     const run = await intake([eml], { HEX_DATA_DIR: dataDirectory, HEX_OUTBOX_DIR: outbox });
     expect(run).toMatchObject({ code: 1, stdout: "" });
     expect(run.stderr).toStartWith(
-      'hex intake: the Intake workflow did not finish: filing "a.pdf" into 2026-11/ER failed',
+      'hex intake: the Intake workflow did not finish: filing: filing "a.pdf" into 2026-11/ER failed',
     );
     expect(await ledgerEntry(dataDirectory, "blocked@shop.example")).toBeUndefined();
   });
@@ -378,28 +378,11 @@ describe("bun run intake", () => {
       HEX_SMTP_PASSWORD: SMTP_PASSWORD,
     });
 
-    /** An invoice and a delivery note, an inline logo and a tracking pixel. */
-    const invoiceMail = (messageId: string) => ({
-      messageId,
-      received: RECEIVED,
-      html: '<img src="cid:logo@shop">',
-      parts: [
+    const invoice = (messageId: string) =>
+      invoiceMail(messageId, RECEIVED, [
         pdf("Rechnung 4711.pdf", DATED_PDF),
-        {
-          contentType: "image/png",
-          disposition: "inline",
-          contentId: "logo@shop",
-          content: bytes(20_000),
-        },
         pdf("Lieferschein.pdf", UNDATED_PDF),
-        {
-          contentType: "image/gif",
-          disposition: "attachment",
-          fileName: "pixel.gif",
-          content: bytes(43),
-        },
-      ],
-    });
+      ]);
 
     /** A received mail as hex's own reader reads it: recipients, subject and attachments. */
     async function read({ to, raw }: ReceivedMail) {
@@ -431,7 +414,7 @@ describe("bun run intake", () => {
       const dataDirectory = join(directory, "forwarding");
       const outbox = join(directory, "forwarding-outbox");
       const config = await forwardingConfig("forwarding.json");
-      const eml = await writeMail("forward.eml", invoiceMail("forward@shop.example"));
+      const eml = await writeMail("forward.eml", invoice("forward@shop.example"));
       const env = {
         HEX_DATA_DIR: dataDirectory,
         HEX_OUTBOX_DIR: outbox,
@@ -491,7 +474,7 @@ describe("bun run intake", () => {
       const dataDirectory = join(directory, "forwarding-refused");
       const outbox = join(directory, "forwarding-refused-outbox");
       const config = await forwardingConfig("forwarding-refused.json");
-      const eml = await writeMail("refused.eml", invoiceMail("refused@shop.example"));
+      const eml = await writeMail("refused.eml", invoice("refused@shop.example"));
       const env = {
         HEX_DATA_DIR: dataDirectory,
         HEX_OUTBOX_DIR: outbox,
@@ -504,13 +487,22 @@ describe("bun run intake", () => {
       const failed = await intake([eml], env).finally(() => smtp.rejecting.delete(PAPERLESS));
       expect(failed.code).toBe(1);
       const refusal = `sending to ${PAPERLESS} via 127.0.0.1:${smtp.port} failed (EENVELOPE at RCPT TO)`;
-      expect(failed.stdout).toStartWith(
-        `  forwarded to sevdesk\n  forwarding to paperless failed: ${refusal}`,
+      // What was done although paperless failed: the Filings and SevDesk's Forwarding.
+      expect(failed.stdout).toBe(
+        [
+          `hex intake: refused@shop.example: filed 2 Documents into ${outbox}`,
+          "  2026-09/ER/Rechnung 4711.pdf",
+          "  2026-11/ER/Lieferschein.pdf (no usable Document date; filed by received date)",
+          "  forwarded to sevdesk",
+          "",
+        ].join("\n"),
       );
       expect(failed.stderr).toStartWith(
         `hex intake: the Intake workflow did not finish: forwarding to paperless: ${refusal}`,
       );
       expect(failed.stderr).toContain("550 5.1.1");
+      // The paperless failure is told once.
+      expect((failed.stdout + failed.stderr).split("forwarding to paperless")).toHaveLength(2);
       expect(failed.stdout + failed.stderr).not.toContain(SMTP_PASSWORD);
       expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([[SEVDESK]]);
       expect(await ledgerEntry(dataDirectory, "refused@shop.example")).toBeUndefined();
@@ -529,7 +521,7 @@ describe("bun run intake", () => {
     test("a target enabled without SMTP credentials fails before anything is filed, naming the variable", async () => {
       const dataDirectory = join(directory, "forwarding-no-password");
       const config = await forwardingConfig("forwarding-no-password.json");
-      const eml = await writeMail("no-password.eml", invoiceMail("no-password@shop.example"));
+      const eml = await writeMail("no-password.eml", invoice("no-password@shop.example"));
       const run = await intake([eml], {
         HEX_DATA_DIR: dataDirectory,
         HEX_CONFIG: config,

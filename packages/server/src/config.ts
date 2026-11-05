@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { isLoopbackHost } from "@hex/adapters";
 import type { SmtpSecurity, SmtpSettings } from "@hex/adapters";
 import { CATEGORIES, DEFAULT_CATEGORY } from "@hex/domain";
 import type { Category } from "@hex/domain";
@@ -133,11 +134,6 @@ const SmtpEnv = Config.all({
   password: Config.Redacted("HEX_SMTP_PASSWORD"),
 });
 
-/** Whether `host` is this machine: `localhost`, an IPv4 loopback address or `::1`. */
-function isLoopback(host: string): boolean {
-  return /^(?:localhost|127(?:\.\d{1,3}){3}|::1|\[::1\])$/i.test(host);
-}
-
 /**
  * The SMTP settings from `env`: `HEX_SMTP_HOST`, `HEX_SMTP_PORT` (465 when unset),
  * `HEX_SMTP_SECURITY` (`tls` on port 465, else `starttls`, when unset; `plain` only for a
@@ -162,7 +158,7 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
   const security: SmtpSecurity = Option.getOrElse(chosen, () =>
     settings.port === 465 ? "tls" : "starttls",
   );
-  if (security === "plain" && !isLoopback(settings.host)) {
+  if (security === "plain" && !isLoopbackHost(settings.host)) {
     fail(
       `HEX_SMTP_SECURITY=plain is only allowed for a loopback host (localhost, 127.x.x.x, ::1); use tls or starttls for ${settings.host}`,
     );

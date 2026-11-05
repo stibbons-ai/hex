@@ -7,6 +7,7 @@ import {
   DateExtractionError,
   DateExtractor,
   IntakeLedger,
+  LedgerError,
   intakeLedgerLayer,
   readEml,
 } from "@hex/adapters";
@@ -16,7 +17,7 @@ import { Effect, Layer } from "effect";
 import { loadForwardingConfig } from "../src/config";
 import { IntakeRunError, runIntake } from "../src/intake-workflow";
 import type { IntakeForwarding } from "../src/intake-workflow";
-import { buildEml, bytes, jpegBytes, pdf, pdfBytes } from "./eml";
+import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes } from "./eml";
 import type { Mail } from "./eml";
 import { recordingMailer } from "./recording-mailer";
 
@@ -46,7 +47,9 @@ type Script = (document: DocumentFile) => unknown;
 /**
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
  * DateExtractor that answers by `script` and records every Document it was asked about, and a
- * recording Mailer forwarding as `forwarding` says (off when absent).
+ * recording Mailer forwarding as `forwarding` says (off when absent). The real ledger records
+ * Forwardings, except that the next `failing.forwardingRecords` attempts fail, as a ledger that
+ * can't write would.
  */
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
@@ -63,13 +66,38 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
       }),
   });
   const mailer = recordingMailer();
+  const failing = { forwardingRecords: 0 };
+  const ledger = Layer.effect(
+    IntakeLedger,
+    Effect.map(IntakeLedger, (real) => ({
+      ...real,
+      recordForwarding: (messageId: string, target: string) =>
+        Effect.suspend(() => {
+          if (failing.forwardingRecords <= 0) return real.recordForwarding(messageId, target);
+          failing.forwardingRecords--;
+          return Effect.fail(new LedgerError({ message: "Intake ledger: disk I/O error" }));
+        }),
+    })),
+  ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
+  /** The Forwarding the next run uses; a test may change it between runs. */
+  const config = { forwarding };
   /** Runs the workflow once on `intake`, as the dev command does, and returns its result. */
   const run = (intake: Intake) =>
-    runIntake(intake, { paths, category: "ER", dateExtractor, mailer: mailer.layer, forwarding });
+    runIntake(intake, {
+      paths,
+      category: "ER",
+      dateExtractor,
+      mailer: mailer.layer,
+      ledger,
+      forwarding: config.forwarding,
+    });
   return {
     ...paths,
     asked,
     mailer,
+    config,
+    /** How many Forwarding records fail next (`Infinity`: every one). */
+    failing,
     run,
     /** Runs the workflow once on `mail` read as an `.eml`. */
     async process(mail: Mail) {
@@ -300,7 +328,7 @@ describe("Intake workflow", () => {
       parts: [pdf("first.pdf"), pdf("second.pdf")],
     };
     await expect(hex.process(mail)).rejects.toThrow(
-      'the Intake workflow did not finish: reading the Document date of "second.pdf" with openai/x failed: 429',
+      'the Intake workflow did not finish: filing: reading the Document date of "second.pdf" with openai/x failed: 429',
     );
     expect(await hex.outbox()).toEqual({});
     expect(await hex.ledger("flaky@shop.example")).toBeUndefined();
@@ -543,28 +571,9 @@ describe("Intake workflow", () => {
     const CREDIT_NOTE = pdfBytes(700, "c");
     const dated = () => ({ year: 2026, month: 10, day: 1 });
 
-    /** Two PDF Documents, an inline `cid:` logo and a tiny image, which are not. */
-    const invoiceMail = (messageId: string): Mail => ({
-      messageId,
-      received,
-      html: '<img src="cid:logo@shop">',
-      parts: [
-        pdf("Rechnung 4711.pdf", INVOICE),
-        {
-          contentType: "image/png",
-          disposition: "inline",
-          contentId: "logo@shop",
-          content: bytes(MIN_IMAGE_DOCUMENT_BYTES),
-        },
-        {
-          contentType: "image/gif",
-          disposition: "attachment",
-          fileName: "pixel.gif",
-          content: bytes(43),
-        },
-        pdf("Gutschrift.pdf", CREDIT_NOTE),
-      ],
-    });
+    /** Two PDF Documents (attachments 0 and 3), an inline `cid:` logo and a tiny image. */
+    const invoice = (messageId: string, first = pdf("Rechnung 4711.pdf", INVOICE)) =>
+      invoiceMail(messageId, received, [first, pdf("Gutschrift.pdf", CREDIT_NOTE)]);
     const outbox = {
       "2026-10/ER/Rechnung 4711.pdf": new TextDecoder().decode(INVOICE),
       "2026-10/ER/Gutschrift.pdf": new TextDecoder().decode(CREDIT_NOTE),
@@ -606,7 +615,7 @@ describe("Intake workflow", () => {
 
     test("happy path: each target gets one mail with exactly the Documents; both recorded", async () => {
       const hex = freshHex(dated, both);
-      const result = await hex.process(invoiceMail("forward@shop.example"));
+      const result = await hex.process(invoice("forward@shop.example"));
       expect(result).toEqual({
         messageId: "forward@shop.example",
         status: "processed",
@@ -630,7 +639,7 @@ describe("Intake workflow", () => {
     test("a failed target fails the run naming it; the retry sends only to it, files nothing again", async () => {
       const hex = freshHex(dated, both);
       hex.mailer.failNext(PAPERLESS);
-      const mail = invoiceMail("partial@shop.example");
+      const mail = invoice("partial@shop.example");
       const failed = await hex.process(mail).catch((error: unknown) => error);
       expect(failed).toBeInstanceOf(IntakeRunError);
       expect((failed as IntakeRunError).message).toBe(
@@ -675,9 +684,9 @@ describe("Intake workflow", () => {
       // A regular file where the Outbox should be: every Filing fails.
       await mkdir(join(hex.outboxDirectory, ".."), { recursive: true });
       await writeFile(hex.outboxDirectory, "not a folder");
-      const mail = invoiceMail("unfiled@shop.example");
+      const mail = invoice("unfiled@shop.example");
       await expect(hex.process(mail)).rejects.toThrow(
-        'the Intake workflow did not finish: filing "Rechnung 4711.pdf" into 2026-10/ER failed',
+        'the Intake workflow did not finish: filing: filing "Rechnung 4711.pdf" into 2026-10/ER failed',
       );
       expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK, PAPERLESS]);
       expect(await hex.ledger("unfiled@shop.example")).toBeUndefined();
@@ -704,9 +713,9 @@ describe("Intake workflow", () => {
         both,
       );
       hex.mailer.failNext(SEVDESK);
-      const mail = invoiceMail("both-fail@shop.example");
+      const mail = invoice("both-fail@shop.example");
       await expect(hex.process(mail)).rejects.toThrow(
-        `the Intake workflow did not finish: forwarding to sevdesk: sending to ${SEVDESK} failed (EENVELOPE at RCPT TO): 451 try again later; reading the Document date failed: 429`,
+        `the Intake workflow did not finish: forwarding to sevdesk: sending to ${SEVDESK} failed (EENVELOPE at RCPT TO): 451 try again later; filing: reading the Document date failed: 429`,
       );
       expect(hex.mailer.sent.map(({ to }) => to)).toEqual([PAPERLESS]);
       expect(await hex.outbox()).toEqual({});
@@ -744,7 +753,7 @@ describe("Intake workflow", () => {
         HEX_SMTP_PASSWORD: "not-used-here",
       });
       const hex = freshHex(dated, forwarding);
-      const result = await hex.process(invoiceMail("disabled@shop.example"));
+      const result = await hex.process(invoice("disabled@shop.example"));
       expect(result.forwardings).toEqual([{ target: "sevdesk", status: "forwarded" }]);
       expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK]);
       expect(
@@ -754,7 +763,7 @@ describe("Intake workflow", () => {
 
     test("without Forwarding configured nothing is sent", async () => {
       const hex = freshHex(dated);
-      const result = await hex.process(invoiceMail("off@shop.example"));
+      const result = await hex.process(invoice("off@shop.example"));
       expect(result).toMatchObject({ status: "processed", filings, forwardings: [] });
       expect(hex.mailer.sent).toEqual([]);
     });
@@ -786,7 +795,7 @@ describe("Intake workflow", () => {
 
     test("an already processed Intake is not forwarded again; the result names the earlier Forwardings", async () => {
       const hex = freshHex(dated, both);
-      const mail = invoiceMail("forwarded-once@shop.example");
+      const mail = invoice("forwarded-once@shop.example");
       await hex.process(mail);
       const again = await hex.process(mail);
       expect(again).toEqual({
@@ -819,6 +828,138 @@ describe("Intake workflow", () => {
         "Documents forwarded by hex",
         "Rechnung Bcc: x@evil.example",
       ]);
+    });
+
+    test("a send the ledger can't record fails the run as sent but unrecorded, never as nothing sent", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      hex.failing.forwardingRecords = Infinity;
+      const failed = await hex.process(invoice("unrecorded@shop.example")).catch((e: unknown) => e);
+      expect(failed).toBeInstanceOf(IntakeRunError);
+      expect((failed as IntakeRunError).message).toBe(
+        "the Intake workflow did not finish: forwarding to sevdesk: sent, but recording it failed (Intake ledger: disk I/O error); running this Intake again sends it again",
+      );
+      expect((failed as IntakeRunError).forwardings).toEqual([
+        { target: "sevdesk", status: "sent-unrecorded", reason: "Intake ledger: disk I/O error" },
+      ]);
+      // Sent once (the record was retried, never the send); the Intake isn't processed.
+      expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK]);
+      expect(await hex.ledger("unrecorded@shop.example")).toBeUndefined();
+      expect((await hex.branches("unrecorded@shop.example")).forwardings).toEqual([]);
+    });
+
+    test("a Forwarding record that fails once is retried: recorded, the run succeeds, one send", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      hex.failing.forwardingRecords = 1;
+      const result = await hex.process(invoice("record-retried@shop.example"));
+      expect(result).toMatchObject({
+        status: "processed",
+        forwardings: [{ target: "sevdesk", status: "forwarded" }],
+      });
+      expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK]);
+      expect(
+        (await hex.ledger("record-retried@shop.example"))?.forwardings.map(({ target }) => target),
+      ).toEqual(["sevdesk"]);
+    });
+
+    test("a doubly bracketed Message-ID is one Intake: the second run is already processed", async () => {
+      const hex = freshHex(dated, both);
+      const intake = {
+        messageId: "<<double@shop.example>>",
+        receivedAt: "2026-11-02T07:15:00.000Z",
+        cidReferences: [],
+        attachments: [apiPdf],
+      };
+      expect(await hex.run(intake)).toMatchObject({ status: "processed" });
+      const second = await hex.run(intake);
+      expect(second).toMatchObject({
+        status: "already-processed",
+        forwardings: [
+          { target: "paperless", status: "forwarded-earlier" },
+          { target: "sevdesk", status: "forwarded-earlier" },
+        ],
+      });
+      expect(hex.mailer.sent).toHaveLength(2);
+      expect(hex.asked).toHaveLength(1);
+      expect(Object.keys(await hex.outbox())).toEqual(["2026-10/ER/api.pdf"]);
+    });
+
+    test("the result names an earlier run's Forwarding to a target disabled since", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      await mkdir(join(hex.outboxDirectory, ".."), { recursive: true });
+      await writeFile(hex.outboxDirectory, "not a folder");
+      const mail = invoice("disabled-since@shop.example");
+      await expect(hex.process(mail)).rejects.toThrow("filing: ");
+      await rm(hex.outboxDirectory);
+      // SevDesk is off now: Forwarding has no target left.
+      hex.config.forwarding = undefined;
+      expect(await hex.process(mail)).toMatchObject({
+        status: "processed",
+        forwardings: [{ target: "sevdesk", status: "forwarded-earlier" }],
+      });
+      expect(hex.mailer.sent).toHaveLength(1);
+    });
+
+    test("a partly filed Intake: the retry reads and files only the Document still unfiled", async () => {
+      const hex = freshHex(
+        ({ fileName }) =>
+          fileName === "Gutschrift.pdf"
+            ? { year: 2026, month: 9, day: 1 }
+            : { year: 2026, month: 10, day: 1 },
+        both,
+      );
+      // Only the credit note's month is blocked: a regular file where its folder would be.
+      await mkdir(hex.outboxDirectory, { recursive: true });
+      await writeFile(join(hex.outboxDirectory, "2026-09"), "not a folder");
+      const mail = invoice("partly@shop.example");
+      await expect(hex.process(mail)).rejects.toThrow(
+        'filing: filing "Gutschrift.pdf" into 2026-09/ER failed',
+      );
+      expect((await hex.branches("partly@shop.example")).filings).toEqual([
+        { index: 0, path: "2026-10/ER/Rechnung 4711.pdf", fellBack: false },
+      ]);
+      expect(hex.asked.map(({ fileName }) => fileName)).toEqual([
+        "Rechnung 4711.pdf",
+        "Gutschrift.pdf",
+      ]);
+
+      await rm(join(hex.outboxDirectory, "2026-09"));
+      const retried = await hex.process(mail);
+      const allFilings = [
+        { index: 0, path: "2026-10/ER/Rechnung 4711.pdf", fellBack: false },
+        { index: 3, path: "2026-09/ER/Gutschrift.pdf", fellBack: false },
+      ];
+      expect(retried).toMatchObject({ status: "processed", filings: allFilings });
+      // The model was asked about the credit note only; nothing was filed twice.
+      expect(hex.asked.map(({ fileName }) => fileName)).toEqual([
+        "Rechnung 4711.pdf",
+        "Gutschrift.pdf",
+        "Gutschrift.pdf",
+      ]);
+      expect(Object.keys(await hex.outbox()).sort()).toEqual([
+        "2026-09/ER/Gutschrift.pdf",
+        "2026-10/ER/Rechnung 4711.pdf",
+      ]);
+      expect(await hex.ledger("partly@shop.example")).toMatchObject({
+        documentCount: 2,
+        filings: allFilings,
+      });
+    });
+
+    test("a PDF declared application/octet-stream is forwarded as application/pdf, bytes unchanged", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      await hex.process(
+        invoice("octet-forward@shop.example", {
+          contentType: "application/octet-stream",
+          disposition: "attachment",
+          fileName: "Scan.pdf",
+          content: INVOICE,
+        }),
+      );
+      expect(hex.mailer.sent.map(delivered)[0]?.attachments[0]).toEqual({
+        fileName: "Scan.pdf",
+        contentType: "application/pdf",
+        content: new TextDecoder().decode(INVOICE),
+      });
     });
   });
 });

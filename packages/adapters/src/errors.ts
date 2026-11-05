@@ -4,6 +4,20 @@ export function messageOf(cause: unknown): string {
 }
 
 /**
+ * `message` with each pair's secret replaced by its replacement, in the order given; empty
+ * secrets are skipped.
+ */
+export function redact(
+  message: string,
+  replacements: readonly (readonly [secret: string, replacement: string])[],
+): string {
+  return replacements.reduce(
+    (text, [secret, replacement]) => (secret ? text.replaceAll(secret, replacement) : text),
+    message,
+  );
+}
+
+/**
  * How much of a provider's or server's error message an error keeps: some quote the rejected
  * request, a Document's content included, and the workflow persists its failure.
  */

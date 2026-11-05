@@ -5,7 +5,7 @@ import type { MastraModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { StreamErrorRetryProcessor } from "@mastra/core/processors";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
-import { excerpt, messageOf } from "./errors";
+import { excerpt, messageOf, redact } from "./errors";
 import { toMastraSchema } from "./schema";
 
 /**
@@ -89,10 +89,11 @@ function modelName(model: MastraModelConfig): string {
  * names (`AWS_SECRET_ACCESS_KEY`, `*_TOKEN`) are not scrubbed.
  */
 function withoutApiKeys(message: string): string {
-  return Object.entries(process.env).reduce(
-    (text, [name, value]) =>
-      name.endsWith("_API_KEY") && value && value.length >= 8 ? text.replaceAll(value, name) : text,
+  return redact(
     message,
+    Object.entries(process.env).flatMap(([name, value]) =>
+      name.endsWith("_API_KEY") && value && value.length >= 8 ? [[value, name] as const] : [],
+    ),
   );
 }
 

@@ -4,49 +4,69 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { dateExtractorLayer, messageOf, readEml, smtpMailerLayer } from "@hex/adapters";
+import { normalizeMessageId } from "@hex/domain";
 import { Effect } from "effect";
 import { loadForwardingConfig, loadIntakeConfig } from "./config";
 import { IntakeRunError, runIntake } from "./intake-workflow";
-import type { ForwardingAttempt, IntakeResult } from "./intake-workflow";
+import type { IntakeResult } from "./intake-workflow";
 import { dataPaths } from "./paths";
 
-/** One target's Forwarding as Daniel reads it. */
-function describeForwarding(attempt: ForwardingAttempt): string {
-  switch (attempt.status) {
-    case "forwarded":
-      return `  forwarded to ${attempt.target}`;
-    case "forwarded-earlier":
-      return `  already forwarded to ${attempt.target} earlier`;
-    case "failed":
-      return `  forwarding to ${attempt.target} failed: ${attempt.reason}`;
-  }
+/**
+ * The Filings as Daniel reads them: where each Document went, marking those filed by the
+ * received date because no Document date was found.
+ */
+function describeFilings(
+  messageId: string,
+  filings: readonly { readonly path: string; readonly fellBack?: boolean }[],
+  outboxDirectory: string,
+): string[] {
+  const count = filings.length === 1 ? "1 Document" : `${filings.length} Documents`;
+  return [
+    `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
+    ...filings.map(
+      ({ path, fellBack }) =>
+        `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
+    ),
+  ];
 }
 
-/**
- * The outcome as Daniel reads it: where each Document went, marking those filed by the received
- * date because no Document date was found, or why nothing was filed; then each target's
- * Forwarding.
- */
+/** A target's Forwarding that succeeded, by this run or an earlier one. */
+const describeForwarding = ({ target, status }: IntakeResult["forwardings"][number]) =>
+  status === "forwarded" ? `  forwarded to ${target}` : `  already forwarded to ${target} earlier`;
+
+/** The outcome as Daniel reads it: the Filings, or why nothing was filed; then each Forwarding. */
 function describe(
   { messageId, status, filings, forwardings }: IntakeResult,
   outboxDirectory: string,
 ): string {
-  const lines: string[] = [];
+  let filed: string[];
   if (status === "already-processed") {
-    lines.push(`hex intake: ${messageId} was already processed; nothing filed`);
+    filed = [`hex intake: ${messageId} was already processed; nothing filed`];
   } else if (filings.length === 0) {
-    lines.push(`hex intake: ${messageId} has no Documents; nothing filed`);
+    filed = [`hex intake: ${messageId} has no Documents; nothing filed`];
   } else {
-    const count = filings.length === 1 ? "1 Document" : `${filings.length} Documents`;
-    lines.push(
-      `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
-      ...filings.map(
-        ({ path, fellBack }) =>
-          `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
-      ),
-    );
+    filed = describeFilings(messageId, filings, outboxDirectory);
   }
-  return [...lines, ...forwardings.map(describeForwarding)].join("\n");
+  return [...filed, ...forwardings.map(describeForwarding)].join("\n");
+}
+
+/**
+ * What a failed run did nonetheless: this run's Filings and the targets that have the Documents.
+ * Each failed branch is left to the error, which names it.
+ */
+function describeFailedRun(
+  messageId: string,
+  { filings, forwardings }: IntakeRunError,
+  outboxDirectory: string,
+): string[] {
+  return [
+    ...(filings.length === 0 ? [] : describeFilings(messageId, filings, outboxDirectory)),
+    ...forwardings.flatMap((attempt) =>
+      attempt.status === "forwarded" || attempt.status === "forwarded-earlier"
+        ? [describeForwarding(attempt)]
+        : [],
+    ),
+  ];
 }
 
 async function main(argv: readonly string[]): Promise<string> {
@@ -66,6 +86,16 @@ async function main(argv: readonly string[]): Promise<string> {
     dateExtractor: dateExtractorLayer(model),
     mailer: forwarding && smtpMailerLayer(forwarding.smtp),
     forwarding,
+  }).catch((error: unknown) => {
+    if (error instanceof IntakeRunError) {
+      const done = describeFailedRun(
+        normalizeMessageId(intake.messageId),
+        error,
+        paths.outboxDirectory,
+      );
+      if (done.length > 0) console.log(done.join("\n"));
+    }
+    throw error;
   });
   return describe(result, paths.outboxDirectory);
 }
@@ -73,10 +103,6 @@ async function main(argv: readonly string[]): Promise<string> {
 try {
   console.log(await main(process.argv.slice(2)));
 } catch (error) {
-  // The targets that got the Documents although another branch failed, and those that failed.
-  if (error instanceof IntakeRunError && error.forwardings.length > 0) {
-    console.log(error.forwardings.map(describeForwarding).join("\n"));
-  }
   console.error(`hex intake: ${messageOf(error)}`);
   process.exitCode = 1;
 }

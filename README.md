@@ -182,11 +182,12 @@ bun run intake path/to/mail.eml
 runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
 Documents it filed (paths relative to the Outbox; a Document filed by its received date is
 marked `(no usable Document date; filed by received date)`), that the Intake has no Documents, or
-that it was already processed; then each target's Forwarding (`forwarded to sevdesk`,
-`already forwarded to sevdesk earlier`, or `forwarding to paperless failed: <reason>`). It exits
-with code 1 and a message on a file it can't read or that is no mail, an Intake without a
-Message-ID or without a usable received date, a config it can't use (including SMTP settings
-missing while a target is enabled), or a failed run, naming each failed branch. Run it from the
+that it was already processed; then each target that has the Documents (`forwarded to sevdesk`,
+`already forwarded to sevdesk earlier`). It exits with code 1 and a message on a file it can't
+read or that is no mail, an Intake without a Message-ID or without a usable received date, a
+config it can't use (including SMTP settings missing while a target is enabled), or a failed run.
+A failed run still prints this run's Filings and the targets that have the Documents, and the
+message names each failed branch once (`forwarding to paperless: …`, `filing: …`). Run it from the
 repository root. The same workflow is registered with the server as `intake`
 (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger at startup
 and fails to start when it can't, or when a Forwarding target is enabled without usable SMTP
@@ -205,18 +206,22 @@ The workflow, in order:
    one non-Document attachment, never unpacked: the Documents inside it are not filed. An
    unreferenced `inline` image or PDF counts, since Apple Mail sends scans that way.
 3. **Forwarding** (`packages/adapters/src/mailer.ts`): to each enabled target, one mail by SMTP
-   carrying all of the Intake's Documents as attachments, bytes unchanged, each under its file
-   name as filed (see step 5) and the MIME type the sender gave it; nothing else of the mail
-   (no body, no inline decoration). Its subject is the original subject (control characters
-   replaced by spaces), or `Documents forwarded by hex` when there was none; its plain-text body
-   names the original Message-ID and sender. Targets go one after another, in the config's
-   order. An Intake without Documents forwards nothing. Each Forwarding is recorded in the
-   ledger right after the server accepted the mail; a target recorded for this Intake is skipped
-   and never sent to again. A refused or failed send (connection, TLS, login, a rejected
-   recipient) fails that target's branch only; the error names the target address, the server
-   and the SMTP stage (e.g. `EENVELOPE at RCPT TO`) and keeps at most 300 characters of the
-   server's reply, never the credentials. A send that reached the server but whose record failed
-   (the ledger unwritable) is sent again on the next run.
+   carrying all of the Intake's Documents as attachments, bytes unchanged, each under its
+   detected file name (Filing may add a collision suffix such as ` (1)` to its own copy) and the
+   type its content shows when hex recognises it (PDF, JPEG, PNG, GIF, WebP: a PDF declared
+   `application/octet-stream` goes as `application/pdf`), else the type the sender gave it;
+   nothing else of the mail (no body, no inline decoration). Its subject is the original subject
+   (control characters replaced by spaces), or `Documents forwarded by hex` when there was none;
+   its plain-text body names the original Message-ID and sender. Targets go one after another, in
+   the config's order. An Intake without Documents forwards nothing. Each Forwarding is recorded
+   in the ledger right after the server accepted the mail (tried 3 times, 100 ms then 200 ms
+   apart, when the ledger fails); a target recorded for this Intake is skipped. A refused or
+   failed send (connection, TLS, login, a rejected recipient) fails that target's branch only;
+   the error names the target address, the server and the SMTP stage (e.g.
+   `EENVELOPE at RCPT TO`) and keeps at most 300 characters of the server's reply, never the
+   credentials. A send the server accepted but the ledger could not record fails the branch as
+   `sent, but recording it failed …; running this Intake again sends it again`: that target does
+   get the Intake a second time on the next run.
 4. **Document dates** (`packages/adapters/src/date-extractor.ts`): a model reads each
    Document's Document date from the Document itself, handed over natively through Mastra's
    model router (PDFs as `application/pdf` file parts, JPEG, PNG, GIF and WebP images as image
@@ -268,11 +273,14 @@ The workflow, in order:
    Filings, also when it had no Documents.
 
 **Branches and retries.** Forwarding to each target and Filing (steps 4 and 5) are branches:
-every run attempts each of them, even when another failed. When any failed, the run fails,
-naming each failed branch, and the Intake is not recorded as processed. Running the Intake again
-(`bun run intake` on the same `.eml`, or `workflows.start` with the same Intake) repeats only
-the branches the ledger has no record of: a target that already got the Intake is not sent it
-again, and a Document already filed is neither read by the model again nor filed again.
+every run attempts each of them, even when another failed, unless the ledger can't be read
+(then the run fails at once; in the Forwarding step, before anything is sent). When any branch
+failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
+Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
+same Intake) repeats only the branches the ledger has a record of: a target recorded as having
+the Intake is not sent it again, and a Document recorded as filed is neither read by the model
+again nor filed again. A branch done but not recorded (the ledger failing right after) is done
+again: a send as described in step 3, a Filing as a second copy `name (1).pdf`.
 
 | Setting                        | Meaning                                                                                                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -311,8 +319,10 @@ bare (`local@domain`, no display name, one per target). A disabled target sends 
 records nothing; with no target enabled (or no `forwarding` section) Forwarding is off and no
 SMTP setting is needed. Plaintext SMTP (`HEX_SMTP_SECURITY=plain`) is refused unless the host is
 `localhost`, a `127.x.x.x` address or `::1`, so the credentials never cross a network
-unencrypted. The SMTP settings are read as Effect `Config` from the environment; the
-development shell can export them like the model keys (`secretspec.toml`).
+unencrypted; the SMTP Mailer itself refuses it too, without connecting. The SMTP settings are
+read as Effect `Config` from the environment: the login (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) is
+declared in `secretspec.toml`, so the development shell exports it like the model keys; set
+`HEX_SMTP_HOST`, `HEX_SMTP_PORT` and `HEX_SMTP_SECURITY` yourself.
 
 The development shell exports the API keys (see
 [Development shell and model keys](#development-shell-and-model-keys)). hex doesn't check at
