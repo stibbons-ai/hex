@@ -198,14 +198,17 @@ const ConfigFile = Schema.Struct({
   ),
 });
 
+/** Throws the config error for `path`: the file, then the problem. */
+function configError(path: string, problem: string, cause?: unknown): never {
+  throw new Error(`hex config ${path}: ${problem}`, cause === undefined ? {} : { cause });
+}
+
 /**
  * Reads and decodes the hex config file (`HEX_CONFIG`). Throws an error naming the file and the
  * problem on an unreadable file, malformed JSON or a shape mismatch.
  */
 async function readConfigFile(path: string): Promise<typeof ConfigFile.Type> {
-  const fail = (problem: string, cause: unknown): never => {
-    throw new Error(`hex config ${path}: ${problem}`, { cause });
-  };
+  const fail = (problem: string, cause?: unknown) => configError(path, problem, cause);
   const text = await readFile(path, "utf8").catch((error: unknown) =>
     fail(`cannot read the file (${(error as Error).message})`, error),
   );
@@ -224,9 +227,7 @@ async function readConfigFile(path: string): Promise<typeof ConfigFile.Type> {
  * malformed JSON, a shape mismatch, an unknown adapter, or a missing or malformed secret.
  */
 export async function loadChatConfig(path: string, env: Env): Promise<ChatOptions | undefined> {
-  const fail = (problem: string, cause?: unknown): never => {
-    throw new Error(`hex config ${path}: ${problem}`, cause === undefined ? {} : { cause });
-  };
+  const fail = (problem: string, cause?: unknown) => configError(path, problem, cause);
   const { chat } = await readConfigFile(path);
   const entries = Object.entries(chat.channels);
   if (entries.length === 0) return undefined;

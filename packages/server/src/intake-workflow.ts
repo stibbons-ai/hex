@@ -3,22 +3,19 @@ import {
   Intake,
   IntakeLedger,
   Outbox,
+  createLocalStore,
   intakeLedgerLayer,
   outboxLayer,
   toMastraSchema,
 } from "@hex/adapters";
 import type { LedgerError } from "@hex/adapters";
-import {
-  FILING_TIME_ZONE,
-  calendarDateIn,
-  isDocument,
-  normalizeContentId,
-  planFiling,
-  safeFileName,
-} from "@hex/domain";
+import { FILING_TIME_ZONE, calendarDateIn, detectDocuments, planFiling } from "@hex/domain";
 import type { Category } from "@hex/domain";
+import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { closeInOrder } from "./close";
+import type { DataPaths } from "./paths";
 
 export const INTAKE_WORKFLOW_ID = "intake";
 
@@ -34,22 +31,21 @@ export type IntakeResult = typeof IntakeResult.Type;
 
 const Unprocessed = Schema.Struct({ messageId: Schema.String });
 const Documents = Schema.Struct({
-  /** The Documents among the Intake's attachments: their position and the name to file under. */
-  documents: Schema.Array(Schema.Struct({ attachment: Schema.Int, fileName: Schema.String })),
+  /** The Documents among the Intake's attachments: their index and the name to file under. */
+  documents: Schema.Array(Schema.Struct({ index: Schema.Int, fileName: Schema.String })),
 });
 const Filed = Schema.Struct({ filings: Schema.Array(Filing) });
 
+type IntakeServices = Outbox | IntakeLedger;
+
 /** The services the workflow's steps run on, in one shared runtime (ADR 0002). */
-export type IntakeRuntime = ManagedRuntime.ManagedRuntime<Outbox | IntakeLedger, LedgerError>;
+export type IntakeRuntime = ManagedRuntime.ManagedRuntime<IntakeServices, LedgerError>;
 
 /**
  * The runtime on the real Outbox and ledger. Built on first use; `dispose()` closes the ledger's
  * connection.
  */
-export function createIntakeRuntime(paths: {
-  databasePath: string;
-  outboxDirectory: string;
-}): IntakeRuntime {
+export function createIntakeRuntime(paths: DataPaths): IntakeRuntime {
   return ManagedRuntime.make(
     Layer.mergeAll(outboxLayer(paths.outboxDirectory), intakeLedgerLayer(paths.databasePath)),
   );
@@ -68,9 +64,10 @@ export interface IntakeWorkflowOptions {
  * without Documents is recorded too, with no Filings. Each step decodes its own output.
  */
 export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOptions) {
+  /** Runs `program` on the services, then decodes its result as the step's output. */
   const run = <A, I>(
     schema: Schema.Codec<A, I>,
-    program: Effect.Effect<unknown, unknown, Outbox | IntakeLedger>,
+    program: Effect.Effect<unknown, unknown, IntakeServices>,
   ) => runtime.runPromise(program.pipe(Effect.flatMap(Schema.decodeUnknownEffect(schema))));
 
   const checkLedger = createStep({
@@ -78,9 +75,10 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     inputSchema: toMastraSchema(Intake),
     outputSchema: toMastraSchema(Unprocessed),
     execute: async ({ inputData, bail }) => {
+      const { messageId } = inputData;
       const earlier = await run(
         Schema.UndefinedOr(IntakeResult),
-        IntakeLedger.use((ledger) => ledger.find(inputData.messageId)).pipe(
+        IntakeLedger.use((ledger) => ledger.find(messageId)).pipe(
           Effect.map(
             (entry) =>
               entry && {
@@ -92,47 +90,36 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
         ),
       );
       if (earlier) return bail<IntakeResult>(earlier);
-      return run(Unprocessed, Effect.succeed({ messageId: inputData.messageId }));
+      return Schema.decodeUnknownPromise(Unprocessed)({ messageId });
     },
   });
 
-  const detectDocuments = createStep({
+  const detect = createStep({
     id: "detect-documents",
     inputSchema: toMastraSchema(Unprocessed),
     outputSchema: toMastraSchema(Documents),
     execute: ({ getInitData }) => {
-      const intake = getInitData<Intake>();
-      const references = new Set(intake.cidReferences);
-      const documents = intake.attachments.flatMap((attachment, index) => {
-        const referencedByCid =
-          attachment.contentId !== undefined &&
-          references.has(normalizeContentId(attachment.contentId));
-        if (!isDocument({ ...attachment, referencedByCid })) return [];
-        const fileName = safeFileName(attachment.fileName, attachment.mimeType, index + 1);
-        return [{ attachment: index, fileName }];
+      const { attachments, cidReferences } = getInitData<Intake>();
+      return Schema.decodeUnknownPromise(Documents)({
+        documents: detectDocuments(attachments, cidReferences),
       });
-      return run(Documents, Effect.succeed({ documents }));
     },
   });
 
-  const fileDocuments = createStep({
+  const file = createStep({
     id: "file-documents",
     inputSchema: toMastraSchema(Documents),
     outputSchema: toMastraSchema(Filed),
     execute: ({ inputData, getInitData }) => {
-      const intake = getInitData<Intake>();
-      const received = calendarDateIn(new Date(intake.receivedAt), FILING_TIME_ZONE);
+      const { attachments, receivedAt } = getInitData<Intake>();
+      const received = calendarDateIn(new Date(receivedAt), FILING_TIME_ZONE);
       // No Document date yet (#7): every Document falls back to the received date.
       const { folder } = planFiling(undefined, received, category);
       return run(
         Filed,
         Outbox.use((outbox) =>
-          Effect.forEach(inputData.documents, ({ attachment, fileName }) =>
-            outbox.file(
-              folder,
-              fileName,
-              Buffer.from(intake.attachments[attachment]!.content, "base64"),
-            ),
+          Effect.forEach(inputData.documents, ({ index, fileName }) =>
+            outbox.file(folder, fileName, Buffer.from(attachments[index]!.content, "base64")),
           ),
         ).pipe(Effect.map((paths) => ({ filings: paths.map((path) => ({ path })) }))),
       );
@@ -162,8 +149,38 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     options: { validateInputs: true },
   })
     .then(checkLedger)
-    .then(detectDocuments)
-    .then(fileDocuments)
+    .then(detect)
+    .then(file)
     .then(record)
     .commit();
+}
+
+/**
+ * Runs the Intake workflow once, in process, on `intake` against the data at `paths`, with its
+ * own Mastra (persisting the run in `mastra.db`) and runtime, closed again afterwards. Throws when
+ * the run does not succeed.
+ */
+export async function runIntake(
+  intake: Intake,
+  { paths, category }: { paths: DataPaths; category: Category },
+): Promise<IntakeResult> {
+  const storage = await createLocalStore(paths.databasePath);
+  const runtime = createIntakeRuntime(paths);
+  const mastra = new Mastra({
+    storage,
+    logger: false,
+    workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category }) },
+  });
+  try {
+    await storage.init();
+    const run = await mastra.getWorkflow(INTAKE_WORKFLOW_ID).createRun();
+    const result = await run.start({ inputData: intake });
+    if (result.status !== "success") {
+      const reason = result.status === "failed" ? result.error.message : result.status;
+      throw new Error(`the Intake workflow did not finish: ${reason}`);
+    }
+    return result.result;
+  } finally {
+    await closeInOrder([() => mastra.shutdown(), () => storage.close(), () => runtime.dispose()]);
+  }
 }

@@ -4,12 +4,16 @@ import { pathToFileURL } from "node:url";
 import { LibSQLStore } from "@mastra/libsql";
 
 /**
- * LibSQL store on a local file. The argument is always treated as a filesystem path, so this
- * never connects to a remote database: `libsql://host/x` resolves to the file
- * `<cwd>/libsql:/host/x`.
- * The file's directory is created if missing.
+ * The `file:` URL of a local LibSQL database, its directory created if missing. The argument is
+ * always treated as a filesystem path, so this never names a remote database: `libsql://host/x`
+ * resolves to the file `<cwd>/libsql:/host/x`.
  */
-export async function createLocalStore(databasePath: string) {
+export async function localDatabaseUrl(databasePath: string): Promise<string> {
   await mkdir(dirname(databasePath), { recursive: true });
-  return new LibSQLStore({ id: "hex-local", url: pathToFileURL(databasePath).href });
+  return pathToFileURL(databasePath).href;
+}
+
+/** LibSQL store on a local file (see {@link localDatabaseUrl}). */
+export async function createLocalStore(databasePath: string) {
+  return new LibSQLStore({ id: "hex-local", url: await localDatabaseUrl(databasePath) });
 }

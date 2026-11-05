@@ -1,9 +1,7 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
 import { normalizeMessageId } from "@hex/domain";
 import { createClient } from "@libsql/client";
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
+import { localDatabaseUrl } from "./storage";
 
 /** One Document's Filing: where it landed, relative to the Outbox. */
 export const Filing = Schema.Struct({ path: Schema.String });
@@ -86,8 +84,7 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
       const client = yield* Effect.acquireRelease(
         Effect.tryPromise({
           try: async () => {
-            await mkdir(dirname(databasePath), { recursive: true });
-            const client = createClient({ url: pathToFileURL(databasePath).href });
+            const client = createClient({ url: await localDatabaseUrl(databasePath) });
             try {
               // Mastra writes to the same file; wait for its locks instead of failing.
               await client.execute("PRAGMA busy_timeout = 5000");

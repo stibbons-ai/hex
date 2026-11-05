@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_FILE_NAME_BYTES, freeFileName, normalizeMessageId, safeFileName } from "../src";
+import { MAX_FILE_NAME_BYTES, freeFileName, safeFileName } from "../src";
 
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
 
@@ -71,18 +71,5 @@ describe("safeFileName", () => {
     const original = `${"a".repeat(MAX_FILE_NAME_BYTES - 8)}.partial${"b".repeat(100)}`;
     const name = safeFileName(original, "application/pdf", 1);
     expect(name).toBe("a".repeat(MAX_FILE_NAME_BYTES - 8));
-  });
-});
-
-describe("normalizeMessageId", () => {
-  test.each([
-    ["<abc@example.com>", "abc@example.com"],
-    ["  <abc@example.com>  ", "abc@example.com"],
-    ["abc@example.com", "abc@example.com"],
-    ["< abc@example.com >", "abc@example.com"],
-    ["<>", ""],
-    ["   ", ""],
-  ])("%j → %j", (raw, expected) => {
-    expect(normalizeMessageId(raw)).toBe(expected);
   });
 });

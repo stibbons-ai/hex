@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IntakeLedger, intakeLedgerLayer } from "@hex/adapters";
 import { Effect } from "effect";
-import { buildEml, bytes } from "./eml";
+import { RECEIVED, buildEml, bytes, pdf } from "./eml";
 
 const repository = fileURLToPath(new URL("../../..", import.meta.url));
 let directory: string;
@@ -55,15 +55,10 @@ describe("bun run intake", () => {
     );
     const eml = await writeMail("invoice.eml", {
       messageId: "walkthrough@shop.example",
-      received: "Mon, 02 Nov 2026 08:15:00 +0100",
+      received: RECEIVED,
       html: '<img src="cid:logo@shop">',
       parts: [
-        {
-          contentType: "application/pdf",
-          disposition: "attachment",
-          fileName: "Rechnung 4711.pdf",
-          content: bytes(800, "r"),
-        },
+        pdf("Rechnung 4711.pdf", bytes(800, "r")),
         {
           contentType: "image/png",
           disposition: "inline",
@@ -105,7 +100,7 @@ describe("bun run intake", () => {
     const dataDirectory = join(directory, "default-outbox");
     const eml = await writeMail("no-documents.eml", {
       messageId: "empty@shop.example",
-      received: "Mon, 02 Nov 2026 08:15:00 +0100",
+      received: RECEIVED,
     });
     const run = await intake([eml], { HEX_DATA_DIR: dataDirectory });
     expect(run).toMatchObject({
@@ -114,15 +109,8 @@ describe("bun run intake", () => {
     });
     const pdfMail = await writeMail("one.eml", {
       messageId: "one@shop.example",
-      received: "Mon, 02 Nov 2026 08:15:00 +0100",
-      parts: [
-        {
-          contentType: "application/pdf",
-          disposition: "attachment",
-          fileName: "a.pdf",
-          content: bytes(5),
-        },
-      ],
+      received: RECEIVED,
+      parts: [pdf("a.pdf")],
     });
     expect((await intake([pdfMail], { HEX_DATA_DIR: dataDirectory })).code).toBe(0);
     expect(await readdir(join(dataDirectory, "outbox/2026-11/ER"))).toEqual(["a.pdf"]);
@@ -141,7 +129,7 @@ describe("bun run intake", () => {
     [
       "a mail without Message-ID",
       async () => {
-        const path = await writeMail("no-id.eml", { received: "Mon, 02 Nov 2026 08:15:00 +0100" });
+        const path = await writeMail("no-id.eml", { received: RECEIVED });
         return { args: [path], message: `${path}: no Message-ID` };
       },
     ],
@@ -162,15 +150,8 @@ describe("bun run intake", () => {
     const dataDirectory = join(directory, "bad-category");
     const eml = await writeMail("bad-category.eml", {
       messageId: "category@shop.example",
-      received: "Mon, 02 Nov 2026 08:15:00 +0100",
-      parts: [
-        {
-          contentType: "application/pdf",
-          disposition: "attachment",
-          fileName: "a.pdf",
-          content: bytes(5),
-        },
-      ],
+      received: RECEIVED,
+      parts: [pdf("a.pdf")],
     });
     const run = await intake([eml], { HEX_DATA_DIR: dataDirectory, HEX_CONFIG: config });
     expect(run.code).toBe(1);

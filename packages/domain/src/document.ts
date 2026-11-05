@@ -41,7 +41,7 @@ const IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
 };
 
 /** The MIME type without parameters, lowercased: `Application/PDF; name=x` → `application/pdf`. */
-export function baseMimeType(mimeType: string): string {
+function baseMimeType(mimeType: string): string {
   return (mimeType.split(";", 1)[0] ?? "").trim().toLowerCase();
 }
 

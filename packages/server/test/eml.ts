@@ -24,6 +24,17 @@ export interface Mail {
 /** `size` bytes of filler content, so detection's size threshold can be exercised. */
 export const bytes = (size: number, fill = "x") => new TextEncoder().encode(fill.repeat(size));
 
+/** A PDF attachment. */
+export const pdf = (fileName: string, content = bytes(500, "p")): Part => ({
+  contentType: "application/pdf",
+  disposition: "attachment",
+  fileName,
+  content,
+});
+
+/** A received date: 08:15 on 2 November 2026 in Berlin. */
+export const RECEIVED = "Mon, 02 Nov 2026 08:15:00 +0100";
+
 /** A multipart/mixed `.eml`: an HTML body (if any), then each part base64-encoded. */
 export function buildEml({
   messageId,

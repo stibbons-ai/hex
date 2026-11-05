@@ -1,18 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile, readdir, rm } from "node:fs/promises";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IntakeLedger, createLocalStore, intakeLedgerLayer, readEml } from "@hex/adapters";
+import { IntakeLedger, intakeLedgerLayer, readEml } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
-import { Mastra } from "@mastra/core/mastra";
 import { Effect } from "effect";
-import {
-  INTAKE_WORKFLOW_ID,
-  createIntakeRuntime,
-  createIntakeWorkflow,
-} from "../src/intake-workflow";
-import { buildEml, bytes } from "./eml";
+import { runIntake } from "../src/intake-workflow";
+import { buildEml, bytes, pdf } from "./eml";
 import type { Mail } from "./eml";
 
 let directory: string;
@@ -28,12 +22,6 @@ afterAll(async () => {
 
 /** 00:30 on 1 November in Berlin: filed under November although it is still October in UTC. */
 const received = "Sat, 31 Oct 2026 23:30:00 +0000";
-const pdf = (fileName: string, content = bytes(500, "p")) => ({
-  contentType: "application/pdf",
-  disposition: "attachment",
-  fileName,
-  content,
-});
 
 /** A fresh data directory and Outbox, and the real Intake workflow on them. */
 function freshHex() {
@@ -41,26 +29,10 @@ function freshHex() {
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
   return {
     ...paths,
-    /** Runs the workflow once on `mail`, as the dev command would, and returns the run result. */
+    /** Runs the workflow once on `mail`, as the dev command does, and returns its result. */
     async process(mail: Mail) {
       const intake = await Effect.runPromise(readEml(buildEml(mail), "test.eml"));
-      const storage = await createLocalStore(paths.databasePath);
-      const runtime = createIntakeRuntime(paths);
-      const workflow = createIntakeWorkflow({ runtime, category: "ER" });
-      const mastra = new Mastra({
-        storage,
-        logger: false,
-        workflows: { [INTAKE_WORKFLOW_ID]: workflow },
-      });
-      try {
-        await storage.init();
-        const run = await mastra.getWorkflow(INTAKE_WORKFLOW_ID).createRun();
-        return await run.start({ inputData: intake });
-      } finally {
-        await mastra.shutdown();
-        await storage.close();
-        await runtime.dispose();
-      }
+      return runIntake(intake, { paths, category: "ER" });
     },
     /** Every file in the Outbox, relative, with its content. */
     async outbox(): Promise<Record<string, string>> {
@@ -82,12 +54,6 @@ function freshHex() {
       );
     },
   };
-}
-
-function succeeded<R extends { status: string }>(result: R) {
-  if (result.status !== "success")
-    throw new Error(`run ${result.status}: ${JSON.stringify(result)}`);
-  return (result as R & { result: unknown }).result;
 }
 
 describe("Intake workflow", () => {
@@ -113,7 +79,7 @@ describe("Intake workflow", () => {
       { path: "2026-11/ER/Beleg.jpg" },
       { path: "2026-11/ER/Rechnung 2026-10 (1).pdf" },
     ];
-    expect(succeeded(result)).toEqual({
+    expect(result).toEqual({
       messageId: "happy@shop.example",
       status: "processed",
       filings,
@@ -176,7 +142,7 @@ describe("Intake workflow", () => {
         },
       ],
     });
-    expect(succeeded(result)).toEqual({
+    expect(result).toEqual({
       messageId: "mixed@shop.example",
       status: "processed",
       filings: [{ path: "2026-11/ER/Scan.pdf" }],
@@ -198,7 +164,7 @@ describe("Intake workflow", () => {
         },
       ],
     });
-    expect(succeeded(result)).toEqual({
+    expect(result).toEqual({
       messageId: "nothing@shop.example",
       status: "processed",
       filings: [],
@@ -213,9 +179,9 @@ describe("Intake workflow", () => {
   test("an already processed Message-ID is skipped: nothing filed again", async () => {
     const hex = freshHex();
     const mail = { messageId: "twice@shop.example", received, parts: [pdf("Rechnung.pdf")] };
-    const first = succeeded(await hex.process(mail));
+    const first = await hex.process(mail);
     const entry = await hex.ledger("twice@shop.example");
-    const second = succeeded(await hex.process(mail));
+    const second = await hex.process(mail);
     expect(second).toEqual({
       messageId: "twice@shop.example",
       status: "already-processed",
@@ -241,20 +207,20 @@ describe("Intake workflow", () => {
         pdf("."),
       ],
     });
-    expect(succeeded(result)).toMatchObject({
-      filings: [
-        { path: "2026-11/ER/x.pdf" },
-        { path: "2026-11/ER/b.pdf" },
-        { path: "2026-11/ER/document-3.pdf" },
-        { path: "2026-11/ER/x (1).pdf" },
-        { path: "2026-11/ER/win.pdf" },
-        { path: "2026-11/ER/document-6.pdf" },
-      ],
+    const paths = [
+      "2026-11/ER/x.pdf",
+      "2026-11/ER/b.pdf",
+      "2026-11/ER/document-3.pdf",
+      "2026-11/ER/x (1).pdf",
+      "2026-11/ER/win.pdf",
+      "2026-11/ER/document-6.pdf",
+    ];
+    expect(result).toEqual({
+      messageId: "hostile@shop.example",
+      status: "processed",
+      filings: paths.map((path) => ({ path })),
     });
-    const files = Object.keys(await hex.outbox());
-    expect(files).toHaveLength(6);
-    for (const path of files) expect(path).toMatch(/^2026-11\/ER\/[^/]+$/);
-    expect(files.some((path) => path.endsWith(".partial"))).toBe(false);
+    expect(Object.keys(await hex.outbox()).sort()).toEqual([...paths].sort());
     // Nothing next to the Outbox either: only the database (and its WAL files) and the Outbox.
     const siblings = await readdir(join(hex.outboxDirectory, ".."));
     expect(siblings.filter((name) => !name.startsWith("mastra.db"))).toEqual(["outbox"]);

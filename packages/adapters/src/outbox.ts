@@ -61,15 +61,18 @@ async function writeNew(root: string, folder: string, name: string, content: Uin
     } finally {
       await handle.close();
     }
-    const taken = new Set(await readdir(directory));
+    // The folder is listed only after a clash: usually the name is free.
+    let taken: Set<string> | undefined;
+    let candidate = name;
     for (;;) {
-      const candidate = freeFileName(name, taken);
       try {
         await link(partial, join(directory, candidate));
         return relative(root, join(directory, candidate)).split(/[/\\]/).join("/");
       } catch (error) {
         if (!isErrno(error, "EEXIST")) throw error;
+        taken ??= new Set(await readdir(directory));
         taken.add(candidate);
+        candidate = freeFileName(name, taken);
       }
     }
   } finally {

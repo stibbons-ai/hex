@@ -13,8 +13,8 @@ export {
   DEFAULT_CATEGORY,
   FILING_TIME_ZONE,
   calendarDateIn,
-  isCalendarDate,
   planFiling,
 } from "./filing";
 export type { CalendarDate, Category, FilingPlan } from "./filing";
-export { normalizeMessageId } from "./intake";
+export { detectDocuments, normalizeMessageId } from "./intake";
+export type { DetectedDocument, IntakeAttachmentFacts } from "./intake";

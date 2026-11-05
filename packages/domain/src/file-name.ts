@@ -13,7 +13,10 @@ function utf8Bytes(text: string): number {
   let bytes = 0;
   for (const character of text) {
     const code = character.codePointAt(0)!;
-    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code < 0x10000) bytes += 3;
+    else bytes += 4;
   }
   return bytes;
 }
