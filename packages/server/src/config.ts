@@ -76,14 +76,18 @@ export async function readConfigFile(path: string): Promise<typeof ConfigFile.Ty
   return decodeOrThrow(ConfigFile, json, `hex config ${path}: invalid config`);
 }
 
+/** The chat agent's model settings in the config file's `chat` section. */
+export function chatModel({ model, providerOptions }: (typeof ConfigFile.Type)["chat"]): ChatModel {
+  return { model, ...(providerOptions ? { providerOptions } : {}) };
+}
+
 /**
  * The chat agent's model settings from the hex config file at `path`, without building its
  * channels, so no channel secret is needed (Mastra Studio). Throws, naming the file and the
  * problem, on a file it can't use (see {@link readConfigFile}).
  */
 export async function loadChatModel(path: string): Promise<ChatModel> {
-  const { model, providerOptions } = (await readConfigFile(path)).chat;
-  return { model, ...(providerOptions ? { providerOptions } : {}) };
+  return chatModel((await readConfigFile(path)).chat);
 }
 
 /** Intake workflow settings from the config file. */

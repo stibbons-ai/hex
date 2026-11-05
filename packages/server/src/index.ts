@@ -138,9 +138,9 @@ export async function startServer({
     chatAgent = chat ? createChatAgent(chat, await chatStores(storage)) : undefined;
     const mastra = createHexMastra({
       storage,
-      ...(logger === undefined ? {} : { logger }),
-      ...(workflows ? { workflows } : {}),
-      ...(chatAgent ? { agents: { [chatAgent.agent.id]: chatAgent.agent } } : {}),
+      logger,
+      workflows,
+      agents: chatAgent && { [chatAgent.agent.id]: chatAgent.agent },
     });
     if (chat && chatAgent) {
       // Mastra starts the channels without awaiting them and only logs a failure (so a failed

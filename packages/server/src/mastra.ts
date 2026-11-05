@@ -50,9 +50,9 @@ export async function createHexStore({
 export interface HexMastraOptions {
   storage: MastraCompositeStore;
   /** Mastra's logger; omitted keeps Mastra's default. `false` silences it (tests only). */
-  logger?: IMastraLogger | false;
-  workflows?: Record<string, AnyWorkflow>;
-  agents?: Record<string, Agent>;
+  logger?: IMastraLogger | false | undefined;
+  workflows?: Record<string, AnyWorkflow> | undefined;
+  agents?: Record<string, Agent> | undefined;
 }
 
 /**

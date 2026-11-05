@@ -4,7 +4,7 @@ import { createSlackAdapter } from "@chat-adapter/slack";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
 import { Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
-import { type Env, configError, decodeOrThrow, readConfigFile } from "./config";
+import { type Env, chatModel, configError, decodeOrThrow, readConfigFile } from "./config";
 
 /**
  * Builds one platform's channel from its config `options`; secrets come from `env` only. An
@@ -189,6 +189,5 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }
   }
-  const { model, providerOptions } = chat;
-  return { model, ...(providerOptions ? { providerOptions } : {}), channels };
+  return { ...chatModel(chat), channels };
 }

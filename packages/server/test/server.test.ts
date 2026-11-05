@@ -6,43 +6,14 @@ import { toMastraSchema } from "@hex/adapters";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { DuckDBStore } from "@mastra/duckdb";
 import { LibSQLStore } from "@mastra/libsql";
-import { ORPCError, createORPCClient, safe } from "@orpc/client";
-import { RPCLink } from "@orpc/client/fetch";
-import type { ContractRouterClient } from "@orpc/contract";
+import { ORPCError, safe } from "@orpc/client";
 import { Schema } from "effect";
-import { type RunningServer, type ServerOptions, contract, startServer } from "../src";
+import { type RunningServer, type ServerOptions, startServer } from "../src";
+import { Message, client, echo, oneStep } from "./server-helpers";
 
 const lanAddress = Object.values(networkInterfaces())
   .flat()
   .find((address) => address && address.family === "IPv4" && !address.internal)?.address;
-
-const Message = toMastraSchema(Schema.Struct({ message: Schema.String }));
-
-/** A workflow with one step, both named `id`, from Message to Message. */
-function oneStep(
-  id: string,
-  execute: (input: typeof Message.Type) => Promise<typeof Message.Type>,
-) {
-  return createWorkflow({ id, inputSchema: Message, outputSchema: Message })
-    .then(
-      createStep({
-        id,
-        inputSchema: Message,
-        outputSchema: Message,
-        execute: ({ inputData }) => execute(inputData),
-      }),
-    )
-    .commit();
-}
-
-const echo = oneStep("echo", async (input) => input);
-
-/** The typed oRPC client a caller of the API uses. */
-function client(server: RunningServer) {
-  return createORPCClient<ContractRouterClient<typeof contract>>(
-    new RPCLink({ url: new URL("/rpc", server.url) }),
-  );
-}
 
 /** A one-step workflow whose step calls `entered`, then waits for `release`. */
 function gated(id: string, entered: () => void, release: Promise<void>) {

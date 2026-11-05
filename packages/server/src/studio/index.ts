@@ -27,5 +27,5 @@ export const mastra = createHexMastra({
       category,
     }),
   },
-  ...(chatAgent ? { agents: { [chatAgent.id]: chatAgent } } : {}),
+  agents: chatAgent && { [chatAgent.id]: chatAgent },
 });
