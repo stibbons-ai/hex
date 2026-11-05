@@ -4,5 +4,11 @@
     "version": "2.5.0",
     "license": "CC-BY-3.0",
     "reason": "SPDX exception identifier data used by the development-only SPDX parser. Installed README attributes copyright 2010-2015 Linux Foundation and contributors under CC-BY-3.0; attribution and licence link are preserved in THIRD_PARTY_NOTICES. This is an exact data-package exception, not general approval of Creative Commons software licences."
+  },
+  {
+    "name": "postal-mime",
+    "version": "4.2.0",
+    "license": "MIT-0",
+    "reason": "MIME parser for the Intake .eml reader (@hex/adapters). MIT No Attribution is the MIT licence without its attribution condition, so it grants at least what MIT does; the installed LICENSE.txt was reviewed. Recorded in THIRD_PARTY_NOTICES. An exact exception, not a policy change for MIT-0."
   }
 ]

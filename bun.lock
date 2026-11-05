@@ -18,9 +18,12 @@
       "name": "@hex/adapters",
       "version": "0.0.0",
       "dependencies": {
+        "@hex/domain": "workspace:*",
+        "@libsql/client": "catalog:",
         "@mastra/core": "catalog:",
         "@mastra/libsql": "catalog:",
         "effect": "catalog:",
+        "postal-mime": "catalog:",
       },
     },
     "packages/domain": {
@@ -59,6 +62,7 @@
   "catalog": {
     "@chat-adapter/shared": "4.43.0",
     "@chat-adapter/slack": "4.43.0",
+    "@libsql/client": "0.18.0",
     "@mastra/core": "1.80.0",
     "@mastra/libsql": "1.27.1",
     "@mastra/memory": "1.40.0",
@@ -72,6 +76,7 @@
     "effect": "4.1.0",
     "oxfmt": "0.75.0",
     "oxlint": "1.90.0",
+    "postal-mime": "4.2.0",
     "spdx-expression-parse": "5.0.0",
     "typescript": "7.0.2",
   },
@@ -581,6 +586,8 @@
     "path-key": ["path-key@3.1.1", "", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
 
     "picomatch": ["picomatch@4.0.7", "", {}, "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA=="],
+
+    "postal-mime": ["postal-mime@4.2.0", "", {}, "sha512-QG5Rh8wY/zjwFF1lKWcBbwWcAWR5jWodmMPL4gMik43XDLebtWoAAPyG0lrE2kYYZ5IHTASrepGuGO0YIwNKAg=="],
 
     "posthog-node": ["posthog-node@5.57.2", "", { "dependencies": { "@posthog/core": "^1.60.1" }, "peerDependencies": { "@opentelemetry/api": "^1.2.0", "rxjs": "^7.0.0" }, "optionalPeers": ["@opentelemetry/api", "rxjs"] }, "sha512-S03L9YC21EV0CIo7GW1lv/faTU0ENjO4uyFTuERxGIuDebjl3+UcRvJIq8RzAM2YJumpAlXPoDNyrxAvUZctfg=="],
 
