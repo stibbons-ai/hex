@@ -173,40 +173,63 @@ const syntheticMessageId = new RegExp(
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
- * Why the `.eml` at `path` is not one this generator wrote, or `undefined` when it is: a regular
- * file with a header block (ended by a blank line) that carries the synthetic `Message-ID`.
+ * Why `eml` is not a mail this generator wrote, or `undefined` when it is: a header block (ended
+ * by a blank line) that carries the synthetic `Message-ID`.
  */
-async function emlRefusal(path: string): Promise<string | undefined> {
+function emlRefusal(eml: string): string | undefined {
+  const end = eml.search(/\r?\n\r?\n/);
+  if (end === -1) return "no blank line ends its headers";
+  return syntheticMessageId.test(eml.slice(0, end))
+    ? undefined
+    : `no Message-ID <synthetic-…@${syntheticDomain}> in its headers`;
+}
+
+/** Why the entry `name` of the committed folder may not be replaced, or `undefined` when it may. */
+async function committedEntryRefusal(folder: string, name: string): Promise<string | undefined> {
+  const isEml = name.endsWith(".eml");
+  if (name !== "expected.json" && !isEml) return "not part of the synthetic set";
+  const path = join(folder, name);
   try {
     if (!(await lstat(path)).isFile()) return "not a regular file";
-    const eml = await Bun.file(path).text();
-    const end = eml.search(/\r?\n\r?\n/);
-    if (end === -1) return "no blank line ends its headers";
-    return syntheticMessageId.test(eml.slice(0, end))
-      ? undefined
-      : `no Message-ID <synthetic-…@${syntheticDomain}> in its headers`;
+    // expected.json is tracked by git, so overwriting it is recoverable.
+    return isEml ? emlRefusal(await Bun.file(path).text()) : undefined;
   } catch (error) {
     return message(error);
   }
 }
 
-/** Why the entry `name` of the committed folder may not be replaced, or `undefined` when it may. */
-async function committedEntryRefusal(folder: string, name: string): Promise<string | undefined> {
-  const path = join(folder, name);
-  if (name === "expected.json") {
-    // Tracked by git, so overwriting it is recoverable.
-    try {
-      return (await lstat(path)).isFile() ? undefined : "not a regular file";
-    } catch (error) {
-      return message(error);
-    }
-  }
-  if (name.endsWith(".eml")) return emlRefusal(path);
-  return "not part of the synthetic set";
-}
-
 /** `path`'s real path, or `path` itself while it does not exist. */
 const realPath = (path: string) => realpath(path).catch(() => resolve(path));
+
+/**
+ * The entries of `folder` that a new set replaces: none for a missing or empty folder, every entry
+ * of the committed folder once each passes {@link committedEntryRefusal}. Throws, naming the folder
+ * and why, for anything else.
+ */
+async function replaceableEntries(folder: string, committed: string): Promise<string[]> {
+  const refuse = (why: string) =>
+    new Error(`refusing to write the synthetic set into ${folder}: ${why}`);
+  const stats = await lstat(folder).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw refuse(message(error));
+  });
+  if (stats === undefined) return [];
+  if (!stats.isDirectory()) throw refuse("it is not a folder");
+  const entries = await readdir(folder);
+  if (entries.length === 0) return [];
+  if ((await realPath(folder)) !== (await realPath(committed))) {
+    throw refuse("it is neither empty nor the committed synthetic folder");
+  }
+  const refused: string[] = [];
+  for (const name of entries) {
+    const reason = await committedEntryRefusal(folder, name);
+    if (reason !== undefined) refused.push(`${name} (${reason})`);
+  }
+  if (refused.length > 0) {
+    throw refuse(`it holds files this generator did not write: ${refused.join("; ")}`);
+  }
+  return entries;
+}
 
 /**
  * Writes a freshly rendered set into `folder`. Renders first, then accepts exactly two targets
@@ -214,7 +237,7 @@ const realPath = (path: string) => realpath(path).catch(() => resolve(path));
  * - a missing or empty folder, which it creates and fills;
  * - the committed folder (`committed`, by default {@link syntheticFolder}), which it replaces in
  *   place: it overwrites `expected.json` (tracked by git) and deletes an `.eml` only when it is a
- *   generated one ({@link emlRefusal}); any other entry there is refused.
+ *   regular file this generator wrote ({@link emlRefusal}); any other entry there is refused.
  *
  * Anything else, a non-empty folder elsewhere or a path that is not a folder, is refused with one
  * message naming the folder and why: it may hold real fixtures, which git ignores and so cannot
@@ -222,26 +245,7 @@ const realPath = (path: string) => realpath(path).catch(() => resolve(path));
  */
 export async function writeFixtureSet(folder: string, committed = syntheticFolder): Promise<void> {
   const files = renderFixtureSet();
-  const refuse = (why: string) =>
-    new Error(`refusing to write the synthetic set into ${folder}: ${why}`);
-  const stats = await lstat(folder).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw refuse(message(error));
-  });
-  if (stats !== undefined && !stats.isDirectory()) throw refuse("it is not a folder");
-  const entries = stats === undefined ? [] : await readdir(folder);
-  if (entries.length > 0) {
-    if ((await realPath(folder)) !== (await realPath(committed))) {
-      throw refuse("it is neither empty nor the committed synthetic folder");
-    }
-    const refused: string[] = [];
-    for (const name of entries) {
-      const reason = await committedEntryRefusal(folder, name);
-      if (reason !== undefined) refused.push(`${name} (${reason})`);
-    }
-    if (refused.length > 0)
-      throw refuse(`it holds files this generator did not write: ${refused.join("; ")}`);
-  }
+  const entries = await replaceableEntries(folder, committed);
   await mkdir(folder, { recursive: true });
   for (const name of entries) if (name !== "expected.json") await rm(join(folder, name));
   for (const [name, bytes] of files) await Bun.write(join(folder, name), bytes);

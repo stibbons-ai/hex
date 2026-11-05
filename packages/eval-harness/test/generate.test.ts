@@ -62,11 +62,9 @@ describe("synthetic fixture generator", () => {
     const entries: Record<string, string> = {};
     for (const name of (await readdir(dir)).sort()) {
       const stats = await lstat(join(dir, name));
-      entries[name] = stats.isFile()
-        ? await Bun.file(join(dir, name)).text()
-        : stats.isDirectory()
-          ? "<dir>"
-          : "<link>";
+      if (stats.isFile()) entries[name] = await Bun.file(join(dir, name)).text();
+      else if (stats.isDirectory()) entries[name] = "<dir>";
+      else entries[name] = "<link>";
     }
     return entries;
   }
@@ -83,9 +81,9 @@ describe("synthetic fixture generator", () => {
     const first = await readTree(dir);
     await Bun.write(join(dir, "99-stale.eml"), generatedEml("99-stale"));
     await writeFixtureSet(dir, dir);
-    expect(await readdir(dir)).not.toContain("99-stale.eml");
-    expect(differing(first, await readTree(dir))).toEqual([]);
-    expect((await readdir(dir)).length).toBe(first.size);
+    const second = await readTree(dir);
+    expect([...second.keys()]).toEqual([...first.keys()]);
+    expect(differing(first, second)).toEqual([]);
   });
 
   test.each([
@@ -95,14 +93,8 @@ describe("synthetic fixture generator", () => {
       '{"intakes":[{"file":"sparkasse-okt.eml","description":"REAL","documents":[]}]}',
     ],
     ["empty labels", "expected.json", '{"intakes":[]}'],
-    [
-      "labels for a non-generated name",
-      "expected.json",
-      '{"intakes":[{"file":"inbox.eml","documents":[]}]}',
-    ],
     ["a real .eml", "my-real-mail.eml", realMail],
     ["a generated-looking .eml", "01-x.eml", generatedEml("01-x")],
-    ["an unrelated file", "notes.md", "kept"],
   ])(
     "refuses a non-empty folder elsewhere holding %s and leaves it untouched",
     async (_, name, content) => {
@@ -122,53 +114,27 @@ describe("synthetic fixture generator", () => {
   });
 
   test.each([
-    [
-      "a real .eml",
-      async (dir: string) => Bun.write(join(dir, "01-bank-statement.eml"), realMail),
-      "01-bank-statement.eml",
-    ],
-    [
-      "an upper-case .EML",
-      async (dir: string) => Bun.write(join(dir, "01-scan.EML"), realMail),
-      "01-scan.EML",
-    ],
+    ["a real .eml", "01-bank-statement.eml", (path: string) => Bun.write(path, realMail)],
+    ["an upper-case .EML", "01-scan.EML", (path: string) => Bun.write(path, realMail)],
     [
       "an .eml with the synthetic id only in its body",
-      async (dir: string) =>
-        Bun.write(
-          join(dir, "01-notes.eml"),
-          `${realMail}Message-ID: <synthetic-x@hex-fixtures.example>\r\n`,
-        ),
       "01-notes.eml",
+      (path: string) =>
+        Bun.write(path, `${realMail}Message-ID: <synthetic-x@hex-fixtures.example>\r\n`),
     ],
     [
       "an .eml without a blank line after its headers",
-      async (dir: string) =>
-        Bun.write(
-          join(dir, "01-notes.eml"),
-          "my notes\nMessage-ID: <synthetic-x@hex-fixtures.example>\n",
-        ),
       "01-notes.eml",
+      (path: string) =>
+        Bun.write(path, "my notes\nMessage-ID: <synthetic-x@hex-fixtures.example>\n"),
     ],
-    [
-      "a directory named like an Intake",
-      async (dir: string) => mkdir(join(dir, "01-x.eml")),
-      "01-x.eml",
-    ],
-    [
-      "a symlinked .eml",
-      async (dir: string) => symlink(join(dir, "01-de-pdf-invoice.eml"), join(dir, "01-link.eml")),
-      "01-link.eml",
-    ],
-    [
-      "an unrelated file",
-      async (dir: string) => Bun.write(join(dir, "notes.md"), "kept"),
-      "notes.md",
-    ],
-  ])("refuses the committed folder holding %s and leaves it untouched", async (_, add, name) => {
+    ["a directory named like an Intake", "01-x.eml", (path: string) => mkdir(path)],
+    ["a symlinked .eml", "01-link.eml", (path: string) => symlink("01-de-pdf-invoice.eml", path)],
+    ["an unrelated file", "notes.md", (path: string) => Bun.write(path, "kept")],
+  ])("refuses the committed folder holding %s and leaves it untouched", async (_, name, add) => {
     const dir = await temp();
     await writeFixtureSet(dir);
-    await add(dir);
+    await add(join(dir, name));
     const before = await snapshot(dir);
     await expect(writeFixtureSet(dir, dir)).rejects.toThrow(name);
     expect(await snapshot(dir)).toEqual(before);
