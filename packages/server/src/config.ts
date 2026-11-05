@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { isLoopbackHost } from "@hex/adapters";
+import { LOOPBACK_ONLY, isLoopbackHost } from "@hex/adapters";
 import type { ImapSettings, SmtpSettings } from "@hex/adapters";
 import { CATEGORIES, DEFAULT_CATEGORY } from "@hex/domain";
 import type { Category } from "@hex/domain";
@@ -41,6 +41,20 @@ const Address = Schema.String.check(
 /** A Forwarding target's name, the key the ledger records its Forwardings under. */
 const TargetName = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/));
 
+/**
+ * The watched folder: not blank, and none of hex's outcome folders (`hex/processed`,
+ * `hex/failed`, with either delimiter and under an `INBOX` namespace), since mail moved there
+ * would be watched again.
+ */
+const WatchedFolder = Schema.String.check(
+  Schema.makeFilter((folder) => folder.trim() !== "" || "a folder name that is not blank"),
+  Schema.makeFilter(
+    (folder) =>
+      !/^(inbox[./])?hex[./](processed|failed)$/i.test(folder.trim()) ||
+      "a folder other than hex's outcome folders hex/processed and hex/failed",
+  ),
+);
+
 const ConfigFile = Schema.Struct({
   chat: Schema.Struct({
     /** Mastra model-router id, `provider/model`. */
@@ -77,13 +91,14 @@ const ConfigFile = Schema.Struct({
   ),
   /**
    * The intake mailbox hex watches over IMAP, its server and login from the environment: the
-   * folder it takes mail from and how often it looks regardless of IMAP IDLE. Off when absent.
+   * folder it takes mail from and how long it waits after a look without news before it looks
+   * again. Off when absent.
    */
   mailbox: Schema.optionalKey(
     Schema.Struct({
       /** The watched folder; INBOX when absent. */
-      folder: Schema.optionalKey(Schema.NonEmptyString),
-      /** Seconds between two looks at the folder, 1 to 3600; 60 when absent. */
+      folder: Schema.optionalKey(WatchedFolder),
+      /** Seconds to wait after a look without news, 1 to 3600; 60 when absent. */
       pollSeconds: Schema.optionalKey(
         Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3600 })),
       ),
@@ -214,7 +229,7 @@ function mailServerSettings(
   );
   if (security === "plain" && !isLoopbackHost(settings.host)) {
     fail(
-      `${prefix}_SECURITY=plain is only allowed for a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost); use tls or starttls for ${settings.host}`,
+      `${prefix}_SECURITY=plain is only allowed for ${LOOPBACK_ONLY}; use tls or starttls for ${settings.host}`,
     );
   }
   return { ...settings, security };
@@ -284,19 +299,20 @@ export async function loadForwardingConfig(
 /** The intake mailbox: the IMAP settings (with the watched folder) and the poll interval. */
 export interface MailboxConfig {
   imap: ImapSettings;
-  /** Milliseconds between two looks at the watched folder, whatever IMAP IDLE says. */
+  /** Milliseconds to wait after a look at the watched folder without news before looking again. */
   pollMs: number;
 }
 
 /** The watched folder when the config names none. */
 const DEFAULT_MAILBOX_FOLDER = "INBOX";
-/** Seconds between two looks at the watched folder when the config says nothing. */
+/** Seconds to wait after a look without news when the config says nothing. */
 const DEFAULT_POLL_SECONDS = 60;
 
 /**
  * The intake mailbox settings from the hex config file at `path`: undefined (no watcher) without
  * a file or without a `mailbox` section, so no IMAP setting is needed then. Otherwise the watched
- * folder (`INBOX` when unset), the poll interval (60 s when unset) and the IMAP server from `env`:
+ * folder (`INBOX` when unset), the wait after a look without news (60 s when unset) and the IMAP
+ * server from `env`:
  * `HEX_IMAP_HOST`, `HEX_IMAP_PORT` (993 when unset), `HEX_IMAP_SECURITY` (`tls` on port 993,
  * else `starttls`, when unset; `plain` only for a loopback IP address), `HEX_IMAP_USER` and
  * `HEX_IMAP_PASSWORD`, both redacted. Fails like {@link readConfigFile} on a file it can't use,

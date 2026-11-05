@@ -88,12 +88,15 @@ export interface RunningServer {
   /**
    * Settles once the runs active in storage were restarted (Mastra's boot sweep, run after the
    * server started; it settles when the restarted runs finished) and then the mailbox watcher,
-   * if any, started. Never rejects: a failed sweep is logged.
+   * if any, started. Never rejects: a failed sweep is logged, and the watcher starts anyway.
    */
   booted: Promise<void>;
   /**
-   * Stops the mailbox watcher (it takes no more mail and closes its connection; a run in
-   * progress goes on until Mastra shuts down, staying active in storage for the next boot), then
+   * Stops the mailbox watcher (it takes no more mail and closes its connection). A run in
+   * progress goes on, but Mastra's shutdown doesn't wait for it: closing the store and the
+   * runtime, and the process exiting, cut it off, so it stays active in storage and resumes at
+   * the next boot; one that finishes within the stop's grace can no longer move its mail, which
+   * the next boot's look moves. Then it
    * stops admitting chat messages and disconnects the channels (bounded by `stopGraceMs`), stops
    * accepting requests and gives in-flight ones (open streams and chat replies included), and a
    * channel disconnect still running, `stopGraceMs` more before closing them, then shuts Mastra
@@ -271,12 +274,14 @@ export async function startServer({
     // Mastra; the watcher skips the Intake of every run active in storage.
     const booted = mastra
       .restartAllActiveWorkflowRuns()
+      .catch((error: unknown) => {
+        mastra
+          .getLogger()
+          .error("hex: restarting the active workflow runs failed; their Intakes wait", error);
+      })
       .then(() => {
         if (!watching || stopping) return;
         watcher = watchMailbox({ ...watching, log: mastra.getLogger() });
-      })
-      .catch((error: unknown) => {
-        mastra.getLogger().error("hex: restarting the active workflow runs failed", error);
       });
     return {
       url: server.url,

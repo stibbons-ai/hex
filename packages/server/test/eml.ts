@@ -52,6 +52,13 @@ export const pdf = (fileName: string, content = pdfBytes(500)): Part => ({
 /** A received date: 08:15 on 2 November 2026 in Berlin. */
 export const RECEIVED = "Mon, 02 Nov 2026 08:15:00 +0100";
 
+/** A mail received at {@link RECEIVED} with one PDF Document; without a Message-ID when none. */
+export const pdfMail = (messageId: string | undefined, fileName = "Rechnung.pdf"): Mail => ({
+  ...(messageId === undefined ? {} : { messageId }),
+  received: RECEIVED,
+  parts: [pdf(fileName)],
+});
+
 /**
  * A mail with two Documents, `first` and `second`, and two attachments that are not: an inline
  * logo the HTML body shows by `cid:` and a tracking pixel. Parts in order: `first`, logo, pixel,

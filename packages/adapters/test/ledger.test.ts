@@ -36,7 +36,7 @@ const success = <A, E>(exit: Exit.Exit<A, E>): A => {
 };
 
 /** `program` run with the clock at `millis`. */
-const at = <E>(millis: number, program: Effect.Effect<void, E>) =>
+const at = <A, E>(millis: number, program: Effect.Effect<A, E>) =>
   TestClock.setTime(millis).pipe(Effect.andThen(program), Effect.provide(TestClock.layer()));
 
 describe("IntakeLedger", () => {
@@ -132,17 +132,23 @@ describe("IntakeLedger", () => {
     }
   });
 
-  test("recording an Intake twice fails instead of replacing the first entry", async () => {
+  test("recording an Intake again (a resumed run) keeps the first entry and succeeds", async () => {
     const databasePath = freshDatabase();
     success(
       await withLedger(databasePath, (ledger) =>
-        ledger.record("c@x", [{ index: 0, path: "2026-11/ER/c.pdf" }]),
+        at(
+          Date.UTC(2026, 10, 5, 12, 30),
+          ledger.record("c@x", [{ index: 0, path: "2026-11/ER/c.pdf" }]),
+        ),
       ),
     );
-    const again = await withLedger(databasePath, (ledger) => ledger.record("<c@x>", []));
-    expect(Exit.isFailure(again)).toBe(true);
-    expect(String(again)).toContain("Intake ledger: recording c@x");
+    success(
+      await withLedger(databasePath, (ledger) =>
+        at(Date.UTC(2026, 10, 5, 13, 0), ledger.record("<c@x>", [])),
+      ),
+    );
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("c@x")))).toMatchObject({
+      processedAt: "2026-11-05T12:30:00.000Z",
       documentCount: 1,
     });
   });
@@ -210,6 +216,72 @@ describe("IntakeLedger", () => {
     ).toMatchObject({
       forwardings: [{ target: "sevdesk" }],
       filings: [{ index: 0, path: "2026-11/ER/b.pdf", fellBack: false }],
+    });
+  });
+
+  describe("failed runs", () => {
+    const T1 = Date.UTC(2026, 10, 5, 10, 0);
+    const T2 = Date.UTC(2026, 10, 5, 10, 5);
+
+    test("count once per run, bracketed or not, with the last failure's time", async () => {
+      const databasePath = freshDatabase();
+      const record = (id: string, run: string, millis: number) =>
+        withLedger(databasePath, (ledger) => at(millis, ledger.recordFailedRun(id, run)));
+      expect(success(await withLedger(databasePath, (ledger) => ledger.failedRuns("f@x")))).toBe(
+        undefined,
+      );
+      expect(success(await record("f@x", "run-1", T1))).toEqual({ count: 1, ended: false });
+      // The same run again (its step repeated after a restart): still one.
+      expect(success(await record("<f@x>", "run-1", T2))).toEqual({ count: 1, ended: false });
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.failedRuns(" f@x"))),
+      ).toEqual({
+        count: 1,
+        lastFailedAt: "2026-11-05T10:00:00.000Z",
+      });
+      expect(success(await record("f@x", "run-2", T2))).toEqual({ count: 2, ended: false });
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.failedRuns("<f@x>"))),
+      ).toEqual({
+        count: 2,
+        lastFailedAt: "2026-11-05T10:05:00.000Z",
+      });
+    });
+
+    test("ending them: none count any more, but the ending run still knows it ended them", async () => {
+      const databasePath = freshDatabase();
+      success(
+        await withLedger(databasePath, (ledger) =>
+          Effect.gen(function* () {
+            yield* ledger.recordFailedRun("g@x", "run-1");
+            yield* ledger.recordFailedRun("g@x", "run-2");
+            yield* ledger.endFailedRuns("g@x", "run-2");
+          }),
+        ),
+      );
+      expect(success(await withLedger(databasePath, (ledger) => ledger.failedRuns("g@x")))).toBe(
+        undefined,
+      );
+      // run-2's step repeated: it still sees the Intake failed permanently on it.
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("g@x", "run-2"))),
+      ).toEqual({ count: 0, ended: true });
+      // A later run (the mail moved back) starts the count afresh.
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("g@x", "run-3"))),
+      ).toEqual({ count: 1, ended: false });
+    });
+
+    test("ending them without a run keeps none", async () => {
+      const databasePath = freshDatabase();
+      success(
+        await withLedger(databasePath, (ledger) =>
+          ledger.recordFailedRun("h@x", "run-1").pipe(Effect.andThen(ledger.endFailedRuns("h@x"))),
+        ),
+      );
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("h@x", "run-1"))),
+      ).toEqual({ count: 1, ended: false });
     });
   });
 });

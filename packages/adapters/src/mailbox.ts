@@ -1,13 +1,14 @@
 import { normalizeMessageId } from "@hex/domain";
-import { Context, Data, Duration, Effect, Layer, Redacted } from "effect";
+import { Context, Data, Duration, Effect, Layer, Redacted, Schema } from "effect";
 import { ImapFlow } from "imapflow";
 import type { ImapFlowError } from "imapflow";
 import { credentialRedactions, excerpt, messageOf, redact } from "./errors";
-import { isLoopbackHost } from "./mailer";
+import { LOOPBACK_ONLY, isLoopbackHost } from "./mailer";
 import type { SmtpSettings } from "./mailer";
 
 /** Where an Intake's mail goes once its outcome is known: processed, or failed permanently. */
-export type MailOutcome = "processed" | "failed";
+export const MailOutcome = Schema.Literals(["processed", "failed"]);
+export type MailOutcome = typeof MailOutcome.Type;
 
 /** The outcome folder's path parts, joined with the server's hierarchy delimiter (`hex.processed`). */
 const OUTCOME_FOLDERS: Record<MailOutcome, readonly [string, string]> = {
@@ -21,20 +22,26 @@ export const outcomeFolder = (outcome: MailOutcome) => OUTCOME_FOLDERS[outcome].
 /** One mail waiting in the watched folder: its UID, and its Message-ID (normalised) if it has one. */
 export interface WaitingMail {
   readonly uid: number;
+  /** As the server reads the header (its ENVELOPE), which may differ from hex's own reading. */
   readonly messageId: string | undefined;
 }
 
 /**
  * A mailbox operation failed. The message names the server, the folder and the IMAP stage, never
- * the credentials or a mail's content.
+ * the credentials or a mail's content. `connectionLost`: the connection is gone (or never came
+ * up), so every operation fails until it is back; otherwise the server refused this one operation.
  */
 export class MailboxError extends Data.TaggedError("MailboxError")<{
   readonly message: string;
+  readonly connectionLost: boolean;
 }> {}
 
 /**
  * The intake mailbox: the watched folder hex takes its Intakes from, and the outcome folders it
- * moves them to. hex never sets or reads a mail's flags.
+ * moves them to with IMAP MOVE. hex never sets or reads a mail's flags.
+ *
+ * A UID is only meaningful against the last {@link list}: one caller (the mailbox watcher) lists
+ * and then works through that listing; the Mailbox checks the folder's UIDVALIDITY against it.
  */
 export class Mailbox extends Context.Service<
   Mailbox,
@@ -55,17 +62,18 @@ export class Mailbox extends Context.Service<
     readonly waitForChange: (timeout: Duration.Input) => Effect.Effect<void, MailboxError>;
     /**
      * Moves every mail in the watched folder with this Message-ID (compared normalised, see
-     * `normalizeMessageId`) to the outcome's folder, creating it if missing; how many it moved.
+     * `normalizeMessageId`, against the server's reading) to the outcome's folder, creating it if
+     * missing; how many it moved.
      */
     readonly moveMessageId: (
       messageId: string,
       to: MailOutcome,
     ) => Effect.Effect<number, MailboxError>;
     /**
-     * Moves the mail at `uid` of the last {@link list} to the outcome's folder, for a mail that
-     * can't be addressed by Message-ID. Fails like {@link source} when UIDs changed meaning.
+     * Moves the mail at `uid` of the last {@link list} to the outcome's folder; whether it was
+     * still there. Fails like {@link source} when UIDs changed meaning.
      */
-    readonly moveUid: (uid: number, to: MailOutcome) => Effect.Effect<void, MailboxError>;
+    readonly moveUid: (uid: number, to: MailOutcome) => Effect.Effect<boolean, MailboxError>;
     /** Closes the connection for good: every later operation fails. */
     readonly close: Effect.Effect<void>;
   }
@@ -86,15 +94,33 @@ const openingStages = new WeakMap<object, string>();
 const CONNECT_DEADLINE = Duration.seconds(60);
 /** How long closing waits for the server's answer to LOGOUT before dropping the connection. */
 const LOGOUT_DEADLINE = Duration.seconds(5);
+/**
+ * How long a connection may go without a byte from the server before it counts as lost: a
+ * half-open connection (a NAT dropping it while IDLE) is noticed after this, not after imapflow's
+ * default 5 min.
+ */
+const SOCKET_TIMEOUT_MS = 90_000;
+
+/** The server's reason for refusing a command, `[CODE] text`, if it gave one. */
+function refusalOf(error: ImapFlowError | undefined): string {
+  if (!error) return "";
+  const { serverResponseCode, responseText } = error;
+  const reason = [serverResponseCode && `[${serverResponseCode}]`, responseText]
+    .filter(Boolean)
+    .join(" ");
+  return reason ? `: ${reason}` : "";
+}
 
 /**
  * The Mailbox on an IMAP server over one connection, opened when the layer is built (so wrong
- * credentials, an unreachable server or a missing folder fail it, within 60 s) and opened again
- * on the next operation after it was lost. The watched folder stays selected; the server's
- * new-mail notifications come through IMAP IDLE, which the client enters after 1 s without a
- * command (imapflow's default, 15 s, would leave mail arriving right after a look unnoticed that
- * long). Mail is fetched with `BODY.PEEK`, so reading never marks it seen. Closed when the
- * layer is released.
+ * credentials, an unreachable server, a server without IMAP MOVE (RFC 6851) or a missing folder
+ * fail it, within 60 s) and opened again on the next operation after it was lost. Mail is moved
+ * with MOVE only, never emulated with COPY, `\Deleted` and EXPUNGE, which would set flags and
+ * could expunge other mail. The watched folder stays selected; the server's new-mail
+ * notifications come through IMAP IDLE, which the client enters after 1 s without a command
+ * (imapflow's default, 15 s, would leave mail arriving right after a look unnoticed that long).
+ * 90 s without a byte from the server count as a lost connection. Mail is fetched with
+ * `BODY.PEEK`, so reading never marks it seen. Closed when the layer is released.
  */
 export function imapMailboxLayer(settings: ImapSettings): Layer.Layer<Mailbox, MailboxError> {
   return Layer.effect(
@@ -108,6 +134,7 @@ export function imapMailboxLayer(settings: ImapSettings): Layer.Layer<Mailbox, M
             Effect.fail(
               new MailboxError({
                 message: `${settings.host}:${settings.port}, folder ${settings.folder}: connecting did not finish within ${Duration.format(CONNECT_DEADLINE)}`,
+                connectionLost: true,
               }),
             ),
         }),
@@ -154,6 +181,11 @@ class ImapConnection {
   readonly #waiters = new Set<(lost?: Error) => void>();
   /** Outcome folders known to exist on the current connection. */
   #outcomeFolders = new Set<MailOutcome>();
+  /**
+   * The error of the last command the server refused, which imapflow only logs for MOVE and
+   * SEARCH (returning `false`); kept to name the server's reason.
+   */
+  #refused: ImapFlowError | undefined;
 
   constructor(settings: ImapSettings) {
     this.#settings = settings;
@@ -168,7 +200,8 @@ class ImapConnection {
 
   /**
    * `operation` as an Effect: a failure becomes a MailboxError naming the server, the folder and
-   * `stage`, its message without the credentials and cut short. The signal aborts on interruption.
+   * `stage`, its message without the credentials and cut short, and saying whether the connection
+   * is gone. The signal aborts on interruption.
    */
   run<A>(stage: string, operation: (signal: AbortSignal) => Promise<A>) {
     const { host, port, folder } = this.#settings;
@@ -181,6 +214,7 @@ class ImapConnection {
         const detail = [messageOf(cause), responseText].filter(Boolean).join(": ");
         return new MailboxError({
           message: `${host}:${port}, folder ${folder}: ${failedStage} failed${code ? ` (${code})` : ""}: ${excerpt(redact(detail, this.#secrets))}`,
+          connectionLost: this.#closed || !this.#client?.usable,
         });
       },
     });
@@ -198,12 +232,13 @@ class ImapConnection {
 
   async #connect(): Promise<ImapFlow> {
     const { host, port, security, user, password, folder } = this.#settings;
+    const refuse = (stage: string, message: string) => {
+      const refused = new Error(message);
+      openingStages.set(refused, stage);
+      return refused;
+    };
     if (security === "plain" && !isLoopbackHost(host)) {
-      const refused = new Error(
-        "plaintext IMAP is only allowed to a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name)",
-      );
-      openingStages.set(refused, "connecting");
-      throw refused;
+      throw refuse("connecting", `plaintext IMAP is only allowed to ${LOOPBACK_ONLY}`);
     }
     const client = new ImapFlow({
       host,
@@ -212,19 +247,32 @@ class ImapConnection {
       // Required for starttls: never log in over a connection the upgrade was stripped from.
       doSTARTTLS: security === "starttls",
       auth: { user: Redacted.value(user), pass: Redacted.value(password) },
-      logger: false,
+      // Only to keep the reason of a refused command; nothing is written anywhere.
+      logger: {
+        debug: () => {},
+        info: () => {},
+        warn: (entry: { err?: ImapFlowError }) => {
+          if (entry?.err) this.#refused = entry.err;
+        },
+        error: () => {},
+      },
       connectionTimeout: 30_000,
       greetingTimeout: 30_000,
+      socketTimeout: SOCKET_TIMEOUT_MS,
       autoIdleDelay: 1000,
     });
-    // Emitted at most once, the connection closing after it; the close is what counts here.
-    client.on("error", () => {});
+    /** Why the connection ended, if it ended with an error. */
+    let failure: Error | undefined;
+    // Emitted at most once, the connection closing after it.
+    client.on("error", (error) => {
+      failure = error;
+    });
     client.on("exists", ({ count, prevCount }) => {
       if (count > prevCount) this.#wake();
     });
     client.on("close", () => {
       if (this.#client === client) this.#client = undefined;
-      this.#wake(new Error("the connection closed"));
+      this.#wake(new Error(`the connection closed${failure ? ` (${messageOf(failure)})` : ""}`));
     });
     const failedAt = (stage: string) => (error: unknown) => {
       if (error instanceof Object) openingStages.set(error, stage);
@@ -232,6 +280,13 @@ class ImapConnection {
       throw error;
     };
     await client.connect().catch(failedAt("connecting"));
+    if (!client.capabilities.has("MOVE")) {
+      client.close();
+      throw refuse(
+        "checking the server",
+        "the server lacks the IMAP MOVE extension (RFC 6851), which hex requires to move mail without setting flags",
+      );
+    }
     await client.mailboxOpen(folder).catch(failedAt("opening the folder"));
     if (this.#closed) {
       client.close();
@@ -326,8 +381,13 @@ class ImapConnection {
 
   async #move(client: ImapFlow, uids: number[], outcome: MailOutcome) {
     await this.#ensureFolder(client, outcome);
+    this.#refused = undefined;
     const moved = await client.messageMove(uids, [...OUTCOME_FOLDERS[outcome]], { uid: true });
-    if (moved === false) throw new Error("the server refused the move");
+    if (!moved) {
+      throw new Error(
+        `the server refused the move${redact(refusalOf(this.#refused), this.#secrets)}`,
+      );
+    }
   }
 
   moveMessageId(messageId: string, outcome: MailOutcome): Promise<number> {
@@ -335,8 +395,13 @@ class ImapConnection {
     return this.#locked(async (client) => {
       if (!id) return 0;
       // SEARCH HEADER matches substrings; the envelope says which candidate is this Message-ID.
+      this.#refused = undefined;
       const candidates = await client.search({ header: { "message-id": id } }, { uid: true });
-      if (!candidates) throw new Error("the server refused the search");
+      if (!candidates) {
+        throw new Error(
+          `the server refused the search${redact(refusalOf(this.#refused), this.#secrets)}`,
+        );
+      }
       if (candidates.length === 0) return 0;
       const mails = await client.fetchAll(candidates, { uid: true, envelope: true }, { uid: true });
       const uids = mails
@@ -347,10 +412,14 @@ class ImapConnection {
     });
   }
 
-  moveUid(uid: number, outcome: MailOutcome): Promise<void> {
+  moveUid(uid: number, outcome: MailOutcome): Promise<boolean> {
     return this.#locked(async (client) => {
       this.#checkValidity(client);
+      // A UID MOVE of a mail no longer there succeeds on most servers: check it is there.
+      const mail = await client.fetchOne(String(uid), { uid: true }, { uid: true });
+      if (!mail) return false;
       await this.#move(client, [uid], outcome);
+      return true;
     });
   }
 

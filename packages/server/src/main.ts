@@ -21,7 +21,8 @@ if (!isLoopbackHost(hostname)) {
     `hex: listening on ${hostname}, beyond loopback: the server has no authentication, so anyone who can reach this address can use it; in a container, publish the port on 127.0.0.1 only (ADR 0005)`,
   );
 }
-// HEX_CONFIG names the config file (chat and Intake settings); unset or empty runs without chat.
+// HEX_CONFIG names the config file (chat, Intake, Forwarding and mailbox settings); unset or
+// empty runs without chat, Forwarding or the mailbox watcher.
 const configPath = process.env.HEX_CONFIG ? resolve(process.env.HEX_CONFIG) : undefined;
 const chat = configPath ? await loadChatConfig(configPath, process.env) : undefined;
 if (!chat) {

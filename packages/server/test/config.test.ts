@@ -647,6 +647,14 @@ describe("loadMailboxConfig", () => {
   test.each([
     ["an unknown key", { folder: "INBOX", password: "x" }, '["mailbox"]["password"]'],
     ["an empty folder", { folder: "" }, '["mailbox"]["folder"]'],
+    ["a blank folder", { folder: "  " }, '["mailbox"]["folder"]'],
+    ["hex/processed as the folder", { folder: "hex/processed" }, '["mailbox"]["folder"]'],
+    ["hex.failed as the folder", { folder: "hex.failed" }, '["mailbox"]["folder"]'],
+    [
+      "INBOX.hex.processed as the folder",
+      { folder: "INBOX.hex.processed" },
+      '["mailbox"]["folder"]',
+    ],
     ["pollSeconds 0", { pollSeconds: 0 }, '["mailbox"]["pollSeconds"]'],
     ["a fractional pollSeconds", { pollSeconds: 1.5 }, '["mailbox"]["pollSeconds"]'],
     ["pollSeconds above an hour", { pollSeconds: 3601 }, '["mailbox"]["pollSeconds"]'],
@@ -657,4 +665,12 @@ describe("loadMailboxConfig", () => {
     await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
     await expect(loading).rejects.toThrow(`at ${at}`);
   });
+
+  test.each(["Rechnungen", "INBOX/hex", "hex/processed-later", "Archiv/hex/failed"])(
+    "%j is a folder hex may watch",
+    async (folder) => {
+      const path = await configFile({ ...valid, mailbox: { folder } });
+      expect((await loadMailboxConfig(path, imapEnv))?.imap.folder).toBe(folder);
+    },
+  );
 });

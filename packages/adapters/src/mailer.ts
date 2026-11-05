@@ -54,6 +54,13 @@ export function isLoopbackHost(host: string): boolean {
   return (isIPv4(host) && host.startsWith("127.")) || (isIPv6(host) && host === "::1");
 }
 
+/**
+ * What a plaintext connection is only allowed to (see {@link isLoopbackHost}), as SMTP, IMAP and
+ * the config say it.
+ */
+export const LOOPBACK_ONLY =
+  "a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost)";
+
 /** Where and as whom the SMTP Mailer sends. */
 export interface SmtpSettings {
   readonly host: string;
@@ -77,7 +84,7 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
       send: ({ to }) =>
         Effect.fail(
           new MailerError({
-            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed to a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name)`,
+            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed to ${LOOPBACK_ONLY}`,
           }),
         ),
     });

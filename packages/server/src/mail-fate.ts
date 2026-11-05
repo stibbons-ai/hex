@@ -4,25 +4,45 @@ import { IntakeLedger, Mailbox, outcomeFolder } from "@hex/adapters";
 import type { MailOutcome } from "@hex/adapters";
 import { Effect, Option, Schema } from "effect";
 
-const Outcomes = Schema.Literals(["processed", "failed"]);
+/** How many copies a move took along: at least the one it was asked to move. */
+const Copies = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
-/** What happened to the Intake's mail in the watched folder. */
-export const MailFate = Schema.Union([
-  /** Every copy in the watched folder went to the outcome's folder. */
-  Schema.Struct({ status: Schema.Literal("moved"), to: Outcomes, copies: Schema.Int }),
-  /** No copy in the watched folder (an Intake not from the mailbox, or moved already). */
-  Schema.Struct({ status: Schema.Literal("not-in-mailbox"), to: Outcomes }),
-  /** The move failed (the mailbox unreachable): the mail stays until a later scan moves it. */
-  Schema.Struct({ status: Schema.Literal("not-moved"), to: Outcomes, reason: Schema.String }),
+/** What a move of the Intake's mail to `to`'s folder did. */
+const moveFates = <To extends MailOutcome>(to: To) =>
+  [
+    /** Every copy in the watched folder went to the outcome's folder. */
+    Schema.Struct({ status: Schema.Literal("moved"), to: Schema.Literal(to), copies: Copies }),
+    /** No copy in the watched folder (an Intake not from the mailbox, or moved already). */
+    Schema.Struct({ status: Schema.Literal("not-in-mailbox"), to: Schema.Literal(to) }),
+    /** The move failed (the mailbox unreachable): the mail stays until a later scan moves it. */
+    Schema.Struct({
+      status: Schema.Literal("not-moved"),
+      to: Schema.Literal(to),
+      reason: Schema.String,
+    }),
+  ] as const;
+
+/** What happened to a processed Intake's mail. */
+export const ProcessedMailFate = Schema.Union(moveFates("processed"));
+export type ProcessedMailFate = typeof ProcessedMailFate.Type;
+
+/** What happened to the mail of an Intake whose run failed. */
+export const FailedRunMailFate = Schema.Union([
   /** The run failed with runs left: the mail stays in the watched folder for a retry. */
   Schema.Struct({ status: Schema.Literal("kept-for-retry") }),
+  ...moveFates("failed"),
 ]);
-export type MailFate = typeof MailFate.Type;
+export type FailedRunMailFate = typeof FailedRunMailFate.Type;
+
+export type MailFate = ProcessedMailFate | FailedRunMailFate;
+
+/** What a move to `To`'s folder did. */
+export type MoveFate<To extends MailOutcome> = Extract<MailFate, { readonly to: To }>;
 
 /** An Intake's failed runs so far (this one included), and what happened to its mail. */
 export interface FailedRun {
   readonly failedRuns: number;
-  readonly mail: MailFate;
+  readonly mail: FailedRunMailFate;
 }
 
 /** An Intake fails permanently on its failed run number {@link MAX_FAILED_RUNS}. */
@@ -38,36 +58,45 @@ export const retryDelayMs = (failedRuns: number) => 5 * 60_000 * 2 ** (failedRun
  * Moves every copy of the Intake's mail in the watched folder to the outcome's folder. A move
  * that fails is reported in the fate, never failing: the Intake's outcome stands.
  */
-export const moveMail = (messageId: string, to: MailOutcome) =>
+export const moveMail = <To extends MailOutcome>(messageId: string, to: To) =>
   Mailbox.use((mailbox) => mailbox.moveMessageId(messageId, to)).pipe(
-    Effect.map((copies): MailFate =>
-      copies > 0 ? { status: "moved", to, copies } : { status: "not-in-mailbox", to },
+    Effect.map(
+      (copies) =>
+        (copies > 0
+          ? { status: "moved", to, copies }
+          : { status: "not-in-mailbox", to }) as MoveFate<To>,
     ),
     Effect.catchTag("MailboxError", ({ message }) =>
-      Effect.succeed<MailFate>({ status: "not-moved", to, reason: message }),
+      Effect.succeed({ status: "not-moved", to, reason: message } as MoveFate<To>),
     ),
   );
 
 /**
- * The Intake fails permanently: its failed runs are forgotten, so moving it back retries it
- * afresh, and its mail goes to `hex/failed`. Forgotten first: a move that fails leaves the Intake
- * retried rather than stuck.
+ * The Intake fails permanently, on the run `runId` if a run is at hand: its failed runs stop
+ * counting, so moving it back retries it afresh, and its mail goes to `hex/failed`. Ended first:
+ * a move that fails leaves the Intake retried rather than stuck; the run's own row stays, so a
+ * repeat of its step after a restart still ends here.
  */
-export const failPermanently = (messageId: string) =>
-  IntakeLedger.use((ledger) => ledger.clearFailedRuns(messageId)).pipe(
+export const failPermanently = (messageId: string, runId?: string) =>
+  IntakeLedger.use((ledger) => ledger.endFailedRuns(messageId, runId)).pipe(
     Effect.andThen(moveMail(messageId, "failed")),
   );
 
 /**
- * Records the failed run `runId` of the Intake. On its {@link MAX_FAILED_RUNS}th failed run the
- * Intake fails permanently ({@link failPermanently}); before that its mail stays for a retry.
+ * Records the failed run `runId` of the Intake. On its {@link MAX_FAILED_RUNS}th failed run (or
+ * when this run already ended the Intake's runs, repeated after a restart) the Intake fails
+ * permanently ({@link failPermanently}); before that its mail stays for a retry.
  */
 export const recordFailedRun = (messageId: string, runId: string) =>
   Effect.gen(function* () {
-    const { count } = yield* IntakeLedger.use((ledger) => ledger.recordFailedRun(messageId, runId));
-    const mail: MailFate =
-      count < MAX_FAILED_RUNS ? { status: "kept-for-retry" } : yield* failPermanently(messageId);
-    return { failedRuns: count, mail } satisfies FailedRun;
+    const { count, ended } = yield* IntakeLedger.use((ledger) =>
+      ledger.recordFailedRun(messageId, runId),
+    );
+    if (!ended && count < MAX_FAILED_RUNS) {
+      return { failedRuns: count, mail: { status: "kept-for-retry" } } satisfies FailedRun;
+    }
+    const mail = yield* failPermanently(messageId, runId);
+    return { failedRuns: Math.max(count, MAX_FAILED_RUNS), mail } satisfies FailedRun;
   });
 
 /** Where the mail went, as the end of a sentence about the Intake. */
@@ -80,7 +109,7 @@ export function describeMove(mail: MailFate): string {
     case "not-moved":
       return `moving its mail to ${outcomeFolder(mail.to)} failed (${mail.reason})`;
     case "kept-for-retry":
-      return "its mail, if in the watched folder, stays there for a retry";
+      return "a mail of it in the watched folder stays there for a retry";
   }
 }
 
@@ -89,12 +118,12 @@ export function describeFailedRun({ failedRuns, mail }: FailedRun): string {
   if (failedRuns >= MAX_FAILED_RUNS) {
     return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, so the Intake failed permanently: ${describeMove(mail)}`;
   }
-  return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}: ${describeMove(mail)} no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
+  return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}: ${describeMove(mail)}, which the mailbox watcher retries no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
 }
 
 /** What happened to the mail, as a failed run's error carries it (from the move step), if it does. */
-export function mailFateOf(error: unknown): MailFate | undefined {
+export function mailFateOf(error: unknown): FailedRunMailFate | undefined {
   return error instanceof Object && "mail" in error
-    ? Option.getOrUndefined(Schema.decodeUnknownOption(MailFate)(error.mail))
+    ? Option.getOrUndefined(Schema.decodeUnknownOption(FailedRunMailFate)(error.mail))
     : undefined;
 }

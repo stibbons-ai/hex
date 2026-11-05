@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { refusingImap } from "./fake-imap";
+import { fakeImap } from "./fake-imap";
 import { freePort } from "./timeouts";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -216,7 +216,9 @@ describe("bun packages/server/src/main.ts", () => {
   });
 
   describe("with a mailbox", () => {
-    const PASSWORD = "imap-secret-0123456789";
+    // With `"` and `\`, which LOGIN sends escaped: `imap-se\"cr\\et-0123456789`.
+    const PASSWORD = 'imap-se"cr\\et-0123456789';
+    const ESCAPED = 'imap-se\\"cr\\\\et-0123456789';
     /** hex with a config watching INBOX on the IMAP server at 127.0.0.1:`port`, in plaintext. */
     async function spawnWithMailbox(name: string, port: number) {
       const config = join(directory, `${name}.json`);
@@ -237,7 +239,7 @@ describe("bun packages/server/src/main.ts", () => {
     }
 
     test("an IMAP server that refuses the login fails startup, never showing the credentials", async () => {
-      const imap = refusingImap();
+      const imap = fakeImap({ refuseLogin: true });
       try {
         const child = await spawnWithMailbox("refused-login", imap.port);
         try {
@@ -246,11 +248,32 @@ describe("bun packages/server/src/main.ts", () => {
           child.kill();
         }
         const stderr = await new Response(child.stderr).text();
-        // The server got the password, and echoed it back in its refusal.
-        expect(imap.logins.join("\n")).toContain(PASSWORD);
+        // The server got the password, escaped, and echoed it back in its refusal.
+        expect(imap.logins.join("\n")).toContain(ESCAPED);
         expect(stderr).toContain(`127.0.0.1:${imap.port}, folder INBOX: logging in failed`);
-        expect(stderr).not.toContain(PASSWORD);
-        expect(stderr).not.toContain(Buffer.from(PASSWORD).toString("base64"));
+        expect(stderr).toContain('LOGIN "***" "***"');
+        for (const form of [PASSWORD, ESCAPED, Buffer.from(PASSWORD).toString("base64")]) {
+          expect(stderr).not.toContain(form);
+        }
+      } finally {
+        imap.server.stop(true);
+      }
+    });
+
+    test("an IMAP server without MOVE fails startup, naming the extension", async () => {
+      const imap = fakeImap({ capabilities: "IMAP4rev1 IDLE UIDPLUS" });
+      try {
+        const child = await spawnWithMailbox("no-move", imap.port);
+        try {
+          expect(await child.exited).toBe(1);
+        } finally {
+          child.kill();
+        }
+        expect(await new Response(child.stderr).text()).toContain(
+          `127.0.0.1:${imap.port}, folder INBOX: checking the server failed: the server lacks the IMAP MOVE extension (RFC 6851)`,
+        );
+        // Never got as far as touching the folder.
+        expect(imap.commands.some((line) => /\b(SELECT|EXAMINE)\b/i.test(line))).toBe(false);
       } finally {
         imap.server.stop(true);
       }

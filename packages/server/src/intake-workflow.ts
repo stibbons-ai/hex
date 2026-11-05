@@ -28,7 +28,14 @@ import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
-import { MailFate, describeFailedRun, mailFateOf, moveMail, recordFailedRun } from "./mail-fate";
+import {
+  ProcessedMailFate,
+  describeFailedRun,
+  mailFateOf,
+  moveMail,
+  recordFailedRun,
+} from "./mail-fate";
+import type { FailedRunMailFate } from "./mail-fate";
 
 /** The data the Intake workflow works on: the ledger's LibSQL file and the Outbox. */
 type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
@@ -65,7 +72,7 @@ const IntakeOutcome = Schema.Struct({
 });
 
 /** What the Intake workflow did with one Intake, and with its mail. */
-export const IntakeResult = Schema.Struct({ ...IntakeOutcome.fields, mail: MailFate });
+export const IntakeResult = Schema.Struct({ ...IntakeOutcome.fields, mail: ProcessedMailFate });
 export type IntakeResult = typeof IntakeResult.Type;
 
 /**
@@ -143,7 +150,7 @@ const noMailbox = Layer.succeed(Mailbox, {
   source: () => Effect.succeed(undefined),
   waitForChange: () => Effect.never,
   moveMessageId: () => Effect.succeed(0),
-  moveUid: () => Effect.void,
+  moveUid: () => Effect.succeed(false),
   close: Effect.void,
 });
 
@@ -553,7 +560,7 @@ export class IntakeRunError extends Error {
     message: string,
     readonly forwardings: readonly ForwardingAttempt[],
     readonly filings: readonly RunFiling[],
-    readonly mail: MailFate | undefined,
+    readonly mail: FailedRunMailFate | undefined,
   ) {
     super(message);
   }

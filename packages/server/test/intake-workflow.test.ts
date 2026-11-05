@@ -3,24 +3,20 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DateExtractionError,
-  DateExtractor,
-  IntakeLedger,
-  LedgerError,
-  intakeLedgerLayer,
-  readEml,
-} from "@hex/adapters";
-import type { DocumentFile, Intake, OutgoingMail } from "@hex/adapters";
+import { IntakeLedger, LedgerError, Mailbox, intakeLedgerLayer, readEml } from "@hex/adapters";
+import type { Intake, OutgoingMail } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadForwardingConfig } from "../src/config";
 import { IntakeRunError, runIntake } from "../src/intake-workflow";
 import type { IntakeForwarding } from "../src/intake-workflow";
-import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes } from "./eml";
+import { recordFailedRun } from "../src/mail-fate";
+import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes, pdfMail } from "./eml";
 import type { Mail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
 import { recordingMailer } from "./recording-mailer";
+import { scriptedDateExtractor } from "./scripted-extractor";
+import type { Script } from "./scripted-extractor";
 
 let directory: string;
 let instances = 0;
@@ -44,13 +40,7 @@ const NOT_IN_MAILBOX = { status: "not-in-mailbox", to: "processed" } as const;
 
 /** The end of a failed run's error when the Intake has runs left (its first failed run). */
 const FIRST_FAILED_RUN =
-  "; failed run 1 of 5: its mail, if in the watched folder, stays there for a retry no sooner than 5 min from now";
-
-/**
- * What the scripted DateExtractor answers for a Document, standing in for the model's answer;
- * an Error fails the call as a failed model call would.
- */
-type Script = (document: DocumentFile) => unknown;
+  "; failed run 1 of 5: a mail of it in the watched folder stays there for a retry, which the mailbox watcher retries no sooner than 5 min from now";
 
 /**
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
@@ -62,17 +52,7 @@ type Script = (document: DocumentFile) => unknown;
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
-  const asked: DocumentFile[] = [];
-  const dateExtractor = Layer.succeed(DateExtractor, {
-    extract: (document) =>
-      Effect.suspend(() => {
-        asked.push(document);
-        const answer = script(document);
-        return answer instanceof Error
-          ? Effect.fail(new DateExtractionError({ message: answer.message }))
-          : Effect.succeed({ answer, usage: undefined });
-      }),
-  });
+  const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
   const mailbox = memoryMailbox();
   const failing = { forwardingRecords: 0 };
@@ -150,6 +130,14 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
       return Effect.runPromise(
         IntakeLedger.use((ledger) => ledger.failedRuns(messageId)).pipe(
           Effect.provide(intakeLedgerLayer(paths.databasePath)),
+        ),
+      );
+    },
+    /** Runs `program` on the ledger and the Mailbox, as the workflow's steps would. */
+    on<A, E>(program: Effect.Effect<A, E, IntakeLedger | Mailbox>) {
+      return Effect.runPromise(
+        program.pipe(
+          Effect.provide(Layer.mergeAll(intakeLedgerLayer(paths.databasePath), mailbox.layer)),
         ),
       );
     },
@@ -1006,7 +994,7 @@ describe("Intake workflow", () => {
 
   describe("the mail in the mailbox", () => {
     const dated = () => ({ year: 2026, month: 10, day: 1 });
-    const mailOf = (messageId: string) => ({ messageId, received, parts: [pdf("Rechnung.pdf")] });
+    const mailOf = (messageId: string) => pdfMail(messageId);
 
     test("a processed Intake's mail goes to hex/processed", async () => {
       const hex = freshHex(dated);
@@ -1108,8 +1096,7 @@ describe("Intake workflow", () => {
     test("every copy of a re-delivered mail moves, matched by Message-ID however it is bracketed", async () => {
       const hex = freshHex(dated);
       hex.deliver(mailOf("twice@shop.example"));
-      // A Message-ID that merely contains this one is another Intake.
-      hex.deliver(mailOf("not-twice@shop.example"));
+      hex.deliver(mailOf("other@shop.example"));
       hex.deliver(mailOf("twice@shop.example"));
       const result = await hex.run({
         ...(await Effect.runPromise(readEml(buildEml(mailOf("x@y")), "test.eml"))),
@@ -1120,7 +1107,63 @@ describe("Intake workflow", () => {
         "twice@shop.example",
         "twice@shop.example",
       ]);
-      expect(hex.mailbox.messageIds()).toEqual(["not-twice@shop.example"]);
+      expect(hex.mailbox.messageIds()).toEqual(["other@shop.example"]);
+    });
+
+    test("a move that fails leaves the mail where it is; the Intake stays processed", async () => {
+      const hex = freshHex(dated);
+      const mail = mailOf("stuck@shop.example");
+      hex.deliver(mail);
+      hex.mailbox.refuse("moving mail to hex/processed");
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        mail: {
+          status: "not-moved",
+          to: "processed",
+          reason: expect.stringContaining("[NOPERM] not allowed"),
+        },
+      });
+      expect(hex.mailbox.messageIds()).toEqual(["stuck@shop.example"]);
+      expect(await hex.ledger("stuck@shop.example")).toBeDefined();
+    });
+
+    test("a 5th failed run whose move fails leaves the mail, the Intake failed permanently", async () => {
+      const hex = freshHex(() => new Error("reading the Document date failed: 429"));
+      const mail = mailOf("stuck-failed@shop.example");
+      hex.deliver(mail);
+      for (let run = 1; run <= 4; run++) await hex.process(mail).catch(() => {});
+      hex.mailbox.refuse("moving mail to hex/failed");
+      const failed = (await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError;
+      expect(failed.mail).toMatchObject({ status: "not-moved", to: "failed" });
+      expect(failed.message).toContain(
+        "; failed run 5 of 5, so the Intake failed permanently: moving its mail to hex/failed failed (",
+      );
+      expect(hex.mailbox.messageIds()).toEqual(["stuck-failed@shop.example"]);
+      // Ended: moved back by hand or not, the Intake has its full number of runs again.
+      expect(await hex.failedRuns("stuck-failed@shop.example")).toBeUndefined();
+    });
+
+    test("the 5th failed run's step repeated after a restart still fails the Intake permanently", async () => {
+      const hex = freshHex(dated);
+      const id = "repeated@shop.example";
+      hex.deliver(mailOf(id));
+      // Runs 1 to 5 failed; the 5th ended the failed runs, then the process died before its
+      // move, and the step runs again with the same run id.
+      await hex.on(
+        Effect.gen(function* () {
+          const ledger = yield* IntakeLedger;
+          for (const run of ["r1", "r2", "r3", "r4", "r5"]) yield* ledger.recordFailedRun(id, run);
+          yield* ledger.endFailedRuns(id, "r5");
+        }),
+      );
+      const repeated = await hex.on(recordFailedRun(id, "r5"));
+      expect(repeated).toEqual({
+        failedRuns: 5,
+        mail: { status: "moved", to: "failed", copies: 1 },
+      });
+      expect(hex.mailbox.messageIds("hex/failed")).toEqual([id]);
+      expect(await hex.failedRuns(id)).toBeUndefined();
     });
   });
 });
