@@ -37,9 +37,9 @@ themselves.
 
 Live model runs (`bun run eval`, `bun run intake`, the server's chat model) need the model
 provider's API key; tests and CI never do. [SecretSpec](https://secretspec.dev) declares the keys
-in the committed `secretspec.toml`, and the shell exports them from 1Password on entry. The shell
-supplies the `secretspec` command (it ships with devenv); the 1Password CLI (`op`) comes from the
-host. Any other way of setting the variables still works.
+in the committed `secretspec.toml`, and the shell exports them from 1Password on entry.
+`secretspec` comes with devenv itself; the 1Password CLI (`op`) comes from the host. Any other way
+of setting the variables still works.
 
 The keys are Secure Notes `secretspec/hex/default/<KEY>` in the vault `Hex` of the 1Password
 account `my.1password.com`. The shell reads them as a **read-only service account** (provider
@@ -79,8 +79,10 @@ the live shell. The keys are never set through devenv's `env`, which would write
 world-readable Nix store, and devenv's own SecretSpec integration (`secretspec.enable`) stays off:
 it would fetch the keys a second time and refuse to open the shell when the token is missing.
 Every process in the shell, including an AI coding agent started there, sees the keys. To read
-them from another store, set the provider on entry, for example
-`SECRETSPEC_PROVIDER=keyring devenv shell`.
+them from another store, set the provider on entry. Setting `SECRETSPEC_PROVIDER` also makes
+devenv resolve the keys itself, a second fetch on top of `enterShell`'s; in an AI agent session
+devenv then refuses to open the shell unless a reason is set too, for example
+`SECRETSPEC_PROVIDER=keyring SECRETSPEC_REASON="devenv shell: hex model keys" devenv shell`.
 
 ## Run
 
