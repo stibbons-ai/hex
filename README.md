@@ -267,6 +267,48 @@ bun run licenses      # dependency licence policy
 bun run test          # bun test
 ```
 
+## Eval fixtures
+
+The evals run against folders of `.eml` Intakes, each labelled by one `expected.json`: per
+Intake, its Documents in MIME order with their Document dates (`null` when a Document carries
+none). `@hex/eval-harness` exports the Effect Schema (`ExpectedSet`, `decodeExpectedSet`) and
+`loadExpectedSet(folder)`, which reject malformed or impossible dates and duplicate `file` or
+`fileName` entries.
+
+`packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
+without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
+dependencies (PDF, PNG and MIME writers, a bitmap font for the scans) and byte for byte
+reproducibly: no clock, randomness, locale or compression library is involved, and
+`.gitattributes` keeps git from rewriting the files. Change the generator, then regenerate; a test
+fails when the committed files drift from the generator's output.
+
+```sh
+bun run fixtures:generate             # rewrites packages/eval-harness/fixtures/synthetic/
+bun run fixtures:generate /tmp/set    # or any other folder
+```
+
+| Intake                       | Covers                                                                             |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `01-de-pdf-invoice`          | German text PDF, `02.11.2026` beside Leistungsdatum and Fälligkeitsdatum           |
+| `02-en-pdf-invoice`          | English text PDF, `2 Nov 2026` beside a Service period and a Due date              |
+| `03-de-iso-date`             | ISO dates, Rechnungsdatum beside Bestelldatum and Lieferdatum                      |
+| `04-de-long-date`            | `2. September 2026`, printed after the Fälligkeitsdatum                            |
+| `05-en-month-boundary`       | Mail `Date:` 1 Oct, Document date `September 30, 2026`                             |
+| `06-de-scan-png`             | Scanned invoice as a PNG, no text layer                                            |
+| `07-en-scan-pdf`             | Scanned invoice as an image-only PDF                                               |
+| `08-de-inline-logo`          | HTML logo via `cid:`, `Content-Disposition: inline`, over 20 KB: not a Document    |
+| `09-en-outlook-signature`    | Signature image via `cid:` but marked `attachment` (Outlook style): not a Document |
+| `10-de-tracking-pixel`       | 1×1 tracking pixel: not a Document                                                 |
+| `11-en-zero-documents-ics`   | Zero Documents: only a calendar invite (`.ics`)                                    |
+| `12-de-zero-documents-plain` | Zero Documents: plain text without attachments that mentions dates                 |
+| `13-de-multiple-documents`   | Three Documents (invoice, credit note, scanned receipt) plus a `.txt` note         |
+| `14-de-undated-document`     | A Document without any date: `documentDate` is `null`                              |
+
+Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
+folder. The root `.gitignore` guards against committing them by accident: it ignores every `.eml`
+and `expected.json` outside the synthetic folder, any `fixtures/real/` and `fixtures/private/`
+folder, and eval results in any `eval-results/` folder.
+
 ## Packages
 
 | Package             | Holds                                                                          |
@@ -274,7 +316,7 @@ bun run test          # bun test
 | `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
 | `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
 | `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels |
-| `@hex/eval-harness` | Empty until the evaluation slice                                               |
+| `@hex/eval-harness` | `expected.json` schema and loader; synthetic fixture set and its generator     |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags

@@ -1,0 +1,67 @@
+/** A minimal MIME writer: fixed boundaries and headers, CRLF line endings, base64 for binaries. */
+
+export type MimeNode =
+  | { readonly headers: readonly string[]; readonly body: string }
+  | { readonly subtype: "mixed" | "related" | "alternative"; readonly parts: readonly MimeNode[] };
+
+/** An RFC 2047 encoded word when `text` is not plain ASCII. */
+export function headerText(text: string): string {
+  return /^[\x20-\x7e]*$/.test(text)
+    ? text
+    : `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
+}
+
+/** A UTF-8 text part sent as 8bit (every line of the synthetic mails is far below 998 bytes). */
+export function textPart(type: "text/plain" | "text/html", text: string): MimeNode {
+  return {
+    headers: [`Content-Type: ${type}; charset=utf-8`, "Content-Transfer-Encoding: 8bit"],
+    body: text,
+  };
+}
+
+export interface FilePart {
+  contentType: string;
+  fileName: string;
+  disposition: "attachment" | "inline";
+  /** Without angle brackets; referenced from HTML as `cid:<contentId>`. */
+  contentId?: string;
+  data: Uint8Array;
+}
+
+export function filePart(file: FilePart): MimeNode {
+  const base64 = Buffer.from(file.data).toString("base64");
+  return {
+    headers: [
+      `Content-Type: ${file.contentType}; name="${file.fileName}"`,
+      `Content-Disposition: ${file.disposition}; filename="${file.fileName}"`,
+      ...(file.contentId === undefined ? [] : [`Content-ID: <${file.contentId}>`]),
+      "Content-Transfer-Encoding: base64",
+    ],
+    body: (base64.match(/.{1,76}/g) ?? []).join("\n"),
+  };
+}
+
+/**
+ * Renders a message: `headers` first, then the tree. Multipart boundaries are numbered from
+ * `boundaryPrefix` in document order, so the same tree always renders the same bytes.
+ */
+export function renderMessage(
+  headers: readonly string[],
+  root: MimeNode,
+  boundaryPrefix: string,
+): Uint8Array {
+  let next = 0;
+  const render = (node: MimeNode, top: readonly string[]): string[] => {
+    if ("body" in node) return [...top, ...node.headers, "", node.body];
+    const boundary = `${boundaryPrefix}_${++next}`;
+    return [
+      ...top,
+      `Content-Type: multipart/${node.subtype}; boundary="${boundary}"`,
+      "",
+      ...node.parts.flatMap((part) => [`--${boundary}`, ...render(part, [])]),
+      `--${boundary}--`,
+    ];
+  };
+  const text = render(root, [...headers, "MIME-Version: 1.0"]).join("\n");
+  return new TextEncoder().encode(`${text.replaceAll("\n", "\r\n")}\r\n`);
+}

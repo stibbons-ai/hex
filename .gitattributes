@@ -1,0 +1,5 @@
+# The synthetic fixtures are compared byte for byte (issue #11): git must never convert them.
+packages/eval-harness/fixtures/synthetic/*.eml -text
+packages/eval-harness/fixtures/synthetic/*.pdf binary
+packages/eval-harness/fixtures/synthetic/*.png binary
+packages/eval-harness/fixtures/synthetic/expected.json text eol=lf
