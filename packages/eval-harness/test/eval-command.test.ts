@@ -30,15 +30,17 @@ afterAll(async () => {
 let runs = 0;
 
 /**
- * `bun run eval` from `cwd` (default the repository root), with `CI` and `INIT_CWD` removed from
- * the inherited environment; `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank and `HEX_EVAL_RESULTS` a
- * fresh temp folder unless `env` sets them.
+ * `bun run eval` from `cwd` (default the repository root), as from a person's shell: `CI`,
+ * `INIT_CWD` and `npm_config_local_prefix` are removed from the inherited environment (an outer
+ * `bun run test` sets the last, and Bun 1.4.2 keeps an inherited one instead of the caller's
+ * directory). `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank and `HEX_EVAL_RESULTS` a fresh temp folder
+ * unless `env` sets them.
  */
 async function evalCommand(
   env: Record<string, string>,
   { openai = model, cwd = repoRoot }: { openai?: FakeOpenAI; cwd?: string } = {},
 ) {
-  const { CI: _, INIT_CWD: __, ...inherited } = process.env;
+  const { CI: _, INIT_CWD: __, npm_config_local_prefix: ___, ...inherited } = process.env;
   const results = join(directory, `results-${++runs}`);
   const child = Bun.spawn(["bun", "run", "--silent", "eval"], {
     cwd,
