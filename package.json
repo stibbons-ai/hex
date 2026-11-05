@@ -44,6 +44,7 @@
     "@types/spdx-expression-parse": "4.0.0",
     "chat": "4.43.0",
     "effect": "4.1.0",
+    "nodemailer": "10.3.1",
     "oxfmt": "0.75.0",
     "oxlint": "1.90.0",
     "postal-mime": "4.2.0",

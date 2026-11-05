@@ -5,7 +5,7 @@ import type { MastraModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { StreamErrorRetryProcessor } from "@mastra/core/processors";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
-import { messageOf } from "./errors";
+import { excerpt, messageOf, redact } from "./errors";
 import { toMastraSchema } from "./schema";
 
 /**
@@ -89,18 +89,13 @@ function modelName(model: MastraModelConfig): string {
  * names (`AWS_SECRET_ACCESS_KEY`, `*_TOKEN`) are not scrubbed.
  */
 function withoutApiKeys(message: string): string {
-  return Object.entries(process.env).reduce(
-    (text, [name, value]) =>
-      name.endsWith("_API_KEY") && value && value.length >= 8 ? text.replaceAll(value, name) : text,
+  return redact(
     message,
+    Object.entries(process.env).flatMap(([name, value]) =>
+      name.endsWith("_API_KEY") && value && value.length >= 8 ? [[value, name] as const] : [],
+    ),
   );
 }
-
-/**
- * How much of a provider's error message an error keeps: some quote the rejected request, the
- * Document's content included, and the workflow persists its failure.
- */
-const MAX_PROVIDER_MESSAGE = 300;
 
 /**
  * The HTTP error status (400 and up) of the provider call `error` (or one of its causes) failed
@@ -177,11 +172,7 @@ export function dateExtractorLayer(
             { structuredOutput: { schema, errorStrategy: "warn" }, abortSignal: signal },
           ),
         catch: (cause) => {
-          const reason = withoutApiKeys(messageOf(cause)).trim() || "no message";
-          const shown =
-            reason.length > MAX_PROVIDER_MESSAGE
-              ? `${reason.slice(0, MAX_PROVIDER_MESSAGE)}…`
-              : reason;
+          const shown = excerpt(withoutApiKeys(messageOf(cause)));
           const status = httpStatusOf(cause);
           return new DateExtractionError({
             message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,

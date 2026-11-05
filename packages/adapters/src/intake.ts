@@ -52,6 +52,8 @@ export const Intake = Schema.Struct({
   ),
   /** The From address, if any. */
   sender: Schema.optionalKey(Schema.String),
+  /** The Subject, decoded (RFC 2047), if any; untrusted. */
+  subject: Schema.optionalKey(Schema.String),
   /** Content-IDs the HTML body references with `cid:` URLs. */
   cidReferences: Schema.Array(Schema.String),
   attachments: Schema.Array(IntakeAttachment),
@@ -204,6 +206,7 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
       messageId,
       receivedAt: received.toISOString(),
       ...(sender ? { sender } : {}),
+      ...(email.subject ? { subject: email.subject } : {}),
       cidReferences: [...contentIdReferences(email.html ?? "")],
       attachments: email.attachments.map((attachment) => ({
         ...(attachment.filename ? { fileName: attachment.filename } : {}),

@@ -6,9 +6,9 @@
 // (where `bun run studio` ran) as MASTRA_PROJECT_ROOT: HEX_CONFIG and the data paths resolve
 // against it, as they do for `bun run start`.
 import { resolve } from "node:path";
-import { dateExtractorLayer } from "@hex/adapters";
+import { dateExtractorLayer, smtpMailerLayer } from "@hex/adapters";
 import { createStudioChatAgent } from "../chat";
-import { loadChatModel, loadIntakeConfig } from "../config";
+import { loadChatModel, loadForwardingConfig, loadIntakeConfig } from "../config";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "../intake-workflow";
 import { createHexMastra, createHexStore } from "../mastra";
 import { dataPaths } from "../paths";
@@ -16,6 +16,7 @@ import { dataPaths } from "../paths";
 const root = process.env.MASTRA_PROJECT_ROOT || process.cwd();
 const configPath = process.env.HEX_CONFIG ? resolve(root, process.env.HEX_CONFIG) : undefined;
 const { category, model } = await loadIntakeConfig(configPath);
+const forwarding = await loadForwardingConfig(configPath, process.env);
 const paths = dataPaths(process.env, root);
 // Visible proof of the root: without MASTRA_PROJECT_ROOT the paths fall back to the working
 // directory (`.mastra/output` under `mastra start`'s layout).
@@ -26,8 +27,13 @@ export const mastra = createHexMastra({
   storage: await createHexStore(paths),
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({
-      runtime: createIntakeRuntime(paths, dateExtractorLayer(model)),
+      runtime: createIntakeRuntime(
+        paths,
+        dateExtractorLayer(model),
+        forwarding && smtpMailerLayer(forwarding.smtp),
+      ),
       category,
+      forwarding,
     }),
   },
   agents: chatAgent && { [chatAgent.id]: chatAgent },

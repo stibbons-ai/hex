@@ -70,9 +70,10 @@ setup:
 The keys are `OPENAI_API_KEY` (the default Intake and eval model, `openai/gpt-5.1-codex-mini`),
 `ANTHROPIC_API_KEY` (an `anthropic/` `intake.model` or chat model) and `GEMINI_API_KEY` (a
 `google/` one). `GOOGLE_GENERATIVE_AI_API_KEY`, the variable Mastra's model router reads for
-`google/` models, is derived from `GEMINI_API_KEY` and never stored. All are optional, and a
-missing or rejected service token only warns: the shell still opens, and a model call without its
-key fails.
+`google/` models, is derived from `GEMINI_API_KEY` and never stored. `HEX_SMTP_USER` and
+`HEX_SMTP_PASSWORD` are the SMTP login Forwarding sends with (see [Intake](#intake-dev-command)).
+All are optional, and a missing or rejected service token only warns: the shell still opens, and
+a model call without its key fails.
 
 How it works: `enterShell` in `devenv.nix` runs `secretspec export` and exports the result into
 the live shell. The keys are never set through devenv's `env`, which would write them into the
@@ -181,16 +182,21 @@ bun run intake path/to/mail.eml
 runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
 Documents it filed (paths relative to the Outbox; a Document filed by its received date is
 marked `(no usable Document date; filed by received date)`), that the Intake has no Documents, or
-that it was already processed. It exits with code 1 and a message on a file it can't read or
-that is no mail, an Intake without a Message-ID or without a usable received date, a config it
-can't use, or a failed run. Run it from the repository root. The same workflow is registered
-with the server as `intake` (`workflows.start` with an Intake as `inputData`); the server opens
-the Intake ledger at startup and fails to start when it can't.
+that it was already processed; then each target that has the Documents (`forwarded to sevdesk`,
+`already forwarded to sevdesk earlier`). It exits with code 1 and a message on a file it can't
+read or that is no mail, an Intake without a Message-ID or without a usable received date, a
+config it can't use (including SMTP settings missing while a target is enabled), or a failed run.
+A failed run still prints this run's Filings and the targets recorded as having the Documents, and the
+message names each failed branch once (`forwarding to paperless: …`, `filing: …`). Run it from the
+repository root. The same workflow is registered with the server as `intake`
+(`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger at startup
+and fails to start when it can't, or when a Forwarding target is enabled without usable SMTP
+settings.
 
 The workflow, in order:
 
 1. **Ledger check**: an Intake whose Message-ID (trimmed, without `<>`) is in the ledger was
-   processed before; the run ends there and files nothing.
+   processed before; the run ends there and files or forwards nothing.
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
    `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
    TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
@@ -199,7 +205,24 @@ The workflow, in order:
    and every other type (`.ics`, text, office files). An attached mail (`message/rfc822`) is
    one non-Document attachment, never unpacked: the Documents inside it are not filed. An
    unreferenced `inline` image or PDF counts, since Apple Mail sends scans that way.
-3. **Document dates** (`packages/adapters/src/date-extractor.ts`): a model reads each
+3. **Forwarding** (`packages/adapters/src/mailer.ts`): to each enabled target, one mail by SMTP
+   carrying all of the Intake's Documents as attachments, bytes unchanged, each under its
+   detected file name (Filing may add a collision suffix such as ` (1)` to its own copy) and the
+   type its content shows when hex recognises it (PDF, JPEG, PNG, GIF, WebP: a PDF declared
+   `application/octet-stream` goes as `application/pdf`), else the type the sender gave it;
+   nothing else of the mail (no body, no inline decoration). Its subject is the original subject
+   (control characters replaced by spaces), or `Documents forwarded by hex` when there was none;
+   its plain-text body names the original Message-ID and sender. Targets go one after another, in
+   the config's order. An Intake without Documents forwards nothing. Each Forwarding is recorded
+   in the ledger right after the server accepted the mail (tried 3 times, 100 ms then 200 ms
+   apart, when the ledger fails); a target recorded for this Intake is skipped. A refused or
+   failed send (connection, TLS, login, a rejected recipient) fails that target's branch only;
+   the error names the target address, the server and the SMTP stage (e.g.
+   `EENVELOPE at RCPT TO`) and keeps at most 300 characters of the server's reply, never the
+   credentials. A send the server accepted but the ledger could not record fails the branch as
+   `sent, but recording it failed …; running this Intake again sends it again`: that target does
+   get the Intake a second time on the next run.
+4. **Document dates** (`packages/adapters/src/date-extractor.ts`): a model reads each
    Document's Document date from the Document itself, handed over natively through Mastra's
    model router (PDFs as `application/pdf` file parts, JPEG, PNG, GIF and WebP images as image
    file parts, each by the type its content shows; hex does no OCR or text extraction and the
@@ -214,13 +237,13 @@ The workflow, in order:
    answers blind; HEIC, HEIF, TIFF and BMP images (or AVIF content declared as another image
    type) Mastra would send but OpenAI and Anthropic refuse, failing the run every time. A model
    call that fails (network, missing or wrong API key, rate limit, provider error, a provider
-   refusing the file) fails the run before anything is filed or recorded, so running the Intake
-   again retries it; transient errors (rate limit, overload, a dropped or refused connection)
+   refusing the file) fails the Filing branch before any of its Documents is filed, so running
+   the Intake again retries it; transient errors (rate limit, overload, a dropped or refused connection)
    are retried twice first, at least 3 s apart (longer when the provider asks, up to 30 s). A
    Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps failing
    its Intake until it is handled by hand. The error names the Document, the model and the HTTP
    status, if any, and keeps at most 300 characters of the provider's message.
-4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
+5. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
    one cut off at the token limit or withheld by a content filter; 30 February, month 13, a
@@ -244,17 +267,38 @@ The workflow, in order:
    that appeared meanwhile; the folder is then flushed and the `.partial` removed. Once linked,
    the Document is filed: a failed flush or a `.partial` that can't be removed only logs a
    warning. A failed write removes its `.partial` (logging a warning if it can't); a crash or
-   kill mid-write can leave one behind.
-5. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
-   Documents.
+   kill mid-write can leave one behind. Each Filing is recorded in the ledger once the file is in
+   place.
+6. **Ledger**: when every branch succeeded, the Intake is recorded as processed with its
+   Filings, also when it had no Documents.
 
-| Setting                        | Meaning                                                                                                             |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                                                  |
-| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                             |
-| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                           |
-| `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`            |
-| `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config |
+**Branches and retries.** Forwarding to each target and Filing (steps 4 and 5) are branches:
+every run attempts each of them, even when another failed, unless the ledger can't be read or an
+unexpected defect occurs; then the run fails at once. An unreadable ledger fails it before
+anything is sent; a defect can come after earlier targets were sent to, and the failed run's
+output then doesn't list them (the ledger has those that were recorded, so a re-run skips them). When any branch
+failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
+Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
+same Intake) repeats only the branches the ledger has no record of: a target recorded as having
+the Intake is not sent it again, and a Document recorded as filed is neither read by the model
+again nor filed again. A branch done but not recorded (the ledger failing right after) is done
+again: a send as described in step 3, a Filing as a second copy `name (1).pdf`. Running the same
+Intake twice at the same time is unsupported and may duplicate Forwardings and Filings; #9
+serialises runs.
+
+| Setting                        | Meaning                                                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                                                                                                  |
+| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                                                                             |
+| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                                                                           |
+| `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`                                                            |
+| `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config                                                 |
+| `HEX_CONFIG` `forwarding`      | Forwarding: `from` (the sender address) and `targets`, each name → `{ "to": address, "enabled": true/false }`; off when absent                                      |
+| `HEX_SMTP_HOST`                | SMTP server to forward through; required (as are user and password) once a target is enabled                                                                        |
+| `HEX_SMTP_PORT`                | SMTP port; default 465                                                                                                                                              |
+| `HEX_SMTP_SECURITY`            | `tls` (implicit TLS), `starttls` (required, never AUTH in plaintext) or `plain` (loopback IP address only, e.g. `127.0.0.1`); default `tls` on 465, else `starttls` |
+| `HEX_SMTP_USER`                | SMTP login, read as a redacted secret                                                                                                                               |
+| `HEX_SMTP_PASSWORD`            | SMTP password, read as a redacted secret: never in the config, an error, a log or the dev command's output                                                          |
 
 The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
 required:
@@ -262,9 +306,30 @@ required:
 ```json
 {
   "chat": { "model": "anthropic/claude-opus-5-5", "channels": {} },
-  "intake": { "category": "ER", "model": "openai/gpt-5.1-codex-mini" }
+  "intake": { "category": "ER", "model": "openai/gpt-5.1-codex-mini" },
+  "forwarding": {
+    "from": "hex@example.com",
+    "targets": {
+      "sevdesk": { "to": "autobox@sevdesk.example", "enabled": true },
+      "paperless": { "to": "bill@paperless.example", "enabled": true }
+    }
+  }
 }
 ```
+
+A target's name (lowercase letters, digits and `-`, starting with a letter) is the key the
+ledger records its Forwardings under, so renaming a target makes it a new one. Addresses are
+bare (`local@domain`, no display name, one per target). A disabled target sends nothing and
+records nothing; with no target enabled (or no `forwarding` section) Forwarding is off and no
+SMTP setting is needed. Plaintext SMTP (`HEX_SMTP_SECURITY=plain`) is refused unless the host is
+a loopback IP address, an IPv4 `127.x.x.x` or `::1`, so the credentials never cross a network
+unencrypted. Names, `localhost` included, are refused: the SMTP client resolves a name first
+through DNS, before `/etc/hosts`, so it could reach another machine; use `127.0.0.1`. The SMTP
+Mailer
+itself refuses it too, without connecting. The SMTP settings are
+read as Effect `Config` from the environment: the login (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) is
+declared in `secretspec.toml`, so the development shell exports it like the model keys; set
+`HEX_SMTP_HOST`, `HEX_SMTP_PORT` and `HEX_SMTP_SECURITY` yourself.
 
 The development shell exports the API keys (see
 [Development shell and model keys](#development-shell-and-model-keys)). hex doesn't check at
@@ -280,12 +345,16 @@ The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use
 Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
 `{ "index": …, "path": …, "fellBack": … }` per Document: its position among the attachments,
 0-based, where it landed, and `true` when it was filed by the received date: the model answered
-no usable Document date, or hex never sent the Document to a model (see step 3)). Entries
+no usable Document date, or hex never sent the Document to a model (see step 4)). Entries
 recorded before #7 (when hex filed every Document by the received date) have no `fellBack` and
 read back without it. The workflow's result (`IntakeResult`)
-carries the same Filings, also for an Intake already processed. An Intake whose run failed
-halfway is not recorded, so running it again files the Documents that already landed a second
-time, as `name (1).pdf`.
+carries the same Filings, also for an Intake already processed, and its Forwardings (`forwarded`
+by this run or `forwarded-earlier`). Each branch is recorded as it succeeds, before the Intake is
+processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`target`,
+`forwarded_at`; one row per target) and `hex_intake_filings` (`document_index`, `path`,
+`fell_back`, `filed_at`; one row per Document). Recording a branch again keeps the first row
+(`ON CONFLICT DO NOTHING`). Intakes processed before #8 have no rows there and read back with no
+Forwardings.
 
 ## Chat (Slack, Signal)
 

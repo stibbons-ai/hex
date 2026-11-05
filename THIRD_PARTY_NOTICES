@@ -75,6 +75,14 @@ scripts/license-allowlist.json); the .eml parser behind the Intake reader.
   modify and distribute without conditions; provided "as is", without
   warranty.
 
+nodemailer 10.3.1 — MIT-0 (reviewed exact exception in
+scripts/license-allowlist.json); the SMTP client behind the Mailer that
+forwards Documents to SevDesk and paperless-ngx.
+  Upstream: https://github.com/nodemailer/nodemailer
+  Copyright (c) 2011-2023 Andris Reinman. MIT No Attribution: use, copy,
+  modify and distribute without conditions; provided "as is", without
+  warranty.
+
 zod 4.6.7 — MIT; transitive Mastra dependency only, not a schema authority.
 posthog-node 5.57.2, @posthog/core 1.62.0, @posthog/types 1.418.0 — MIT;
 transitive telemetry dependencies. Project scripts and CI set

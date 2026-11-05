@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
-import { dateExtractorLayer } from "@hex/adapters";
+import { dateExtractorLayer, smtpMailerLayer } from "@hex/adapters";
 import { closeInOrder } from "./close";
 import { loadChatConfig } from "./channels";
-import { loadIntakeConfig } from "./config";
+import { loadForwardingConfig, loadIntakeConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
@@ -30,11 +30,17 @@ if (!chat) {
   );
 }
 const { category, model } = await loadIntakeConfig(configPath);
+// Off without targets; with one enabled, missing SMTP settings fail startup, naming the variable.
+const forwarding = await loadForwardingConfig(configPath, process.env);
 const port = parsePort(process.env.HEX_PORT);
 const paths = dataPaths(process.env);
 // Built now, so a ledger that can't be opened fails startup instead of every later Intake run
 // (the runtime keeps a failed build); disposed after the server stopped.
-const intakeRuntime = createIntakeRuntime(paths, dateExtractorLayer(model));
+const intakeRuntime = createIntakeRuntime(
+  paths,
+  dateExtractorLayer(model),
+  forwarding && smtpMailerLayer(forwarding.smtp),
+);
 /** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
 const disposeAfterFailure = (error: unknown) =>
   intakeRuntime
@@ -54,7 +60,7 @@ const starting = startServer({
   observabilityPath: paths.observabilityPath,
   port,
   workflows: {
-    [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category }),
+    [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category, forwarding }),
   },
   ...(chat ? { chat } : {}),
 }).then(
