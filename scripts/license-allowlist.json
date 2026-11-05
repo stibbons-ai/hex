@@ -10,5 +10,11 @@
     "version": "4.2.0",
     "license": "MIT-0",
     "reason": "MIME parser for the Intake .eml reader (@hex/adapters). MIT No Attribution is the MIT licence without its attribution condition, so it grants at least what MIT does; the installed LICENSE.txt was reviewed. Recorded in THIRD_PARTY_NOTICES. An exact exception, not a policy change for MIT-0."
+  },
+  {
+    "name": "nodemailer",
+    "version": "10.3.1",
+    "license": "MIT-0",
+    "reason": "SMTP client behind the Mailer that forwards Documents to SevDesk and paperless-ngx (@hex/adapters). MIT No Attribution is the MIT licence without its attribution condition, so it grants at least what MIT does; the installed LICENSE was reviewed. Recorded in THIRD_PARTY_NOTICES. An exact exception, not a policy change for MIT-0."
   }
 ]

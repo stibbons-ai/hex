@@ -2,8 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Redacted } from "effect";
 import { loadChatConfig } from "../src/channels";
-import { loadIntakeConfig } from "../src/config";
+import { loadForwardingConfig, loadIntakeConfig } from "../src/config";
 import { BOT_ACCOUNT, BOT_ACI, DANIEL as DANIEL_ACI } from "./fake-signal-cli";
 
 const signalEnv = { SIGNAL_ACCOUNT: BOT_ACCOUNT, SIGNAL_CLI_URL: "http://127.0.0.1:8080" };
@@ -296,5 +297,169 @@ describe("loadIntakeConfig", () => {
     await expect(loadIntakeConfig(path)).rejects.toThrow(
       `hex config ${path}: cannot read the file`,
     );
+  });
+});
+
+describe("loadForwardingConfig", () => {
+  const PASSWORD = "smtp-secret-0123456789";
+  const smtpEnv = {
+    HEX_SMTP_HOST: "smtp.example.com",
+    HEX_SMTP_USER: "hex@example.com",
+    HEX_SMTP_PASSWORD: PASSWORD,
+  };
+  const forwarding = {
+    from: "hex@example.com",
+    targets: {
+      sevdesk: { to: "autobox@sevdesk.example", enabled: true },
+      paperless: { to: "bill@paperless.example", enabled: false },
+    },
+  };
+
+  test("the enabled targets, and the SMTP settings from the environment, credentials redacted", async () => {
+    const config = await loadForwardingConfig(await configFile({ ...valid, forwarding }), smtpEnv);
+    expect(config).toMatchObject({
+      from: "hex@example.com",
+      targets: [{ name: "sevdesk", to: "autobox@sevdesk.example" }],
+      smtp: { host: "smtp.example.com", port: 465, security: "tls" },
+    });
+    // The credentials are there, but never show when the settings are printed or serialised.
+    expect(Redacted.value(config!.smtp.password)).toBe(PASSWORD);
+    expect(Redacted.value(config!.smtp.user)).toBe("hex@example.com");
+    for (const shown of [
+      String(config!.smtp.password),
+      JSON.stringify(config),
+      Bun.inspect(config),
+    ]) {
+      expect(shown).not.toContain(PASSWORD);
+    }
+  });
+
+  test.each([
+    ["587, no security", { HEX_SMTP_PORT: "587" }, { port: 587, security: "starttls" }],
+    ["465, no security", { HEX_SMTP_PORT: "465" }, { port: 465, security: "tls" }],
+    [
+      "implicit TLS on 2465",
+      { HEX_SMTP_PORT: "2465", HEX_SMTP_SECURITY: "tls" },
+      { port: 2465, security: "tls" },
+    ],
+    ["STARTTLS on 465", { HEX_SMTP_SECURITY: "starttls" }, { port: 465, security: "starttls" }],
+    [
+      "plain on localhost",
+      { HEX_SMTP_HOST: "localhost", HEX_SMTP_PORT: "2525", HEX_SMTP_SECURITY: "plain" },
+      { host: "localhost", port: 2525, security: "plain" },
+    ],
+    [
+      "plain on 127.0.0.1",
+      { HEX_SMTP_HOST: "127.0.0.1", HEX_SMTP_SECURITY: "plain" },
+      { host: "127.0.0.1", security: "plain" },
+    ],
+    ["plain on ::1", { HEX_SMTP_HOST: "::1", HEX_SMTP_SECURITY: "plain" }, { security: "plain" }],
+  ])("%s", async (_case, env, smtp) => {
+    const path = await configFile({ ...valid, forwarding });
+    expect((await loadForwardingConfig(path, { ...smtpEnv, ...env }))?.smtp).toMatchObject(smtp);
+  });
+
+  test.each([
+    ["no config file", undefined],
+    ["no forwarding section", valid],
+    [
+      "every target disabled",
+      {
+        ...valid,
+        forwarding: {
+          ...forwarding,
+          targets: { sevdesk: { ...forwarding.targets.sevdesk, enabled: false } },
+        },
+      },
+    ],
+    ["no targets", { ...valid, forwarding: { ...forwarding, targets: {} } }],
+  ])("%s: Forwarding off, no SMTP setting needed", async (_case, content) => {
+    const path = content === undefined ? undefined : await configFile(content);
+    expect(await loadForwardingConfig(path, {})).toBeUndefined();
+  });
+
+  test.each(["HEX_SMTP_HOST", "HEX_SMTP_USER", "HEX_SMTP_PASSWORD"])(
+    "a missing %s with a target enabled fails, naming it",
+    async (name) => {
+      const path = await configFile({ ...valid, forwarding });
+      await expect(loadForwardingConfig(path, { ...smtpEnv, [name]: undefined })).rejects.toThrow(
+        `hex config ${path}: forwarding: environment variable ${name} is not set`,
+      );
+    },
+  );
+
+  test.each([
+    ["HEX_SMTP_PORT", "70000"],
+    ["HEX_SMTP_PORT", "smtp"],
+    ["HEX_SMTP_SECURITY", "ssl"],
+  ])("%s=%j fails, naming the variable and never the password", async (name, value) => {
+    const path = await configFile({ ...valid, forwarding });
+    const loading = loadForwardingConfig(path, { ...smtpEnv, [name]: value });
+    await expect(loading).rejects.toThrow(
+      `hex config ${path}: forwarding: unusable environment variable: `,
+    );
+    await expect(loading).rejects.toThrow(`at ["${name}"]`);
+    await expect(loading).rejects.not.toThrow(PASSWORD);
+  });
+
+  test.each(["smtp.example.com", "127.0.0.1.example.com", "10.0.0.1"])(
+    "plaintext SMTP to %s is refused: only a loopback host may go without TLS",
+    async (host) => {
+      const path = await configFile({ ...valid, forwarding });
+      const loading = loadForwardingConfig(path, {
+        ...smtpEnv,
+        HEX_SMTP_HOST: host,
+        HEX_SMTP_SECURITY: "plain",
+      });
+      await expect(loading).rejects.toThrow(
+        `hex config ${path}: forwarding: HEX_SMTP_SECURITY=plain is only allowed for a loopback host`,
+      );
+      await expect(loading).rejects.not.toThrow(PASSWORD);
+    },
+  );
+
+  test.each([
+    ["a sender that is no address", { ...forwarding, from: "hex" }, '["forwarding"]["from"]'],
+    [
+      "a target address with a display name",
+      {
+        ...forwarding,
+        targets: { sevdesk: { to: "SevDesk <autobox@sevdesk.example>", enabled: true } },
+      },
+      '["forwarding"]["targets"]["sevdesk"]["to"]',
+    ],
+    [
+      "two addresses",
+      { ...forwarding, targets: { sevdesk: { to: "a@x.example,b@x.example", enabled: true } } },
+      '["forwarding"]["targets"]["sevdesk"]["to"]',
+    ],
+    [
+      "a target without enabled",
+      { ...forwarding, targets: { sevdesk: { to: "autobox@sevdesk.example" } } },
+      '["forwarding"]["targets"]["sevdesk"]["enabled"]',
+    ],
+    [
+      "an unknown target key",
+      {
+        ...forwarding,
+        targets: { sevdesk: { to: "autobox@sevdesk.example", enabled: true, password: "x" } },
+      },
+      '["forwarding"]["targets"]["sevdesk"]["password"]',
+    ],
+    [
+      "an unknown forwarding key",
+      { ...forwarding, smtpHost: "smtp.example.com" },
+      '["forwarding"]["smtpHost"]',
+    ],
+    [
+      "a target name that is no lowercase word",
+      { ...forwarding, targets: { "Sev Desk": { to: "autobox@sevdesk.example", enabled: true } } },
+      '["forwarding"]["targets"]',
+    ],
+  ])("%s fails, naming the file and the key", async (_case, content, at) => {
+    const path = await configFile({ ...valid, forwarding: content });
+    const loading = loadForwardingConfig(path, smtpEnv);
+    await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
+    await expect(loading).rejects.toThrow(`at ${at}`);
   });
 });

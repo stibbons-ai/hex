@@ -6,11 +6,13 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { IntakeLedger, intakeLedgerLayer } from "@hex/adapters";
+import { IntakeLedger, intakeLedgerLayer, readEml } from "@hex/adapters";
 import { Effect } from "effect";
 import { RECEIVED, buildEml, bytes, pdf } from "./eml";
 import { fakeOpenAI, inputFiles } from "./fake-openai";
 import type { FakeOpenAI } from "./fake-openai";
+import { fakeSmtp } from "./fake-smtp";
+import type { ReceivedMail } from "./fake-smtp";
 
 const repository = fileURLToPath(new URL("../../..", import.meta.url));
 let directory: string;
@@ -53,6 +55,11 @@ async function intake(args: string[], env: Record<string, string>, openai: FakeO
       HEX_CONFIG: "",
       HEX_DATA_DIR: "",
       HEX_OUTBOX_DIR: "",
+      HEX_SMTP_HOST: "",
+      HEX_SMTP_PORT: "",
+      HEX_SMTP_SECURITY: "",
+      HEX_SMTP_USER: "",
+      HEX_SMTP_PASSWORD: "",
       OPENAI_BASE_URL: openai.baseUrl,
       OPENAI_API_KEY: API_KEY,
       ...env,
@@ -332,5 +339,208 @@ describe("bun run intake", () => {
       'hex intake: the Intake workflow did not finish: filing "a.pdf" into 2026-11/ER failed',
     );
     expect(await ledgerEntry(dataDirectory, "blocked@shop.example")).toBeUndefined();
+  });
+
+  describe("Forwarding by SMTP (a fake SMTP server on loopback)", () => {
+    const SEVDESK = "autobox@sevdesk.example";
+    const PAPERLESS = "bill@paperless.example";
+    const SMTP_USER = "hex@example.com";
+    const SMTP_PASSWORD = "smtp-walkthrough-secret-0123456789";
+    const smtp = fakeSmtp();
+
+    afterAll(() => smtp.server.stop(true));
+
+    /** A config forwarding to SevDesk and paperless-ngx; a third target is off. */
+    async function forwardingConfig(name: string) {
+      const path = join(directory, name);
+      await writeFile(
+        path,
+        JSON.stringify({
+          chat: { model: "openai/gpt-5", channels: {} },
+          forwarding: {
+            from: "hex@example.com",
+            targets: {
+              sevdesk: { to: SEVDESK, enabled: true },
+              paperless: { to: PAPERLESS, enabled: true },
+              archive: { to: "archive@example.com", enabled: false },
+            },
+          },
+        }),
+      );
+      return path;
+    }
+
+    const smtpEnv = () => ({
+      HEX_SMTP_HOST: "127.0.0.1",
+      HEX_SMTP_PORT: String(smtp.port),
+      HEX_SMTP_SECURITY: "plain",
+      HEX_SMTP_USER: SMTP_USER,
+      HEX_SMTP_PASSWORD: SMTP_PASSWORD,
+    });
+
+    /** An invoice and a delivery note, an inline logo and a tracking pixel. */
+    const invoiceMail = (messageId: string) => ({
+      messageId,
+      received: RECEIVED,
+      html: '<img src="cid:logo@shop">',
+      parts: [
+        pdf("Rechnung 4711.pdf", DATED_PDF),
+        {
+          contentType: "image/png",
+          disposition: "inline",
+          contentId: "logo@shop",
+          content: bytes(20_000),
+        },
+        pdf("Lieferschein.pdf", UNDATED_PDF),
+        {
+          contentType: "image/gif",
+          disposition: "attachment",
+          fileName: "pixel.gif",
+          content: bytes(43),
+        },
+      ],
+    });
+
+    /** A received mail as hex's own reader reads it: recipients, subject and attachments. */
+    async function read({ to, raw }: ReceivedMail) {
+      const mail = await Effect.runPromise(readEml(new TextEncoder().encode(raw), "smtp"));
+      return {
+        to,
+        subject: mail.subject,
+        attachments: mail.attachments.map(({ fileName, mimeType, content }) => ({
+          fileName,
+          mimeType,
+          content: Buffer.from(content, "base64"),
+        })),
+      };
+    }
+    const documents = [
+      {
+        fileName: "Rechnung 4711.pdf",
+        mimeType: "application/pdf",
+        content: Buffer.from(DATED_PDF),
+      },
+      {
+        fileName: "Lieferschein.pdf",
+        mimeType: "application/pdf",
+        content: Buffer.from(UNDATED_PDF),
+      },
+    ];
+
+    test("each enabled target gets one mail with exactly the Documents; a re-run sends nothing", async () => {
+      const dataDirectory = join(directory, "forwarding");
+      const outbox = join(directory, "forwarding-outbox");
+      const config = await forwardingConfig("forwarding.json");
+      const eml = await writeMail("forward.eml", invoiceMail("forward@shop.example"));
+      const env = {
+        HEX_DATA_DIR: dataDirectory,
+        HEX_OUTBOX_DIR: outbox,
+        HEX_CONFIG: config,
+        ...smtpEnv(),
+      };
+      const sent = smtp.mails.length;
+
+      const first = await intake([eml], env);
+      expect(first).toMatchObject({ code: 0, stderr: "" });
+      expect(first.stdout).toBe(
+        [
+          `hex intake: forward@shop.example: filed 2 Documents into ${outbox}`,
+          "  2026-09/ER/Rechnung 4711.pdf",
+          "  2026-11/ER/Lieferschein.pdf (no usable Document date; filed by received date)",
+          "  forwarded to sevdesk",
+          "  forwarded to paperless",
+          "",
+        ].join("\n"),
+      );
+      const mails = smtp.mails.slice(sent);
+      expect(mails.map(({ from, to }) => ({ from, to }))).toEqual([
+        { from: "hex@example.com", to: [SEVDESK] },
+        { from: "hex@example.com", to: [PAPERLESS] },
+      ]);
+      expect(await Promise.all(mails.map(read))).toEqual([
+        { to: [SEVDESK], subject: "Rechnung", attachments: documents },
+        { to: [PAPERLESS], subject: "Rechnung", attachments: documents },
+      ]);
+      // hex logged in with the configured credentials, which it never printed.
+      expect(smtp.logins.at(-1)).toEqual({ user: SMTP_USER, password: SMTP_PASSWORD });
+      expect(first.stdout + first.stderr).not.toContain(SMTP_PASSWORD);
+      expect(await readFile(join(outbox, "2026-09/ER/Rechnung 4711.pdf"))).toEqual(
+        Buffer.from(DATED_PDF),
+      );
+      expect(await readFile(join(outbox, "2026-11/ER/Lieferschein.pdf"))).toEqual(
+        Buffer.from(UNDATED_PDF),
+      );
+      const entry = await ledgerEntry(dataDirectory, "forward@shop.example");
+      expect(entry?.forwardings.map(({ target }) => target)).toEqual(["paperless", "sevdesk"]);
+
+      const second = await intake([eml], env);
+      expect(second).toMatchObject({ code: 0, stderr: "" });
+      expect(second.stdout).toBe(
+        [
+          "hex intake: forward@shop.example was already processed; nothing filed",
+          "  already forwarded to paperless earlier",
+          "  already forwarded to sevdesk earlier",
+          "",
+        ].join("\n"),
+      );
+      expect(smtp.mails).toHaveLength(sent + 2);
+      expect(await persistedText(dataDirectory)).not.toContain(SMTP_PASSWORD);
+    });
+
+    test("a target the server refuses fails the run naming it; the re-run sends only to it", async () => {
+      const dataDirectory = join(directory, "forwarding-refused");
+      const outbox = join(directory, "forwarding-refused-outbox");
+      const config = await forwardingConfig("forwarding-refused.json");
+      const eml = await writeMail("refused.eml", invoiceMail("refused@shop.example"));
+      const env = {
+        HEX_DATA_DIR: dataDirectory,
+        HEX_OUTBOX_DIR: outbox,
+        HEX_CONFIG: config,
+        ...smtpEnv(),
+      };
+      const sent = smtp.mails.length;
+
+      smtp.rejecting.add(PAPERLESS);
+      const failed = await intake([eml], env).finally(() => smtp.rejecting.delete(PAPERLESS));
+      expect(failed.code).toBe(1);
+      const refusal = `sending to ${PAPERLESS} via 127.0.0.1:${smtp.port} failed (EENVELOPE at RCPT TO)`;
+      expect(failed.stdout).toStartWith(
+        `  forwarded to sevdesk\n  forwarding to paperless failed: ${refusal}`,
+      );
+      expect(failed.stderr).toStartWith(
+        `hex intake: the Intake workflow did not finish: forwarding to paperless: ${refusal}`,
+      );
+      expect(failed.stderr).toContain("550 5.1.1");
+      expect(failed.stdout + failed.stderr).not.toContain(SMTP_PASSWORD);
+      expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([[SEVDESK]]);
+      expect(await ledgerEntry(dataDirectory, "refused@shop.example")).toBeUndefined();
+
+      const retried = await intake([eml], env);
+      expect(retried).toMatchObject({ code: 0, stderr: "" });
+      expect(retried.stdout).toEndWith(
+        "  already forwarded to sevdesk earlier\n  forwarded to paperless\n",
+      );
+      // SevDesk never saw the Intake twice; the Documents were filed once.
+      expect(smtp.mails.slice(sent).map(({ to }) => to)).toEqual([[SEVDESK], [PAPERLESS]]);
+      expect((await readdir(join(outbox, "2026-09/ER"))).sort()).toEqual(["Rechnung 4711.pdf"]);
+      expect(await persistedText(dataDirectory)).not.toContain(SMTP_PASSWORD);
+    });
+
+    test("a target enabled without SMTP credentials fails before anything is filed, naming the variable", async () => {
+      const dataDirectory = join(directory, "forwarding-no-password");
+      const config = await forwardingConfig("forwarding-no-password.json");
+      const eml = await writeMail("no-password.eml", invoiceMail("no-password@shop.example"));
+      const run = await intake([eml], {
+        HEX_DATA_DIR: dataDirectory,
+        HEX_CONFIG: config,
+        ...smtpEnv(),
+        HEX_SMTP_PASSWORD: "",
+      });
+      expect(run).toMatchObject({ code: 1, stdout: "" });
+      expect(run.stderr).toStartWith(
+        `hex intake: hex config ${config}: forwarding: environment variable HEX_SMTP_PASSWORD is not set`,
+      );
+      expect(await readdir(dataDirectory).catch(() => [])).toEqual([]);
+    });
   });
 });

@@ -10,6 +10,7 @@
     "@mastra/core": "catalog:",
     "@mastra/libsql": "catalog:",
     "effect": "catalog:",
+    "nodemailer": "catalog:",
     "postal-mime": "catalog:"
   }
 }

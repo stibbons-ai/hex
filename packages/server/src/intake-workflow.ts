@@ -3,6 +3,8 @@ import {
   Filing,
   Intake,
   IntakeLedger,
+  Mailer,
+  MailerError,
   Outbox,
   createLocalStore,
   documentDateOf,
@@ -10,7 +12,7 @@ import {
   outboxLayer,
   toMastraSchema,
 } from "@hex/adapters";
-import type { LedgerError } from "@hex/adapters";
+import type { LedgerError, OutgoingMail } from "@hex/adapters";
 import {
   FILING_TIME_ZONE,
   calendarDateIn,
@@ -22,7 +24,7 @@ import {
 import type { Category } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
 
@@ -31,52 +33,94 @@ type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
 
 export const INTAKE_WORKFLOW_ID = "intake";
 
+/** One target Forwarding hands an Intake's Documents to: its name (the ledger's key) and address. */
+export interface ForwardingTarget {
+  readonly name: string;
+  readonly to: string;
+}
+
+/** Where the workflow forwards each Intake's Documents: the sender address and the targets that are on. */
+export interface IntakeForwarding {
+  readonly from: string;
+  readonly targets: readonly ForwardingTarget[];
+}
+
+/** One target's Forwarding of an Intake: sent by this run, or by an earlier one. */
+const ForwardingOutcome = Schema.Struct({
+  target: Schema.String,
+  status: Schema.Literals(["forwarded", "forwarded-earlier"]),
+});
+
 /** What the Intake workflow did with one Intake. */
 export const IntakeResult = Schema.Struct({
   messageId: Schema.String,
-  /** `already-processed`: the ledger had it, so nothing was filed this time. */
+  /** `already-processed`: the ledger had it, so nothing was filed or forwarded this time. */
   status: Schema.Literals(["processed", "already-processed"]),
-  /** One Filing per Document: this run's, or the earlier run's when already processed. */
+  /** One Filing per Document: this run's or an earlier run's. */
   filings: Schema.Array(Filing),
+  /** One per target the Documents went to, by this run or an earlier one. */
+  forwardings: Schema.Array(ForwardingOutcome),
 });
 export type IntakeResult = typeof IntakeResult.Type;
+
+/** This run's attempt at one target: as in the result, or failed with the reason. */
+const ForwardingAttempt = Schema.Union([
+  ForwardingOutcome,
+  Schema.Struct({ target: Schema.String, status: Schema.Literal("failed"), reason: Schema.String }),
+]);
+export type ForwardingAttempt = typeof ForwardingAttempt.Type;
 
 const Unprocessed = Schema.Struct({ messageId: Schema.String });
 /** A Document among the Intake's attachments: its index and the name to file it under. */
 const DetectedDocument = Schema.Struct({ index: Schema.Int, fileName: Schema.String });
 const Documents = Schema.Struct({ documents: Schema.Array(DetectedDocument) });
+const Forwarded = Schema.Struct({ forwardings: Schema.Array(ForwardingAttempt) });
 /** A Document date as the model answered it, a real day (`documentDateOf`). */
 const AnsweredDate = Schema.Struct({ year: Schema.Int, month: Schema.Int, day: Schema.Int });
 const Dated = Schema.Struct({
-  /** The Documents, each with the Document date the model answered, if it answered a real one. */
+  /**
+   * The Documents not filed yet, each with the Document date the model answered, if it answered
+   * a real one; none when the model call failed.
+   */
   documents: Schema.Array(
     Schema.Struct({ ...DetectedDocument.fields, documentDate: Schema.optionalKey(AnsweredDate) }),
   ),
+  /** Why date extraction failed, failing the Filing branch. */
+  failure: Schema.optionalKey(Schema.String),
 });
-/** This run's Filings: unlike a ledger entry's, each always says whether it fell back. */
-const Filed = Schema.Struct({
-  filings: Schema.Array(Schema.Struct({ ...Filing.fields, fellBack: Schema.Boolean })),
-});
+/** Whether the Filing branch failed, and why. Each Filing is in the ledger as soon as it's made. */
+const Filed = Schema.Struct({ failure: Schema.optionalKey(Schema.String) });
 
-type IntakeServices = Outbox | IntakeLedger | DateExtractor;
+type IntakeServices = Outbox | IntakeLedger | DateExtractor | Mailer;
 
 /** The services the workflow's steps run on, in one shared runtime (ADR 0002). */
 export type IntakeRuntime = ManagedRuntime.ManagedRuntime<IntakeServices, LedgerError>;
 
+/** The Mailer when Forwarding is off: every send fails, saying so. */
+const mailerOff = Layer.succeed(Mailer, {
+  send: ({ to }) =>
+    Effect.fail(
+      new MailerError({ message: `sending to ${to}: Forwarding is off (no SMTP settings)` }),
+    ),
+});
+
 /**
- * The runtime on the real Outbox and ledger, and `dateExtractor` (`dateExtractorLayer` on the
- * configured model; tests pass a scripted one). Built on first use; `dispose()` closes the
- * ledger's connection.
+ * The runtime on the real Outbox and ledger, `dateExtractor` (`dateExtractorLayer` on the
+ * configured model; tests pass a scripted one) and `mailer` (`smtpMailerLayer` when Forwarding is
+ * on; tests pass a recording one). Built on first use; `dispose()` closes the ledger's
+ * connection.
  */
 export function createIntakeRuntime(
   paths: IntakePaths,
   dateExtractor: Layer.Layer<DateExtractor>,
+  mailer: Layer.Layer<Mailer> = mailerOff,
 ): IntakeRuntime {
   return ManagedRuntime.make(
     Layer.mergeAll(
       outboxLayer(paths.outboxDirectory),
       intakeLedgerLayer(paths.databasePath),
       dateExtractor,
+      mailer,
     ),
   );
 }
@@ -85,23 +129,58 @@ export interface IntakeWorkflowOptions {
   runtime: IntakeRuntime;
   /** The Category every Document is filed under. */
   category: Category;
+  /** Absent or without targets: Forwarding is off. */
+  forwarding?: IntakeForwarding | undefined;
+}
+
+/** The subject of a forwarded mail when the Intake had none. */
+const FALLBACK_SUBJECT = "Documents forwarded by hex";
+
+/** The mail that forwards `documents` of `intake`, without its sender and recipient. */
+function forwardingMail(
+  intake: Intake,
+  messageId: string,
+  documents: readonly (typeof DetectedDocument.Type)[],
+): Omit<OutgoingMail, "from" | "to"> {
+  const { subject, sender, attachments } = intake;
+  return {
+    // A header: no control characters, so no line break can end it early.
+    subject: subject?.replace(/\p{Cc}+/gu, " ").trim() || FALLBACK_SUBJECT,
+    text: `Forwarded by hex: the Documents of the mail ${messageId}${sender ? ` from ${sender}` : ""}, attached unchanged.\n`,
+    attachments: documents.map(({ index, fileName }) => ({
+      fileName,
+      contentType: attachments[index]!.mimeType,
+      content: Buffer.from(attachments[index]!.content, "base64"),
+    })),
+  };
 }
 
 /**
- * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed) →
- * Document detection → reading each Document's Document date with the DateExtractor → Filing of
- * each Document into the Outbox under `YYYY-MM/<Category>/` by its Document date, or by the
- * received date (in {@link FILING_TIME_ZONE}) when no usable one came back, flagged `fellBack` →
- * recording the Intake in the ledger. A failed model call fails the run before anything is filed
- * or recorded, so a re-run retries it. An Intake without Documents is recorded too, with no
- * Filings. Each step decodes its own output.
+ * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed or
+ * forwarded) → Document detection → Forwarding of the Documents to each target that is on, one
+ * mail per target → reading each Document's Document date with the DateExtractor → Filing of each
+ * Document into the Outbox under `YYYY-MM/<Category>/` by its Document date, or by the received
+ * date (in {@link FILING_TIME_ZONE}) when no usable one came back, flagged `fellBack` →
+ * recording the Intake in the ledger.
+ *
+ * Forwarding per target and Filing (date extraction, then Filing) are branches: each is attempted
+ * on every run even when another failed, and recorded in the ledger as it succeeds (a Forwarding
+ * right after its send, a Filing per Document). A target or Document recorded by an earlier run
+ * is skipped: running a failed Intake again repeats only the branches that failed. The run fails,
+ * naming each failed branch, when any failed; the Intake is recorded as processed only when all
+ * succeeded. A failed model call fails the Filing branch before any of its Documents is filed.
+ * An Intake without Documents forwards nothing and is recorded with no Filings. Each step decodes
+ * its own output.
  */
-export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOptions) {
+export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWorkflowOptions) {
   /** Runs `program` on the services, then decodes its result as the step's output. */
   const run = <A, I>(
     schema: Schema.Codec<A, I>,
     program: Effect.Effect<unknown, unknown, IntakeServices>,
   ) => runtime.runPromise(program.pipe(Effect.flatMap(Schema.decodeUnknownEffect(schema))));
+
+  /** The Intake's key in the ledger. */
+  const messageIdOf = (intake: Intake) => normalizeMessageId(intake.messageId);
 
   const checkLedger = createStep({
     id: "check-ledger",
@@ -118,6 +197,10 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
                 messageId: entry.messageId,
                 status: "already-processed",
                 filings: entry.filings,
+                forwardings: entry.forwardings.map(({ target }) => ({
+                  target,
+                  status: "forwarded-earlier",
+                })),
               },
           ),
         ),
@@ -144,17 +227,64 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     },
   });
 
+  const forward = createStep({
+    id: "forward-documents",
+    inputSchema: toMastraSchema(Documents),
+    outputSchema: toMastraSchema(Forwarded),
+    execute: ({ inputData: { documents }, getInitData }) => {
+      const intake = getInitData<Intake>();
+      const messageId = messageIdOf(intake);
+      const targets = documents.length === 0 ? [] : (forwarding?.targets ?? []);
+      return run(
+        Forwarded,
+        Effect.gen(function* () {
+          if (targets.length === 0) return { forwardings: [] };
+          const ledger = yield* IntakeLedger;
+          const mailer = yield* Mailer;
+          const earlier = new Set(
+            (yield* ledger.branches(messageId)).forwardings.map(({ target }) => target),
+          );
+          const mail = forwardingMail(intake, messageId, documents);
+          const forwardings = yield* Effect.forEach(targets, ({ name, to }) =>
+            earlier.has(name)
+              ? Effect.succeed({ target: name, status: "forwarded-earlier" })
+              : mailer.send({ ...mail, from: forwarding!.from, to }).pipe(
+                  Effect.andThen(ledger.recordForwarding(messageId, name)),
+                  Effect.match({
+                    onSuccess: () => ({ target: name, status: "forwarded" }),
+                    onFailure: ({ message }) => ({
+                      target: name,
+                      status: "failed",
+                      reason: message,
+                    }),
+                  }),
+                ),
+          );
+          return { forwardings };
+        }),
+      );
+    },
+  });
+
   const extract = createStep({
     id: "extract-dates",
-    inputSchema: toMastraSchema(Documents),
+    inputSchema: toMastraSchema(Forwarded),
     outputSchema: toMastraSchema(Dated),
-    execute: ({ inputData, getInitData }) => {
-      const { attachments } = getInitData<Intake>();
+    execute: ({ getStepResult, getInitData }) => {
+      const intake = getInitData<Intake>();
+      const { documents } = getStepResult(detect);
       return run(
         Dated,
-        DateExtractor.use((extractor) =>
-          Effect.forEach(inputData.documents, (document) => {
-            const attachment = attachments[document.index]!;
+        Effect.gen(function* () {
+          const ledger = yield* IntakeLedger;
+          const extractor = yield* DateExtractor;
+          // Documents filed by an earlier run are neither read again nor filed again.
+          const filed = new Set(
+            (yield* ledger.branches(messageIdOf(intake))).filings.map(({ index }) => index),
+          );
+          const unfiled = documents.filter(({ index }) => !filed.has(index));
+          return yield* Effect.forEach(unfiled, (document) => {
+            const attachment = intake.attachments[document.index]!;
             const content = Buffer.from(attachment.content, "base64");
             const mediaType = documentMediaType({ ...attachment, content });
             // Never sent (no Document date) when its content is no valid PDF or image (Mastra
@@ -166,8 +296,13 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
                 return documentDate ? { ...document, documentDate } : document;
               }),
             );
-          }),
-        ).pipe(Effect.map((documents) => ({ documents }))),
+          }).pipe(
+            Effect.match({
+              onSuccess: (dated) => ({ documents: dated }),
+              onFailure: ({ message }) => ({ documents: [], failure: message }),
+            }),
+          );
+        }),
       );
     },
   });
@@ -176,19 +311,36 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     id: "file-documents",
     inputSchema: toMastraSchema(Dated),
     outputSchema: toMastraSchema(Filed),
-    execute: ({ inputData, getInitData }) => {
-      const { attachments, receivedAt } = getInitData<Intake>();
-      const received = calendarDateIn(new Date(receivedAt), FILING_TIME_ZONE);
+    execute: ({ inputData: { documents, failure }, getInitData }) => {
+      const intake = getInitData<Intake>();
+      const messageId = messageIdOf(intake);
+      const received = calendarDateIn(new Date(intake.receivedAt), FILING_TIME_ZONE);
+      if (failure !== undefined) return Schema.decodeUnknownPromise(Filed)({ failure });
       return run(
         Filed,
-        Outbox.use((outbox) =>
-          Effect.forEach(inputData.documents, ({ index, fileName, documentDate }) => {
-            const { folder, fellBack } = planFiling(documentDate, received, category);
-            return outbox
-              .file(folder, fileName, Buffer.from(attachments[index]!.content, "base64"))
-              .pipe(Effect.map((path) => ({ index, path, fellBack })));
-          }),
-        ).pipe(Effect.map((filings) => ({ filings }))),
+        Effect.gen(function* () {
+          const ledger = yield* IntakeLedger;
+          const outbox = yield* Outbox;
+          return yield* Effect.forEach(
+            documents,
+            ({ index, fileName, documentDate }) => {
+              const { folder, fellBack } = planFiling(documentDate, received, category);
+              return outbox
+                .file(folder, fileName, Buffer.from(intake.attachments[index]!.content, "base64"))
+                .pipe(
+                  Effect.flatMap((path) =>
+                    ledger.recordFiling(messageId, { index, path, fellBack }),
+                  ),
+                );
+            },
+            { discard: true },
+          ).pipe(
+            Effect.match({
+              onSuccess: () => ({}),
+              onFailure: ({ message }) => ({ failure: message }),
+            }),
+          );
+        }),
       );
     },
   });
@@ -197,14 +349,25 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     id: "record",
     inputSchema: toMastraSchema(Filed),
     outputSchema: toMastraSchema(IntakeResult),
-    execute: ({ inputData, getInitData }) => {
-      const messageId = normalizeMessageId(getInitData<Intake>().messageId);
-      const { filings } = inputData;
+    execute: async ({ inputData, getStepResult, getInitData }) => {
+      const messageId = messageIdOf(getInitData<Intake>());
+      const { forwardings } = getStepResult(forward);
+      const failures = [
+        ...forwardings.flatMap((attempt) =>
+          attempt.status === "failed" ? [`forwarding to ${attempt.target}: ${attempt.reason}`] : [],
+        ),
+        ...(inputData.failure === undefined ? [] : [inputData.failure]),
+      ];
+      if (failures.length > 0) throw new Error(failures.join("; "));
       return run(
         IntakeResult,
-        IntakeLedger.use((ledger) => ledger.record(messageId, filings)).pipe(
-          Effect.as({ messageId, status: "processed", filings }),
-        ),
+        Effect.gen(function* () {
+          const ledger = yield* IntakeLedger;
+          // Every Document's Filing, this run's and earlier runs', as recorded.
+          const { filings } = yield* ledger.branches(messageId);
+          yield* ledger.record(messageId, filings);
+          return { messageId, status: "processed", filings, forwardings };
+        }),
       );
     },
   });
@@ -217,6 +380,7 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
   })
     .then(checkLedger)
     .then(detect)
+    .then(forward)
     .then(extract)
     .then(file)
     .then(record)
@@ -224,10 +388,25 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
 }
 
 /**
+ * The Intake workflow did not finish. Carries this run's Forwarding attempts, so a caller can show
+ * which targets got the Documents although another branch failed.
+ */
+export class IntakeRunError extends Error {
+  constructor(
+    message: string,
+    readonly forwardings: readonly ForwardingAttempt[],
+  ) {
+    super(message);
+  }
+}
+
+const decodeForwarded = Schema.decodeUnknownOption(Forwarded);
+
+/**
  * Runs the Intake workflow once, in process, on `intake` against the data at `paths`, with its
- * own Mastra (persisting the run in `mastra.db`) and runtime on `dateExtractor`, closed again
- * afterwards. Throws when the run does not succeed. A failure to close is logged and never
- * replaces the run's outcome.
+ * own Mastra (persisting the run in `mastra.db`) and runtime on `dateExtractor` and `mailer`,
+ * closed again afterwards. Throws an {@link IntakeRunError} when the run does not succeed. A
+ * failure to close is logged and never replaces the run's outcome.
  */
 export async function runIntake(
   intake: Intake,
@@ -235,14 +414,22 @@ export async function runIntake(
     paths,
     category,
     dateExtractor,
-  }: { paths: IntakePaths; category: Category; dateExtractor: Layer.Layer<DateExtractor> },
+    mailer,
+    forwarding,
+  }: {
+    paths: IntakePaths;
+    category: Category;
+    dateExtractor: Layer.Layer<DateExtractor>;
+    mailer?: Layer.Layer<Mailer> | undefined;
+    forwarding?: IntakeForwarding | undefined;
+  },
 ): Promise<IntakeResult> {
   const storage = await createLocalStore(paths.databasePath);
-  const runtime = createIntakeRuntime(paths, dateExtractor);
+  const runtime = createIntakeRuntime(paths, dateExtractor, mailer);
   const mastra = new Mastra({
     storage,
     logger: false,
-    workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category }) },
+    workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category, forwarding }) },
   });
   try {
     await storage.init();
@@ -250,7 +437,13 @@ export async function runIntake(
     const result = await run.start({ inputData: intake });
     if (result.status !== "success") {
       const reason = result.status === "failed" ? result.error.message : result.status;
-      throw new Error(`the Intake workflow did not finish: ${reason}`);
+      // The Forwardings already sent, so a caller can show them although another branch failed.
+      const forwarded = result.steps["forward-documents"];
+      const attempts =
+        forwarded?.status === "success"
+          ? Option.getOrUndefined(decodeForwarded(forwarded.output))?.forwardings
+          : undefined;
+      throw new IntakeRunError(`the Intake workflow did not finish: ${reason}`, attempts ?? []);
     }
     return result.result;
   } finally {
