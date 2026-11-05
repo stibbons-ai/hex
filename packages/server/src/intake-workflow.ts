@@ -34,7 +34,7 @@ type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
 export const INTAKE_WORKFLOW_ID = "intake";
 
 /** One target Forwarding hands an Intake's Documents to: its name (the ledger's key) and address. */
-export interface ForwardingTarget {
+interface ForwardingTarget {
   readonly name: string;
   readonly to: string;
 }
@@ -136,6 +136,10 @@ export interface IntakeWorkflowOptions {
 /** The subject of a forwarded mail when the Intake had none. */
 const FALLBACK_SUBJECT = "Documents forwarded by hex";
 
+/** The content of the Intake's attachment at `index`, decoded. */
+const contentOf = (intake: Intake, index: number) =>
+  Buffer.from(intake.attachments[index]!.content, "base64");
+
 /** The mail that forwards `documents` of `intake`, without its sender and recipient. */
 function forwardingMail(
   intake: Intake,
@@ -150,10 +154,13 @@ function forwardingMail(
     attachments: documents.map(({ index, fileName }) => ({
       fileName,
       contentType: attachments[index]!.mimeType,
-      content: Buffer.from(attachments[index]!.content, "base64"),
+      content: contentOf(intake, index),
     })),
   };
 }
+
+/** The forward step's id: {@link runIntake} reads its output after a failed run. */
+const FORWARD_STEP_ID = "forward-documents";
 
 /**
  * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed or
@@ -228,27 +235,32 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
   });
 
   const forward = createStep({
-    id: "forward-documents",
+    id: FORWARD_STEP_ID,
     inputSchema: toMastraSchema(Documents),
     outputSchema: toMastraSchema(Forwarded),
     execute: ({ inputData: { documents }, getInitData }) => {
+      if (!forwarding || documents.length === 0) {
+        return Schema.decodeUnknownPromise(Forwarded)({ forwardings: [] });
+      }
+      const { from, targets } = forwarding;
       const intake = getInitData<Intake>();
       const messageId = messageIdOf(intake);
-      const targets = documents.length === 0 ? [] : (forwarding?.targets ?? []);
       return run(
         Forwarded,
         Effect.gen(function* () {
-          if (targets.length === 0) return { forwardings: [] };
           const ledger = yield* IntakeLedger;
           const mailer = yield* Mailer;
           const earlier = new Set(
             (yield* ledger.branches(messageId)).forwardings.map(({ target }) => target),
           );
-          const mail = forwardingMail(intake, messageId, documents);
+          // Built (the Documents decoded) only when some target still needs it.
+          const mail = targets.some(({ name }) => !earlier.has(name))
+            ? forwardingMail(intake, messageId, documents)
+            : undefined;
           const forwardings = yield* Effect.forEach(targets, ({ name, to }) =>
-            earlier.has(name)
+            !mail || earlier.has(name)
               ? Effect.succeed({ target: name, status: "forwarded-earlier" })
-              : mailer.send({ ...mail, from: forwarding!.from, to }).pipe(
+              : mailer.send({ ...mail, from, to }).pipe(
                   Effect.andThen(ledger.recordForwarding(messageId, name)),
                   Effect.match({
                     onSuccess: () => ({ target: name, status: "forwarded" }),
@@ -285,7 +297,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           const unfiled = documents.filter(({ index }) => !filed.has(index));
           return yield* Effect.forEach(unfiled, (document) => {
             const attachment = intake.attachments[document.index]!;
-            const content = Buffer.from(attachment.content, "base64");
+            const content = contentOf(intake, document.index);
             const mediaType = documentMediaType({ ...attachment, content });
             // Never sent (no Document date) when its content is no valid PDF or image (Mastra
             // would send a placeholder instead) or OpenAI and Anthropic refuse its image type.
@@ -326,7 +338,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
             ({ index, fileName, documentDate }) => {
               const { folder, fellBack } = planFiling(documentDate, received, category);
               return outbox
-                .file(folder, fileName, Buffer.from(intake.attachments[index]!.content, "base64"))
+                .file(folder, fileName, contentOf(intake, index))
                 .pipe(
                   Effect.flatMap((path) =>
                     ledger.recordFiling(messageId, { index, path, fellBack }),
@@ -437,13 +449,15 @@ export async function runIntake(
     const result = await run.start({ inputData: intake });
     if (result.status !== "success") {
       const reason = result.status === "failed" ? result.error.message : result.status;
-      // The Forwardings already sent, so a caller can show them although another branch failed.
-      const forwarded = result.steps["forward-documents"];
+      const forwarded = result.steps[FORWARD_STEP_ID];
       const attempts =
         forwarded?.status === "success"
-          ? Option.getOrUndefined(decodeForwarded(forwarded.output))?.forwardings
-          : undefined;
-      throw new IntakeRunError(`the Intake workflow did not finish: ${reason}`, attempts ?? []);
+          ? Option.match(decodeForwarded(forwarded.output), {
+              onNone: () => [],
+              onSome: ({ forwardings }) => forwardings,
+            })
+          : [];
+      throw new IntakeRunError(`the Intake workflow did not finish: ${reason}`, attempts);
     }
     return result.result;
   } finally {

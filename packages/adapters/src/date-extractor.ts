@@ -5,7 +5,7 @@ import type { MastraModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
 import { StreamErrorRetryProcessor } from "@mastra/core/processors";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
-import { messageOf } from "./errors";
+import { excerpt, messageOf } from "./errors";
 import { toMastraSchema } from "./schema";
 
 /**
@@ -97,12 +97,6 @@ function withoutApiKeys(message: string): string {
 }
 
 /**
- * How much of a provider's error message an error keeps: some quote the rejected request, the
- * Document's content included, and the workflow persists its failure.
- */
-const MAX_PROVIDER_MESSAGE = 300;
-
-/**
  * The HTTP error status (400 and up) of the provider call `error` (or one of its causes) failed
  * with, if any; a 2xx whose body couldn't be read has none worth showing.
  */
@@ -177,11 +171,7 @@ export function dateExtractorLayer(
             { structuredOutput: { schema, errorStrategy: "warn" }, abortSignal: signal },
           ),
         catch: (cause) => {
-          const reason = withoutApiKeys(messageOf(cause)).trim() || "no message";
-          const shown =
-            reason.length > MAX_PROVIDER_MESSAGE
-              ? `${reason.slice(0, MAX_PROVIDER_MESSAGE)}…`
-              : reason;
+          const shown = excerpt(withoutApiKeys(messageOf(cause)));
           const status = httpStatusOf(cause);
           return new DateExtractionError({
             message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,

@@ -196,10 +196,12 @@ export async function loadForwardingConfig(
   path: string | undefined,
   env: Env,
 ): Promise<ForwardingConfig | undefined> {
-  const forwarding = path === undefined ? undefined : (await readConfigFile(path)).forwarding;
-  const targets = Object.entries(forwarding?.targets ?? {})
+  if (path === undefined) return undefined;
+  const { forwarding } = await readConfigFile(path);
+  if (!forwarding) return undefined;
+  const targets = Object.entries(forwarding.targets)
     .filter(([, { enabled }]) => enabled)
     .map(([name, { to }]) => ({ name, to }));
-  if (path === undefined || !forwarding || targets.length === 0) return undefined;
+  if (targets.length === 0) return undefined;
   return { from: forwarding.from, targets, smtp: smtpSettings(path, env) };
 }

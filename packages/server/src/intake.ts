@@ -31,19 +31,22 @@ function describe(
   { messageId, status, filings, forwardings }: IntakeResult,
   outboxDirectory: string,
 ): string {
-  const filed =
-    status === "already-processed"
-      ? [`hex intake: ${messageId} was already processed; nothing filed`]
-      : filings.length === 0
-        ? [`hex intake: ${messageId} has no Documents; nothing filed`]
-        : [
-            `hex intake: ${messageId}: filed ${filings.length === 1 ? "1 Document" : `${filings.length} Documents`} into ${outboxDirectory}`,
-            ...filings.map(
-              ({ path, fellBack }) =>
-                `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
-            ),
-          ];
-  return [...filed, ...forwardings.map(describeForwarding)].join("\n");
+  const lines: string[] = [];
+  if (status === "already-processed") {
+    lines.push(`hex intake: ${messageId} was already processed; nothing filed`);
+  } else if (filings.length === 0) {
+    lines.push(`hex intake: ${messageId} has no Documents; nothing filed`);
+  } else {
+    const count = filings.length === 1 ? "1 Document" : `${filings.length} Documents`;
+    lines.push(
+      `hex intake: ${messageId}: filed ${count} into ${outboxDirectory}`,
+      ...filings.map(
+        ({ path, fellBack }) =>
+          `  ${path}${fellBack ? " (no usable Document date; filed by received date)" : ""}`,
+      ),
+    );
+  }
+  return [...lines, ...forwardings.map(describeForwarding)].join("\n");
 }
 
 async function main(argv: readonly string[]): Promise<string> {

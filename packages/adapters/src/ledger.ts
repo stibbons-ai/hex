@@ -40,6 +40,9 @@ export interface LedgerEntry {
   readonly forwardings: readonly Forwarding[];
 }
 
+/** A Filing as recorded per branch: whether it fell back is always known. */
+export type RecordedFiling = Filing & { readonly fellBack: boolean };
+
 /**
  * The branches of an Intake that succeeded so far, recorded as each succeeded, also while the
  * Intake is not processed yet (a run that failed in another branch).
@@ -47,7 +50,7 @@ export interface LedgerEntry {
 export interface IntakeBranches {
   readonly forwardings: readonly Forwarding[];
   /** By Document index. */
-  readonly filings: readonly (Filing & { readonly fellBack: boolean })[];
+  readonly filings: readonly RecordedFiling[];
 }
 
 /** The ledger could not be read or written. */
@@ -91,7 +94,7 @@ export class IntakeLedger extends Context.Service<
      */
     readonly recordFiling: (
       messageId: string,
-      filing: Filing & { readonly fellBack: boolean },
+      filing: RecordedFiling,
     ) => Effect.Effect<void, LedgerError>;
   }
 >()("hex/IntakeLedger") {}
@@ -190,36 +193,34 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
       const execute = (sql: string, args: InArgs, what: string) =>
         Effect.tryPromise({ try: () => client.execute({ sql, args }), catch: ledgerError(what) });
 
-      const branches = (id: string) =>
-        Effect.gen(function* () {
-          const forwardings = yield* execute(
-            "SELECT target, forwarded_at FROM hex_intake_forwardings WHERE message_id = ? ORDER BY target",
-            [id],
-            "reading",
-          ).pipe(
-            Effect.flatMap(({ rows }) => decodeForwardingRows(rows)),
-            Effect.mapError(ledgerError(`unreadable Forwardings for ${id}`)),
-          );
-          const filings = yield* execute(
-            "SELECT document_index, path, fell_back FROM hex_intake_filings WHERE message_id = ? ORDER BY document_index",
-            [id],
-            "reading",
-          ).pipe(
-            Effect.flatMap(({ rows }) => decodeFilingRows(rows)),
-            Effect.mapError(ledgerError(`unreadable Filings for ${id}`)),
-          );
-          return {
-            forwardings: forwardings.map((row) => ({
-              target: row.target,
-              forwardedAt: row.forwarded_at,
-            })),
-            filings: filings.map((row) => ({
+      const forwardingsOf = (id: string) =>
+        execute(
+          "SELECT target, forwarded_at FROM hex_intake_forwardings WHERE message_id = ? ORDER BY target",
+          [id],
+          "reading",
+        ).pipe(
+          Effect.flatMap(({ rows }) => decodeForwardingRows(rows)),
+          Effect.mapError(ledgerError(`unreadable Forwardings for ${id}`)),
+          Effect.map((rows) =>
+            rows.map((row) => ({ target: row.target, forwardedAt: row.forwarded_at })),
+          ),
+        );
+      const filingsOf = (id: string) =>
+        execute(
+          "SELECT document_index, path, fell_back FROM hex_intake_filings WHERE message_id = ? ORDER BY document_index",
+          [id],
+          "reading",
+        ).pipe(
+          Effect.flatMap(({ rows }) => decodeFilingRows(rows)),
+          Effect.mapError(ledgerError(`unreadable Filings for ${id}`)),
+          Effect.map((rows) =>
+            rows.map((row) => ({
               index: row.document_index,
               path: row.path,
               fellBack: row.fell_back === 1,
             })),
-          };
-        });
+          ),
+        );
 
       return {
         find: (messageId) =>
@@ -234,7 +235,7 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
             const row = yield* decodeRow(rows[0]).pipe(
               Effect.mapError(ledgerError(`unreadable entry for ${id}`)),
             );
-            const { forwardings } = yield* branches(id);
+            const forwardings = yield* forwardingsOf(id);
             return {
               messageId: row.message_id,
               processedAt: row.processed_at,
@@ -252,7 +253,12 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
               `recording ${id}`,
             );
           }),
-        branches: (messageId) => key(messageId).pipe(Effect.flatMap(branches)),
+        branches: (messageId) =>
+          key(messageId).pipe(
+            Effect.flatMap((id) =>
+              Effect.all({ forwardings: forwardingsOf(id), filings: filingsOf(id) }),
+            ),
+          ),
         recordForwarding: (messageId, target) =>
           Effect.gen(function* () {
             const id = yield* key(messageId);

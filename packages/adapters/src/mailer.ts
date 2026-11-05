@@ -1,7 +1,7 @@
 import { Context, Data, Effect, Layer, Redacted } from "effect";
 import { createTransport } from "nodemailer";
 import type { NodemailerError } from "nodemailer";
-import { messageOf } from "./errors";
+import { excerpt, messageOf } from "./errors";
 
 /** One attachment of an outgoing mail: its bytes, unchanged, under a file name and MIME type. */
 export interface MailAttachment {
@@ -53,21 +53,6 @@ export interface SmtpSettings {
   readonly password: Redacted.Redacted<string>;
 }
 
-/** How much of a server's reply an error keeps. */
-const MAX_SERVER_MESSAGE = 300;
-
-/**
- * `message` with each of `secrets` (and its base64 form, as AUTH sends it) replaced by `***`.
- * Values under 8 characters are left alone, as `withoutApiKeys` does: too likely to match
- * ordinary text.
- */
-function withoutSecrets(message: string, secrets: readonly string[]): string {
-  const forms = secrets
-    .flatMap((secret) => [secret, Buffer.from(secret).toString("base64")])
-    .filter((form) => form.length >= 8);
-  return forms.reduce((text, form) => text.replaceAll(form, "***"), message);
-}
-
 /**
  * The Mailer on an SMTP server: one connection per mail, secured as `security` says, logging in
  * as `user`. Attachments are only ever the bytes given; file and URL access are off. Timeouts
@@ -91,8 +76,12 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
     disableUrlAccess: true,
     logger: false,
   });
-  // The forms AUTH PLAIN and LOGIN send, should a server echo them back.
-  const secrets = [password, user, `\u0000${user}\u0000${password}`];
+  // What an error must never show, should a server echo it back: the credentials as is and in
+  // base64, as AUTH PLAIN and LOGIN send them. Forms under 8 characters are left out, as
+  // `withoutApiKeys` does: too likely to match ordinary text.
+  const secrets = [password, user, `\u0000${user}\u0000${password}`]
+    .flatMap((secret) => [secret, Buffer.from(secret).toString("base64")])
+    .filter((form) => form.length >= 8);
   return Layer.succeed(Mailer, {
     send: ({ from, to, subject, text, attachments }) =>
       Effect.tryPromise({
@@ -105,15 +94,16 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
             attachments: attachments.map(({ fileName, contentType, content }) => ({
               filename: fileName,
               contentType,
-              content: Buffer.from(content),
+              // A view of the same bytes, not a copy.
+              content: Buffer.from(content.buffer, content.byteOffset, content.byteLength),
             })),
           }),
         catch: (cause) => {
           const { code, command } = cause as NodemailerError;
           const stage = [code, command && `at ${command}`].filter(Boolean).join(" ");
-          const reason = withoutSecrets(messageOf(cause), secrets).trim() || "no message";
-          const shown =
-            reason.length > MAX_SERVER_MESSAGE ? `${reason.slice(0, MAX_SERVER_MESSAGE)}…` : reason;
+          const shown = excerpt(
+            secrets.reduce((text, form) => text.replaceAll(form, "***"), messageOf(cause)),
+          );
           return new MailerError({
             message: `sending to ${to} via ${host}:${port} failed${stage ? ` (${stage})` : ""}: ${shown}`,
           });
