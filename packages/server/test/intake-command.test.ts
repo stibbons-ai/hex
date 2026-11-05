@@ -162,7 +162,7 @@ describe("bun run intake", () => {
     expect(await readdir(join(outbox, "2026-11/ER"))).toEqual(["Lieferschein.pdf"]);
   });
 
-  test("an image Document reaches the model natively as an image with its bytes", async () => {
+  test("an image Document reaches the model natively as an image; one that isn't an image never does", async () => {
     // A PNG signature and IHDR chunk start, padded past the image size threshold.
     const png = new Uint8Array(12_000);
     png.set([
@@ -179,11 +179,21 @@ describe("bun run intake", () => {
           fileName: "Beleg.png",
           content: png,
         },
+        // Declared a JPEG, but without a JPEG's signature: Mastra would send a placeholder.
+        {
+          contentType: "image/jpeg",
+          disposition: "attachment",
+          fileName: "Kaputt.jpg",
+          content: bytes(12_000, "j"),
+        },
       ],
     });
     const asked = model.requests.length;
     const run = await intake([eml], { HEX_DATA_DIR: dataDirectory });
     expect(run).toMatchObject({ code: 0, stderr: "" });
+    expect(run.stdout).toContain(
+      "  2026-11/ER/Kaputt.jpg (no usable Document date; filed by received date)",
+    );
     expect(model.requests.slice(asked).map(inputFiles)).toEqual([
       [`data:image/png;base64,${Buffer.from(png).toString("base64")}`],
     ]);

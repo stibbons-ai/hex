@@ -15,13 +15,15 @@ interface Call {
 
 /**
  * A mock language model (through Mastra's model path, as the router's models are) that records
- * every call and answers `reply` as its text, or fails with it when it is an Error.
+ * every call and answers the n-th call with `replies[n]` (the last one for any later call) as its
+ * text, or fails with it when it is an Error.
  */
-function scriptedModel(reply: string | Error) {
+function scriptedModel(...replies: (string | Error)[]) {
   const calls: Call[] = [];
   const model = new MastraLanguageModelV2Mock({
     doGenerate: async (options: Call) => {
       calls.push(options);
+      const reply = replies[Math.min(calls.length, replies.length) - 1]!;
       if (reply instanceof Error) throw reply;
       return {
         content: [{ type: "text", text: reply }],
@@ -119,6 +121,34 @@ describe("DateExtractor (live layer on a mock model)", () => {
         'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed: 401 Incorrect API key provided: HEX_TEST_API_KEY',
       );
       expect(message).not.toContain(key);
+    });
+
+    test("a provider refusing the file fails the call; the model is never asked without it", async () => {
+      // What an AI SDK provider throws for a file type it won't send; Mastra's default error
+      // processors would replace the file by a placeholder and ask again.
+      const refusal = Object.assign(
+        new Error("'file part media type application/pdf' functionality not supported."),
+        {
+          name: "AI_UnsupportedFunctionalityError",
+          functionality: "file part media type application/pdf",
+        },
+      );
+      const { model, calls } = scriptedModel(refusal, '{"year":2026,"month":10,"day":5}');
+      const exit = await extract(model, pdfDocument);
+      expect(String(exit)).toContain(
+        "DateExtractionError: reading the Document date of \"Rechnung.pdf\" with mock-provider/mock-model-id failed: 'file part media type application/pdf' functionality not supported.",
+      );
+      expect(calls).toHaveLength(1);
+    });
+
+    test("keeps at most 300 characters of the provider's message", async () => {
+      const quoted = "x".repeat(1000);
+      const { model } = scriptedModel(new Error(`400 invalid file: ${quoted}`));
+      const exit = await extract(model, pdfDocument);
+      expect(Exit.isFailure(exit)).toBe(true);
+      const message = String(exit);
+      expect(message).toContain(`failed: 400 invalid file: ${"x".repeat(300 - 18)}…`);
+      expect(message).not.toContain("x".repeat(300));
     });
   });
 });

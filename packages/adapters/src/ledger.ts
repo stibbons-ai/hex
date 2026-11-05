@@ -14,8 +14,9 @@ export const Filing = Schema.Struct({
   path: Schema.String,
   /**
    * True: filed by the received date (`FilingPlan.fellBack`), because the model answered no usable
-   * Document date or the Document is a type hex doesn't send to a model (HEIC, HEIF, TIFF, BMP).
-   * Absent on entries recorded before Document dates were read: nothing is known either way.
+   * Document date or hex never sent the Document to a model (a HEIC, HEIF, TIFF or BMP image, or
+   * content that isn't a valid PDF or JPEG/PNG/GIF/WebP image). Absent on entries recorded before
+   * #7, which filed every Document by the received date.
    */
   fellBack: Schema.optionalKey(Schema.Boolean),
 });

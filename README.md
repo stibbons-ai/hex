@@ -91,20 +91,25 @@ The workflow, in order:
 3. **Document dates** (`packages/adapters/src/date-extractor.ts`): a model reads each
    Document's Document date from the Document itself, handed over natively through Mastra's
    model router (PDFs as `application/pdf` file parts, JPEG, PNG, GIF and WebP images as image
-   file parts; hex does no OCR or text extraction and the model never sees the file name). The
+   file parts, each by the type its content shows; hex does no OCR or text extraction and the
+   model never sees the file name). The
    Document date is the date it was issued (invoice date, Rechnungsdatum, Belegdatum, receipt
    date), never a due date, delivery or service period, order date or the date it was printed
    or sent. The model answers `{ year, month, day }` as structured output (an Effect Schema,
-   decoded again in the step), all `null` when the Document shows no date. HEIC, HEIF, TIFF
-   and BMP images are not sent (OpenAI and Anthropic reject them). A model call that fails
-   (network, missing or wrong API key, rate limit, provider error) fails the run before
-   anything is filed or recorded, so running the Intake again retries it; the error names the
-   Document and the model.
+   decoded again in the step), all `null` when the Document shows no date. Never sent: HEIC,
+   HEIF, TIFF and BMP images (OpenAI and Anthropic reject them), and content that isn't a valid
+   PDF (`%PDF` within its first 1026 bytes) or JPEG, PNG, GIF or WebP image (by its signature),
+   which Mastra would otherwise replace by a placeholder text the model answers blind. A model
+   call that fails (network, missing or wrong API key, rate limit, provider error, a provider
+   refusing the file) fails the run before anything is filed or recorded, so running the Intake
+   again retries it; a Document the provider rejects every time (e.g. an encrypted or oversized
+   PDF) keeps failing its Intake until it is handled by hand. The error names the Document and
+   the model and keeps at most 300 characters of the provider's message.
 4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
    one cut off at the token limit or withheld by a content filter; 30 February, month 13, a
-   two-digit year; a type not sent) it falls back to the Intake's received date as a calendar date in
+   two-digit year; a Document not sent) it falls back to the Intake's received date as a calendar date in
    `Europe/Berlin`, and the Filing records that. The received date is the date after the last
    `;` of the topmost `Received:` header, else the `Date:` header, each only in the form
    `[Day,] D Mon YYYY HH:MM[:SS] zone` (four-digit year, two-digit hours, comments such as
@@ -150,7 +155,7 @@ hex doesn't check at startup that the model's API key is set: without it every I
 Document hex sends to the model fails until it is.
 
 Only OpenAI models are exercised (by the tests' fake OpenAI). The answer schema goes to the
-provider as JSON Schema with `additionalProperties: true` and ±2^53 integer bounds; a provider
+provider as JSON Schema with `additionalProperties: true` and safe-integer bounds (±(2^53−1)); a provider
 that insists on strict JSON Schema (e.g. some OpenAI-compatible ones) may reject it, which fails
 every run until `intake.model` names another model.
 
@@ -158,8 +163,8 @@ The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use
 Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
 `{ "index": …, "path": …, "fellBack": … }` per Document: its position among the attachments,
 0-based, where it landed, and `true` when it was filed by the received date: the model answered
-no usable Document date, or the Document is a type hex doesn't send to a model (HEIC, HEIF,
-TIFF, BMP)). Entries recorded before Document dates were read have no `fellBack`:
+no usable Document date, or hex never sent the Document to a model (see step 3)). Entries
+recorded before #7, which filed every Document by the received date, have no `fellBack`:
 they read back without it, claiming nothing either way. The workflow's result (`IntakeResult`)
 carries the same Filings, also for an Intake already processed. An Intake whose run failed
 halfway is not recorded, so running it again files the Documents that already landed a second

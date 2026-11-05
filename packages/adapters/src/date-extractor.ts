@@ -1,6 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { noopLogger } from "@mastra/core/logger";
+import { StreamErrorRetryProcessor } from "@mastra/core/processors";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import { messageOf } from "./errors";
 import { toMastraSchema } from "./schema";
@@ -78,6 +79,12 @@ function withoutApiKeys(message: string): string {
 }
 
 /**
+ * How much of a provider's error message an error keeps: some quote the rejected request, the
+ * Document's content included, and the workflow persists its failure.
+ */
+const MAX_PROVIDER_MESSAGE = 300;
+
+/**
  * The DateExtractor on `model`: a Mastra model-router id (`provider/model`, its API key from the
  * provider's usual variable, e.g. `OPENAI_API_KEY`) or a model instance (tests pass a mock). Each
  * Document goes to the model natively as a file part with its media type; the answer comes back
@@ -93,6 +100,11 @@ export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateEx
     name: "hex-date-extractor",
     instructions: INSTRUCTIONS,
     model,
+    // Mastra's default error processors include one that, when a provider refuses the file,
+    // replaces it with a placeholder text and asks again: the model would answer without the
+    // Document. Only transient errors are retried, as the default retry processor does.
+    errorProcessorDefaults: false,
+    errorProcessors: [new StreamErrorRetryProcessor({ maxRetries: 2, delayMs: 3000 })],
   });
   agent.__setLogger(noopLogger);
   const schema = toMastraSchema(DocumentDateAnswer);
@@ -112,12 +124,16 @@ export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateEx
             ],
             { structuredOutput: { schema, errorStrategy: "warn" }, abortSignal: signal },
           ),
-        catch: (cause) =>
-          new DateExtractionError({
-            message: withoutApiKeys(
-              `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed: ${messageOf(cause)}`,
-            ),
-          }),
+        catch: (cause) => {
+          const reason = withoutApiKeys(messageOf(cause));
+          const shown =
+            reason.length > MAX_PROVIDER_MESSAGE
+              ? `${reason.slice(0, MAX_PROVIDER_MESSAGE)}…`
+              : reason;
+          return new DateExtractionError({
+            message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed: ${shown}`,
+          });
+        },
       }).pipe(Effect.map(({ object }): unknown => object)),
   });
 }

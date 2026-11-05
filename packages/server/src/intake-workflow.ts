@@ -164,15 +164,13 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
         DateExtractor.use((extractor) =>
           Effect.forEach(inputData.documents, (document) => {
             const attachment = attachments[document.index]!;
-            const mediaType = documentMediaType(attachment);
-            // A type models don't take is never sent: it has no Document date.
+            const content = Buffer.from(attachment.content, "base64");
+            const mediaType = documentMediaType({ ...attachment, content });
+            // Never sent when OpenAI and Anthropic reject its type or its content isn't a valid
+            // PDF or image (Mastra would send a placeholder instead): it has no Document date.
             if (mediaType === undefined) return Effect.succeed(document);
             return extractor
-              .extract({
-                content: Buffer.from(attachment.content, "base64"),
-                mediaType,
-                fileName: document.fileName,
-              })
+              .extract({ content, mediaType, fileName: document.fileName })
               .pipe(Effect.map((answer) => ({ ...document, ...documentDateOf(answer) })));
           }),
         ).pipe(Effect.map((documents) => ({ documents }))),

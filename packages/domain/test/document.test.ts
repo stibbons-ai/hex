@@ -57,25 +57,58 @@ describe("isDocument", () => {
 });
 
 describe("documentMediaType", () => {
-  // [MIME type as sent, file name, media type the model gets]
+  const bytes = (...values: number[]) => Uint8Array.from(values);
+  const ascii = (text: string) => new TextEncoder().encode(text);
+  /** `text` after `offset` filler bytes. */
+  const at = (offset: number, text: string) => {
+    const content = new Uint8Array(offset + text.length).fill(0x20);
+    content.set(ascii(text), offset);
+    return content;
+  };
+  const PDF = ascii("%PDF-1.7\n");
+  const JPEG = bytes(0xff, 0xd8, 0xff, 0xe0);
+  const PNG = bytes(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  const GIF = ascii("GIF89a....");
+  const WEBP = ascii("RIFF\u0010\u0000\u0000\u0000WEBPVP8 ");
+  const HEIC = ascii("\u0000\u0000\u0000\u0018ftypheic\u0000\u0000\u0000\u0000mif1heic");
+  const TIFF = bytes(0x49, 0x49, 0x2a, 0x00);
+  const GARBAGE = ascii("jjjjjjjjjjjj");
+
+  // [MIME type as sent, file name, content, media type the model gets]
   test.each([
-    ["application/pdf", "r.pdf", "application/pdf"],
-    ['Application/PDF; name="r.pdf"', "r.pdf", "application/pdf"],
-    ["application/octet-stream", "Scan.PDF", "application/pdf"],
-    ["image/jpeg", "scan.jpg", "image/jpeg"],
-    ["image/jpg", "scan.jpg", "image/jpeg"],
-    ["image/pjpeg", "scan.jpg", "image/jpeg"],
-    ["IMAGE/PNG", undefined, "image/png"],
-    ["image/gif", "scan.gif", "image/gif"],
-    ["image/webp", "scan.webp", "image/webp"],
-    // Images models don't commonly take: never sent, filed by the received date
-    ["image/heic", "IMG_0001.HEIC", undefined],
-    ["image/heif", "IMG_0001.HEIF", undefined],
-    ["image/tiff", "scan.tif", undefined],
-    ["image/bmp", "scan.bmp", undefined],
-    ["application/octet-stream", "scan.bin", undefined],
-  ] as const)("%s named %s → %p", (mimeType, fileName, expected) => {
-    expect(documentMediaType({ mimeType, fileName })).toBe(expected);
+    ["application/pdf", "r.pdf", PDF, "application/pdf"],
+    ['Application/PDF; name="r.pdf"', "r.pdf", PDF, "application/pdf"],
+    ["application/octet-stream", "Scan.PDF", PDF, "application/pdf"],
+    // %PDF may start after leading junk, up to where Mastra still finds it
+    ["application/pdf", "r.pdf", at(500, "%PDF-1.4"), "application/pdf"],
+    ["application/pdf", "r.pdf", at(1022, "%PDF-1.4"), "application/pdf"],
+    ["application/pdf", "r.pdf", at(1023, "%PDF-1.4"), undefined],
+    ["application/pdf", "r.pdf", at(1100, "%PDF-1.4"), undefined],
+    ["application/pdf", "r.pdf", GARBAGE, undefined],
+    ["application/pdf", "r.pdf", new Uint8Array(0), undefined],
+    ["application/octet-stream", "scan.bin", PDF, undefined],
+    // Images go by their content's signature
+    ["image/jpeg", "scan.jpg", JPEG, "image/jpeg"],
+    ["image/jpg", "scan.jpg", JPEG, "image/jpeg"],
+    ["image/pjpeg", "scan.jpg", JPEG, "image/jpeg"],
+    ["IMAGE/PNG", undefined, PNG, "image/png"],
+    ["image/gif", "scan.gif", GIF, "image/gif"],
+    ["image/gif", "scan.gif", ascii("GIF87a...."), "image/gif"],
+    ["image/webp", "scan.webp", WEBP, "image/webp"],
+    // Mislabelled but real: sent as what the content is
+    ["image/jpeg", "scan.jpg", PNG, "image/png"],
+    ["image/heic", "IMG_0001.HEIC", JPEG, "image/jpeg"],
+    // Content that isn't such an image: never sent, filed by the received date
+    ["image/jpeg", "scan.jpg", GARBAGE, undefined],
+    ["image/png", "scan.png", PDF, undefined],
+    ["image/webp", "scan.webp", ascii("RIFF\u0010\u0000\u0000\u0000WAVEfmt "), undefined],
+    ["image/heic", "IMG_0001.HEIC", HEIC, undefined],
+    ["image/tiff", "scan.tif", TIFF, undefined],
+    ["image/bmp", "scan.bmp", ascii("BM6\u0000\u0000\u0000"), undefined],
+    // Not a Document type at all, whatever the content
+    ["text/plain", "notes.txt", JPEG, undefined],
+  ] as const)("%s named %s → %p", (mimeType, fileName, content, expected) => {
+    expect(documentMediaType({ mimeType, fileName, content })).toBe(expected);
   });
 });
 

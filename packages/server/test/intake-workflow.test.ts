@@ -14,7 +14,7 @@ import type { DocumentFile, Intake } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { runIntake } from "../src/intake-workflow";
-import { buildEml, bytes, pdf } from "./eml";
+import { buildEml, bytes, jpegBytes, pdf, pdfBytes } from "./eml";
 import type { Mail } from "./eml";
 
 let directory: string;
@@ -92,26 +92,28 @@ function freshHex(script: Script = () => NO_DATE) {
 
 describe("Intake workflow", () => {
   test("happy path: files each Document by its Document date, records the Intake", async () => {
-    // Answers by the Document's content, which is a run of one letter.
     const dates: Record<string, unknown> = {
       a: { year: 2026, month: 9, day: 15 },
       s: { year: 2026, month: 10, day: 3 },
       b: { year: 2026, month: 9, day: 30 },
     };
-    const hex = freshHex(({ content }) => dates[String.fromCharCode(content[0]!)]);
-    const scan = bytes(MIN_IMAGE_DOCUMENT_BYTES, "s");
+    // Answers by the Document's filler, which is a run of one letter after its header.
+    const hex = freshHex(({ content }) => dates[String.fromCharCode(content.at(-1)!)]);
+    const first = pdfBytes(500, "a");
+    const scan = jpegBytes(MIN_IMAGE_DOCUMENT_BYTES, "s");
+    const second = pdfBytes(500, "b");
     const result = await hex.process({
       messageId: "happy@shop.example",
       received,
       parts: [
-        pdf("Rechnung 2026-10.pdf", bytes(500, "a")),
+        pdf("Rechnung 2026-10.pdf", first),
         {
           contentType: "image/jpeg",
           disposition: "attachment",
           fileName: "Beleg.jpg",
           content: scan,
         },
-        pdf("Rechnung 2026-10.pdf", bytes(500, "b")),
+        pdf("Rechnung 2026-10.pdf", second),
       ],
     });
     const filings = [
@@ -124,17 +126,18 @@ describe("Intake workflow", () => {
       status: "processed",
       filings,
     });
+    const text = (content: Uint8Array) => new TextDecoder().decode(content);
     expect(await hex.outbox()).toEqual({
-      "2026-09/ER/Rechnung 2026-10.pdf": "a".repeat(500),
-      "2026-10/ER/Beleg.jpg": "s".repeat(MIN_IMAGE_DOCUMENT_BYTES),
-      "2026-09/ER/Rechnung 2026-10 (1).pdf": "b".repeat(500),
+      "2026-09/ER/Rechnung 2026-10.pdf": text(first),
+      "2026-10/ER/Beleg.jpg": text(scan),
+      "2026-09/ER/Rechnung 2026-10 (1).pdf": text(second),
     });
     expect(await hex.ledger("happy@shop.example")).toMatchObject({ documentCount: 3, filings });
     // Each Document went to the extractor whole, with the media type the model gets.
     expect(hex.asked).toEqual([
-      { content: bytes(500, "a"), mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
+      { content: first, mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
       { content: scan, mediaType: "image/jpeg", fileName: "Beleg.jpg" },
-      { content: bytes(500, "b"), mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
+      { content: second, mediaType: "application/pdf", fileName: "Rechnung 2026-10.pdf" },
     ]);
   });
 
@@ -192,7 +195,7 @@ describe("Intake workflow", () => {
           contentType: "application/octet-stream",
           disposition: "attachment",
           fileName: "Scan.PDF",
-          content: bytes(500),
+          content: pdfBytes(500),
         },
       ],
     });
@@ -232,25 +235,35 @@ describe("Intake workflow", () => {
     expect(hex.asked).toEqual([]);
   });
 
-  test("an image type models don't take is never sent and files by the received date", async () => {
-    const hex = freshHex(() => ({ year: 2026, month: 1, day: 1 }));
-    const result = await hex.process({
-      messageId: "heic@shop.example",
-      received,
-      parts: [
-        {
-          contentType: "image/heic",
-          disposition: "attachment",
-          fileName: "IMG_0001.HEIC",
-          content: bytes(MIN_IMAGE_DOCUMENT_BYTES),
-        },
-      ],
-    });
-    expect(result.filings).toEqual([
-      { index: 0, path: "2026-11/ER/IMG_0001.HEIC", fellBack: true },
-    ]);
-    expect(hex.asked).toEqual([]);
-  });
+  test.each([
+    [
+      "a HEIC image (OpenAI and Anthropic reject the type)",
+      "image/heic",
+      "IMG_0001.HEIC",
+      new TextEncoder().encode(`\u0000\u0000\u0000\u0018ftypheic${"h".repeat(20_000)}`),
+    ],
+    ["a PDF without %PDF", "application/pdf", "Rechnung.pdf", bytes(500, "n")],
+    [
+      "a JPEG without its signature",
+      "image/jpeg",
+      "Beleg.jpg",
+      bytes(MIN_IMAGE_DOCUMENT_BYTES, "j"),
+    ],
+  ])(
+    "%s never reaches the model and files by the received date",
+    async (_case, contentType, fileName, content) => {
+      const hex = freshHex(() => ({ year: 2026, month: 1, day: 1 }));
+      const result = await hex.process({
+        messageId: "unsent@shop.example",
+        received,
+        parts: [{ contentType, disposition: "attachment", fileName, content }],
+      });
+      expect(result.filings).toEqual([
+        { index: 0, path: `2026-11/ER/${fileName}`, fellBack: true },
+      ]);
+      expect(hex.asked).toEqual([]);
+    },
+  );
 
   test("a failed model call fails the run: nothing filed or recorded; a re-run retries", async () => {
     let failing = true;
