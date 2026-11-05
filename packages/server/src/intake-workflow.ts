@@ -166,8 +166,8 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
             const attachment = attachments[document.index]!;
             const content = Buffer.from(attachment.content, "base64");
             const mediaType = documentMediaType({ ...attachment, content });
-            // Never sent when OpenAI and Anthropic reject its type or its content isn't a valid
-            // PDF or image (Mastra would send a placeholder instead): it has no Document date.
+            // Never sent (no Document date) when its content is no valid PDF or image (Mastra
+            // would send a placeholder instead) or OpenAI and Anthropic refuse its image type.
             if (mediaType === undefined) return Effect.succeed(document);
             return extractor
               .extract({ content, mediaType, fileName: document.fileName })

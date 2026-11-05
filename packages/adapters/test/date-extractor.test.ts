@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { MastraModelConfig } from "@mastra/core/llm";
 import { MastraLanguageModelV2Mock } from "@mastra/core/test-utils/llm-mock";
+import { documentMediaType } from "@hex/domain";
 import { Effect, Exit } from "effect";
 import { DateExtractor, dateExtractorLayer } from "../src";
 import type { DocumentFile } from "../src";
@@ -52,7 +53,7 @@ const pdfDocument: DocumentFile = {
 const extract = (model: MastraModelConfig, document: DocumentFile) =>
   Effect.runPromiseExit(
     DateExtractor.use((extractor) => extractor.extract(document)).pipe(
-      Effect.provide(dateExtractorLayer(model)),
+      Effect.provide(dateExtractorLayer(model, { retryDelayMs: 0 })),
     ),
   );
 
@@ -104,6 +105,53 @@ describe("DateExtractor (live layer on a mock model)", () => {
     expect(success(await extract(model, pdfDocument))).toBeUndefined();
   });
 
+  describe("Mastra sends every Document hex's sniff (documentMediaType) lets through", () => {
+    const ascii = (text: string) => new TextEncoder().encode(text);
+    const pdfAt1022 = new Uint8Array(1030).fill(0x20);
+    pdfAt1022.set(ascii("%PDF-1.4"), 1022);
+    // [case, declared type, content: only the signature hex checks for]
+    test.each([
+      ["a PDF with %PDF at byte 1022", "application/pdf", pdfAt1022],
+      ["a JPEG", "image/jpeg", Uint8Array.from([0xff, 0xd8])],
+      ["a PNG", "image/png", Uint8Array.from([0x89, 0x50, 0x4e, 0x47])],
+      ["a GIF87a", "image/gif", ascii("GIF87a")],
+      ["a GIF89a", "image/gif", ascii("GIF89a")],
+      ["a WebP", "image/webp", ascii("RIFF\u0000\u0000\u0000\u0000WEBP")],
+    ])("%s", async (_case, declared, content) => {
+      const mediaType = documentMediaType({ mimeType: declared, fileName: "x", content });
+      expect(mediaType).toBe(declared);
+      const { model, calls } = scriptedModel('{"year":null,"month":null,"day":null}');
+      success(await extract(model, { content, mediaType: declared, fileName: "x" }));
+      expect(JSON.stringify(calls[0]?.prompt)).not.toContain("Attachment unavailable");
+      const file = userParts(calls[0]).find(({ type }) => type === "file");
+      expect(file).toMatchObject({ mediaType: declared });
+      expect(Buffer.from(file?.data as string, "base64")).toEqual(Buffer.from(content));
+    });
+  });
+
+  describe("a transient provider error (retryable, e.g. 503)", () => {
+    const overloaded = () =>
+      Object.assign(new Error("503 Service Unavailable"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+      });
+
+    test("is retried: the next answer counts", async () => {
+      const { model, calls } = scriptedModel(overloaded(), '{"year":2026,"month":10,"day":5}');
+      expect(success(await extract(model, pdfDocument))).toEqual({ year: 2026, month: 10, day: 5 });
+      expect(calls).toHaveLength(2);
+    });
+
+    test("fails the call after two retries", async () => {
+      const { model, calls } = scriptedModel(overloaded(), overloaded(), overloaded(), "{}");
+      const exit = await extract(model, pdfDocument);
+      expect(String(exit)).toContain("DateExtractionError");
+      expect(String(exit)).toContain("failed (HTTP 503): 503 Service Unavailable");
+      expect(calls).toHaveLength(3);
+    });
+  });
+
   describe("a failed model call", () => {
     const key = "sk-hex-test-0123456789abcdef";
     afterEach(() => {
@@ -112,9 +160,10 @@ describe("DateExtractor (live layer on a mock model)", () => {
 
     test("is the extractor's error, naming the Document and the model, never the API key", async () => {
       process.env.HEX_TEST_API_KEY = key;
-      const { model } = scriptedModel(new Error(`401 Incorrect API key provided: ${key}`));
+      const { model, calls } = scriptedModel(new Error(`401 Incorrect API key provided: ${key}`));
       const exit = await extract(model, pdfDocument);
       expect(Exit.isFailure(exit)).toBe(true);
+      expect(calls).toHaveLength(1);
       const message = String(exit);
       expect(message).toContain("DateExtractionError");
       expect(message).toContain(
@@ -149,6 +198,29 @@ describe("DateExtractor (live layer on a mock model)", () => {
       const message = String(exit);
       expect(message).toContain(`failed: 400 invalid file: ${"x".repeat(300 - 18)}…`);
       expect(message).not.toContain("x".repeat(300));
+    });
+
+    test("redacts an API key before the cut, even one straddling character 300", async () => {
+      process.env.HEX_TEST_API_KEY = key;
+      // The key starts 10 characters before the cut; cutting first would leave its prefix.
+      const { model } = scriptedModel(new Error(`${"y".repeat(290)}${key} tail`));
+      const message = String(await extract(model, pdfDocument));
+      expect(message).toContain(`failed: ${"y".repeat(290)}HEX_TEST_A…`);
+      expect(message).not.toContain(key.slice(0, 10));
+    });
+
+    test("a provider error without a message still says what failed: its HTTP status", async () => {
+      const tooLarge = Object.assign(new Error(""), {
+        name: "AI_APICallError",
+        statusCode: 413,
+        isRetryable: false,
+        responseBody: "",
+      });
+      const { model, calls } = scriptedModel(tooLarge);
+      expect(String(await extract(model, pdfDocument))).toContain(
+        'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id failed (HTTP 413): the provider gave no message',
+      );
+      expect(calls).toHaveLength(1);
     });
   });
 });

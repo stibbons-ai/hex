@@ -80,8 +80,9 @@ export function documentExtension(mimeType: string): string {
 
 /**
  * Image types hex hands a model, each with the leading bytes (`undefined`: any byte) its content
- * starts with, the same signatures Mastra checks before it sends an image: the types OpenAI and
- * Anthropic both document as image input (GIF only static: OpenAI takes non-animated GIFs,
+ * starts with: a stricter subset of the signatures Mastra checks before it sends an image
+ * (`isValidInlineContent`, which also passes BMP, TIFF, AVIF and HEIF). They are the types OpenAI
+ * and Anthropic both document as image input (GIF only static: OpenAI takes non-animated GIFs,
  * Anthropic reads the first frame). The default model is OpenAI's; Google's Gemini documents PNG,
  * JPEG, WebP, HEIC and HEIF, so GIF is unverified there. Other images (HEIC, HEIF, TIFF, BMP)
  * OpenAI and Anthropic reject, which would fail every run of the Intake.
@@ -98,8 +99,9 @@ const MODEL_IMAGE_SIGNATURES: readonly (readonly [string, readonly (number | und
 ];
 
 /**
- * The leading bytes a PDF's `%PDF` header must lie within: Mastra checks the first 1026 bytes
- * before sending one, so the header may start at byte 1022 at the latest.
+ * The leading bytes a PDF's `%PDF` header must lie within, as Mastra's `isValidInlineContent`
+ * checks before sending one (the first 1026 bytes): the header may start at byte 1022 at the
+ * latest.
  */
 const PDF_HEADER_WINDOW = 1026;
 
@@ -118,9 +120,11 @@ function hasPdfHeader(content: Uint8Array): boolean {
  * its declared type and its content: a PDF (`application/octet-stream` named `*.pdf` too) as
  * `application/pdf` when `%PDF` lies within its first 1026 bytes; an image as the type its
  * content's signature names (JPEG, PNG, GIF, WebP), whatever type it was declared as. Undefined
- * otherwise (HEIC, HEIF, TIFF, BMP, content that isn't a valid PDF or such an image, a type that
- * is no Document): such a Document is never sent and is filed by its received date. Mastra would
- * otherwise send a placeholder text in its place and the model would answer without seeing it.
+ * otherwise, and the Document is never sent but filed by its received date, for one of two
+ * reasons: content matching none of Mastra's signatures (no valid PDF or image) Mastra would
+ * replace by a placeholder text the model answers blind; image types Mastra does pass (HEIC,
+ * HEIF, AVIF, TIFF, BMP) OpenAI and Anthropic refuse, failing the run every time. A type that is
+ * no Document is undefined too.
  */
 export function documentMediaType(
   attachment: Pick<AttachmentFacts, "mimeType" | "fileName"> & { readonly content: Uint8Array },

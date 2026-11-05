@@ -6,5 +6,5 @@ Superseded in part: mounting Mastra's routes via `@mastra/hono` is replaced by o
 
 ## Consequences
 
-- Mastra versions are pinned exactly; a Mastra upgrade re-checks the bundle's model-capability metadata and the schema helper.
+- Mastra versions are pinned exactly; a Mastra upgrade re-checks the bundle's model-capability metadata, the schema helper, and hex's sendability sniff in `packages/domain/src/document.ts` (mirrors Mastra's `isValidInlineContent`; the contract tests in `packages/adapters/test/date-extractor.test.ts` catch a tightened check).
 - Not covered by iconograph and still to prove in hex: Mastra Channels (Slack socket mode) under the Bun entrypoint.

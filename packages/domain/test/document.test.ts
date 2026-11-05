@@ -74,40 +74,46 @@ describe("documentMediaType", () => {
   const TIFF = bytes(0x49, 0x49, 0x2a, 0x00);
   const GARBAGE = ascii("jjjjjjjjjjjj");
 
-  // [MIME type as sent, file name, content, media type the model gets]
+  // [MIME type as sent, file name, content label, media type the model gets, content]
   test.each([
-    ["application/pdf", "r.pdf", PDF, "application/pdf"],
-    ['Application/PDF; name="r.pdf"', "r.pdf", PDF, "application/pdf"],
-    ["application/octet-stream", "Scan.PDF", PDF, "application/pdf"],
+    ["application/pdf", "r.pdf", "a PDF header", "application/pdf", PDF],
+    ['Application/PDF; name="r.pdf"', "r.pdf", "a PDF header", "application/pdf", PDF],
+    ["application/octet-stream", "Scan.PDF", "a PDF header", "application/pdf", PDF],
     // %PDF may start after leading junk, up to where Mastra still finds it
-    ["application/pdf", "r.pdf", at(500, "%PDF-1.4"), "application/pdf"],
-    ["application/pdf", "r.pdf", at(1022, "%PDF-1.4"), "application/pdf"],
-    ["application/pdf", "r.pdf", at(1023, "%PDF-1.4"), undefined],
-    ["application/pdf", "r.pdf", at(1100, "%PDF-1.4"), undefined],
-    ["application/pdf", "r.pdf", GARBAGE, undefined],
-    ["application/pdf", "r.pdf", new Uint8Array(0), undefined],
-    ["application/octet-stream", "scan.bin", PDF, undefined],
+    ["application/pdf", "r.pdf", "%PDF at byte 500", "application/pdf", at(500, "%PDF-1.4")],
+    ["application/pdf", "r.pdf", "%PDF at byte 1022", "application/pdf", at(1022, "%PDF-1.4")],
+    ["application/pdf", "r.pdf", "%PDF at byte 1023", undefined, at(1023, "%PDF-1.4")],
+    ["application/pdf", "r.pdf", "%PDF at byte 1100", undefined, at(1100, "%PDF-1.4")],
+    ["application/pdf", "r.pdf", "garbage", undefined, GARBAGE],
+    ["application/pdf", "r.pdf", "no content", undefined, new Uint8Array(0)],
+    ["application/octet-stream", "scan.bin", "a PDF header", undefined, PDF],
     // Images go by their content's signature
-    ["image/jpeg", "scan.jpg", JPEG, "image/jpeg"],
-    ["image/jpg", "scan.jpg", JPEG, "image/jpeg"],
-    ["image/pjpeg", "scan.jpg", JPEG, "image/jpeg"],
-    ["IMAGE/PNG", undefined, PNG, "image/png"],
-    ["image/gif", "scan.gif", GIF, "image/gif"],
-    ["image/gif", "scan.gif", ascii("GIF87a...."), "image/gif"],
-    ["image/webp", "scan.webp", WEBP, "image/webp"],
+    ["image/jpeg", "scan.jpg", "a JPEG signature", "image/jpeg", JPEG],
+    ["image/jpg", "scan.jpg", "a JPEG signature", "image/jpeg", JPEG],
+    ["image/pjpeg", "scan.jpg", "a JPEG signature", "image/jpeg", JPEG],
+    ["IMAGE/PNG", undefined, "a PNG signature", "image/png", PNG],
+    ["image/gif", "scan.gif", "GIF89a", "image/gif", GIF],
+    ["image/gif", "scan.gif", "GIF87a", "image/gif", ascii("GIF87a....")],
+    ["image/webp", "scan.webp", "RIFF…WEBP", "image/webp", WEBP],
     // Mislabelled but real: sent as what the content is
-    ["image/jpeg", "scan.jpg", PNG, "image/png"],
-    ["image/heic", "IMG_0001.HEIC", JPEG, "image/jpeg"],
+    ["image/jpeg", "scan.jpg", "a PNG signature", "image/png", PNG],
+    ["image/heic", "IMG_0001.HEIC", "a JPEG signature", "image/jpeg", JPEG],
     // Content that isn't such an image: never sent, filed by the received date
-    ["image/jpeg", "scan.jpg", GARBAGE, undefined],
-    ["image/png", "scan.png", PDF, undefined],
-    ["image/webp", "scan.webp", ascii("RIFF\u0010\u0000\u0000\u0000WAVEfmt "), undefined],
-    ["image/heic", "IMG_0001.HEIC", HEIC, undefined],
-    ["image/tiff", "scan.tif", TIFF, undefined],
-    ["image/bmp", "scan.bmp", ascii("BM6\u0000\u0000\u0000"), undefined],
+    ["image/jpeg", "scan.jpg", "garbage", undefined, GARBAGE],
+    ["image/png", "scan.png", "a PDF header", undefined, PDF],
+    [
+      "image/webp",
+      "scan.webp",
+      "RIFF…WAVE",
+      undefined,
+      ascii("RIFF\u0010\u0000\u0000\u0000WAVEfmt "),
+    ],
+    ["image/heic", "IMG_0001.HEIC", "a HEIC ftyp box", undefined, HEIC],
+    ["image/tiff", "scan.tif", "a TIFF header", undefined, TIFF],
+    ["image/bmp", "scan.bmp", "a BMP header", undefined, ascii("BM6\u0000\u0000\u0000")],
     // Not a Document type at all, whatever the content
-    ["text/plain", "notes.txt", JPEG, undefined],
-  ] as const)("%s named %s → %p", (mimeType, fileName, content, expected) => {
+    ["text/plain", "notes.txt", "a JPEG signature", undefined, JPEG],
+  ] as const)("%s named %s with %s → %p", (mimeType, fileName, _label, expected, content) => {
     expect(documentMediaType({ mimeType, fileName, content })).toBe(expected);
   });
 });

@@ -84,6 +84,27 @@ function withoutApiKeys(message: string): string {
  */
 const MAX_PROVIDER_MESSAGE = 300;
 
+/** The HTTP status of the provider call `error` (or one of its causes) failed with, if any. */
+function httpStatusOf(error: unknown): number | undefined {
+  let current = error;
+  for (let depth = 0; depth < 5 && current instanceof Object; depth++) {
+    const { name, statusCode, cause } = current as {
+      name?: unknown;
+      statusCode?: unknown;
+      cause?: unknown;
+    };
+    if (name === "AI_APICallError" && typeof statusCode === "number") return statusCode;
+    current = cause;
+  }
+  return undefined;
+}
+
+/** Options of {@link dateExtractorLayer}. */
+export interface DateExtractorOptions {
+  /** Wait before retrying a transient provider error (rate limit, overload); default 3000 ms. */
+  readonly retryDelayMs?: number;
+}
+
 /**
  * The DateExtractor on `model`: a Mastra model-router id (`provider/model`, its API key from the
  * provider's usual variable, e.g. `OPENAI_API_KEY`) or a model instance (tests pass a mock). Each
@@ -92,7 +113,10 @@ const MAX_PROVIDER_MESSAGE = 300;
  * undefined (Mastra's `warn` strategy), not an error. The agent logs nothing: the error carries
  * what went wrong.
  */
-export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateExtractor> {
+export function dateExtractorLayer(
+  model: MastraModelConfig,
+  { retryDelayMs = 3000 }: DateExtractorOptions = {},
+): Layer.Layer<DateExtractor> {
   // Never register this Agent on a Mastra instance: its logger would replace the no-op one and
   // log provider errors, which hold the request and with it the Document.
   const agent = new Agent({
@@ -102,9 +126,12 @@ export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateEx
     model,
     // Mastra's default error processors include one that, when a provider refuses the file,
     // replaces it with a placeholder text and asks again: the model would answer without the
-    // Document. Only transient errors are retried, as the default retry processor does.
+    // Document. Only transient errors the provider marks retryable are retried, twice, as the
+    // default retry processor does; its extra matchers (ECONNRESET / socket hang up, Gemini's
+    // MALFORMED_FUNCTION_CALL) are not kept: a reset connection fails the run, and a re-run
+    // retries it.
     errorProcessorDefaults: false,
-    errorProcessors: [new StreamErrorRetryProcessor({ maxRetries: 2, delayMs: 3000 })],
+    errorProcessors: [new StreamErrorRetryProcessor({ maxRetries: 2, delayMs: retryDelayMs })],
   });
   agent.__setLogger(noopLogger);
   const schema = toMastraSchema(DocumentDateAnswer);
@@ -125,13 +152,14 @@ export function dateExtractorLayer(model: MastraModelConfig): Layer.Layer<DateEx
             { structuredOutput: { schema, errorStrategy: "warn" }, abortSignal: signal },
           ),
         catch: (cause) => {
-          const reason = withoutApiKeys(messageOf(cause));
+          const reason = withoutApiKeys(messageOf(cause)) || "the provider gave no message";
           const shown =
             reason.length > MAX_PROVIDER_MESSAGE
               ? `${reason.slice(0, MAX_PROVIDER_MESSAGE)}…`
               : reason;
+          const status = httpStatusOf(cause);
           return new DateExtractionError({
-            message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed: ${shown}`,
+            message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,
           });
         },
       }).pipe(Effect.map(({ object }): unknown => object)),

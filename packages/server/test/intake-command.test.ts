@@ -299,9 +299,10 @@ describe("bun run intake", () => {
       );
       expect(run).toMatchObject({ code: 1, stdout: "" });
       expect(run.stderr).toContain(
-        'hex intake: the Intake workflow did not finish: reading the Document date of "a.pdf" with openai/gpt-5-mini failed: Incorrect API key provided: OPENAI_API_KEY.',
+        'hex intake: the Intake workflow did not finish: reading the Document date of "a.pdf" with openai/gpt-5-mini failed (HTTP 401): Incorrect API key provided: OPENAI_API_KEY.',
       );
       expect(run.stderr).not.toContain(API_KEY);
+      // Exactly one model call: a refused key is never retried.
       expect(rejecting.requests.map(({ model: id }) => id)).toEqual(["gpt-5-mini"]);
       expect(await readdir(outbox).catch(() => [])).toEqual([]);
       expect(await ledgerEntry(dataDirectory, "unread@shop.example")).toBeUndefined();

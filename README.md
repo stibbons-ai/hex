@@ -96,15 +96,18 @@ The workflow, in order:
    Document date is the date it was issued (invoice date, Rechnungsdatum, Belegdatum, receipt
    date), never a due date, delivery or service period, order date or the date it was printed
    or sent. The model answers `{ year, month, day }` as structured output (an Effect Schema,
-   decoded again in the step), all `null` when the Document shows no date. Never sent: HEIC,
-   HEIF, TIFF and BMP images (OpenAI and Anthropic reject them), and content that isn't a valid
-   PDF (`%PDF` within its first 1026 bytes) or JPEG, PNG, GIF or WebP image (by its signature),
-   which Mastra would otherwise replace by a placeholder text the model answers blind. A model
-   call that fails (network, missing or wrong API key, rate limit, provider error, a provider
-   refusing the file) fails the run before anything is filed or recorded, so running the Intake
-   again retries it; a Document the provider rejects every time (e.g. an encrypted or oversized
-   PDF) keeps failing its Intake until it is handled by hand. The error names the Document and
-   the model and keeps at most 300 characters of the provider's message.
+   decoded again in the step), all `null` when the Document shows no date. Never sent, for one
+   of two reasons: content that isn't a valid PDF (`%PDF` within its first 1026 bytes) or JPEG,
+   PNG, GIF or WebP image (by its signature), which Mastra would replace by a placeholder text
+   the model answers blind; and HEIC, HEIF, AVIF, TIFF and BMP images, which Mastra would send
+   but OpenAI and Anthropic refuse, failing the run every time. A model call that fails
+   (network, missing or wrong API key, rate limit, provider error, a provider refusing the file)
+   fails the run before anything is filed or recorded, so running the Intake again retries it;
+   a transient error the provider marks retryable (rate limit, overload) is retried twice
+   first, 3 s apart, but a reset connection is not. A Document the provider rejects every time
+   (e.g. an encrypted or oversized PDF) keeps failing its Intake until it is handled by hand.
+   The error names the Document, the model and the HTTP status, and keeps at most 300
+   characters of the provider's message.
 4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
@@ -164,8 +167,8 @@ Intake with `message_id` (the key), `processed_at`, `document_count` and `filing
 `{ "index": …, "path": …, "fellBack": … }` per Document: its position among the attachments,
 0-based, where it landed, and `true` when it was filed by the received date: the model answered
 no usable Document date, or hex never sent the Document to a model (see step 3)). Entries
-recorded before #7, which filed every Document by the received date, have no `fellBack`:
-they read back without it, claiming nothing either way. The workflow's result (`IntakeResult`)
+recorded before #7 (when hex filed every Document by the received date) have no `fellBack` and
+read back without it. The workflow's result (`IntakeResult`)
 carries the same Filings, also for an Intake already processed. An Intake whose run failed
 halfway is not recorded, so running it again files the Documents that already landed a second
 time, as `name (1).pdf`.
