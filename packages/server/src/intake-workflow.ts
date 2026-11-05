@@ -514,7 +514,10 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
         // The failure stays the run's error even when the ledger can't count it.
         const consequence = await runtime.runPromise(
           recordFailedRun(messageId, runId).pipe(
-            Effect.map((failed) => ({ text: describeFailedRun(failed), mail: failed.mail })),
+            Effect.map((failed) => ({
+              text: describeFailedRun(failed, { retryPending: true }),
+              mail: failed.mail,
+            })),
             Effect.catchTag("LedgerError", ({ message }) =>
               Effect.succeed({
                 text: `counting the failed run failed: ${message}`,

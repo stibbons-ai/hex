@@ -10,6 +10,7 @@ import {
   failPermanently,
   mailFateOf,
   moveMail,
+  notMoved,
   recordFailedRun,
   retryDelayMs,
 } from "./mail-fate";
@@ -160,7 +161,8 @@ export function watchMailbox({
    * `fate` of a move to `fate.to`, finished by moving the mail at `uid` by its UID: when the move
    * found no copy by Message-ID (the server reads the Message-ID differently from hex, say), and,
    * once more, when a move to `hex/failed` failed (else the next look would run the Intake afresh).
-   * A move by UID that fails makes it `not-moved`; with the error, when that ends the look.
+   * No mail at that UID makes it `not-in-mailbox` (a failed move that went through after all, say);
+   * a move by UID that fails makes it `not-moved`, with the error when that ends the look.
    */
   const settle = <To extends MailOutcome>(uid: number, fate: MoveFate<To>) =>
     fate.status === "not-in-mailbox" || (fate.status === "not-moved" && fate.to === "failed")
@@ -168,13 +170,15 @@ export function watchMailbox({
           Effect.map(
             (moved) =>
               [
-                moved ? ({ status: "moved", to: fate.to, copies: 1 } as MoveFate<To>) : fate,
+                (moved
+                  ? { status: "moved", to: fate.to, copies: 1 }
+                  : { status: "not-in-mailbox", to: fate.to }) as MoveFate<To>,
                 undefined,
               ] as const,
           ),
           Effect.catchTag("MailboxError", (error) =>
             Effect.succeed([
-              { status: "not-moved", to: fate.to, reason: error.message } as MoveFate<To>,
+              notMoved(fate.to, error.message),
               endsLook(error) ? error : undefined,
             ] as const),
           ),
@@ -182,22 +186,18 @@ export function watchMailbox({
       : Effect.succeed([fate, undefined] as const);
 
   /**
-   * `fate` settled ({@link settle}) and logged as `describe` puts it (`undefined`: not logged,
-   * `warn`: at warn whatever the fate); then a settling error that ends the look ends it.
+   * `fate` settled ({@link settle}) and logged as `describe` puts it (`undefined`: not logged);
+   * then a settling error that ends the look ends it.
    */
   const settleLogged = <To extends MailOutcome>(
     uid: number,
     fate: MoveFate<To>,
     describe: (settled: MoveFate<To>) => string | undefined,
-    warn = false,
   ) =>
     Effect.gen(function* () {
       const [settled, ending] = yield* settle(uid, fate);
       const line = describe(settled);
-      if (line !== undefined) {
-        if (warn) log.warn(line);
-        else logBy(settled, line);
-      }
+      if (line !== undefined) logBy(settled, line);
       if (ending) return yield* Effect.fail(ending);
     });
 
@@ -217,8 +217,9 @@ export function watchMailbox({
       const failed = yield* recordFailedRun(messageId, runId);
       const line = (mail: FailedRun["mail"]) =>
         `hex: Intake ${messageId}: ${describeFailedRun({ ...failed, mail })}`;
+      // Kept for a retry, or moved to (or failing to move to) `hex/failed`: a warning either way.
       if (failed.mail.status === "kept-for-retry") log.warn(line(failed.mail));
-      else yield* settleLogged(uid, failed.mail, line, true);
+      else yield* settleLogged(uid, failed.mail, line);
     });
 
   /**
@@ -279,9 +280,9 @@ export function watchMailbox({
       const fate = mailFateOf(error);
       if (fate) {
         if (fate.status !== "kept-for-retry") {
-          // The run's own line told the fate; a settled one gets a line of its own.
+          // The run's own line told the fate; one the watcher changed gets a line of its own.
           yield* settleLogged(uid, fate, (settled) =>
-            settled === fate
+            settled.status === fate.status && settled.status !== "not-moved"
               ? undefined
               : `hex: Intake ${messageId}: failed permanently; ${describeMove(settled)}`,
           );
@@ -355,11 +356,12 @@ export function watchMailbox({
         return true;
       });
 
-    /** The mail at `uid`, listed with the server's reading of its Message-ID. */
-    const look = (uid: number, serverId: string | undefined) =>
+    /**
+     * The mail at `uid`, listed with the server's reading of its Message-ID. Both readings come
+     * normalised: the listing's by the Mailbox, hex's by `readEml`.
+     */
+    const look = (uid: number, listed: string | undefined) =>
       Effect.gen(function* () {
-        // Normalised as the ledger and the active runs key them, whoever read the header.
-        const listed = serverId === undefined ? undefined : normalizeMessageId(serverId);
         if (listed !== undefined && (yield* passOver(listed))) {
           seen.add(listed);
           return;
@@ -372,7 +374,7 @@ export function watchMailbox({
           yield* mailbox.moveUid(uid, "failed");
           return;
         }
-        const intake = { ...read.success, messageId: normalizeMessageId(read.success.messageId) };
+        const intake = read.success;
         const run = yield* shouldRun(intake.messageId, uid);
         seen.add(intake.messageId);
         if (listed !== undefined) seen.add(listed);

@@ -47,7 +47,8 @@ const FIRST_FAILED_RUN =
  * DateExtractor that answers by `script` and records every Document it was asked about, a
  * recording Mailer forwarding as `forwarding` says (off when absent), and an in-memory Mailbox
  * watching INBOX. The real ledger records Forwardings, except that the next
- * `failing.forwardingRecords` attempts fail, as a ledger that can't write would.
+ * `failing.forwardingRecords` attempts fail, as a ledger that can't write would; so do the next
+ * `failing.failedRunRecords` calls counting a failed run.
  */
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
@@ -55,7 +56,7 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
   const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
   const mailbox = memoryMailbox();
-  const failing = { forwardingRecords: 0 };
+  const failing = { forwardingRecords: 0, failedRunRecords: 0 };
   const ledger = Layer.effect(
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
@@ -65,6 +66,12 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
           if (failing.forwardingRecords <= 0) return real.recordForwarding(messageId, target);
           failing.forwardingRecords--;
           return Effect.fail(new LedgerError({ message: "Intake ledger: disk I/O error" }));
+        }),
+      recordFailedRun: (messageId: string, runId: string) =>
+        Effect.suspend(() => {
+          if (failing.failedRunRecords <= 0) return real.recordFailedRun(messageId, runId);
+          failing.failedRunRecords--;
+          return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
         }),
     })),
   ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
@@ -1039,6 +1046,21 @@ describe("Intake workflow", () => {
       expect(hex.mailbox.messageIds()).toEqual(["kept@shop.example"]);
       expect(hex.mailbox.moves).toEqual([]);
       expect(await hex.failedRuns("kept@shop.example")).toMatchObject({ count: 1 });
+    });
+
+    test("a failed run the ledger can't count says so; the failure stays the run's error", async () => {
+      const hex = freshHex(() => new Error("reading the Document date failed: 429"));
+      hex.failing.failedRunRecords = 1;
+      const mail = mailOf("uncounted@shop.example");
+      hex.deliver(mail);
+      const failed = await hex.process(mail).catch((error: unknown) => error);
+      expect(failed).toBeInstanceOf(IntakeRunError);
+      expect((failed as IntakeRunError).message).toBe(
+        "the Intake workflow did not finish: filing: reading the Document date failed: 429; counting the failed run failed: Intake ledger: database is locked",
+      );
+      expect((failed as IntakeRunError).mail).toBeUndefined();
+      expect(hex.mailbox.messageIds()).toEqual(["uncounted@shop.example"]);
+      expect(await hex.failedRuns("uncounted@shop.example")).toBeUndefined();
     });
 
     test("the 5th failed run moves the mail to hex/failed; moved back, the Intake runs afresh and only its failed branch repeats", async () => {

@@ -1,12 +1,15 @@
 // Entry of the boot resumption test (boot.test.ts): hex's server as `main.ts` starts it, but on an
 // in-memory Mailbox (a real one needs an IMAP server) seeded with the `.eml` files named in argv,
 // in the data directory argv[2]. The model is `openai/…` (point OPENAI_BASE_URL at a fake);
-// Forwarding goes to one target through the SMTP server on 127.0.0.1 at HEX_SMTP_PORT. Prints
-// `booted` once the boot sweep settled (the watcher starts alongside it), and `moved <n>
-// <Message-ID> to <folder>` for each move, so the test can follow from outside; SIGTERM stops it.
+// Forwarding goes to one target through the SMTP server on 127.0.0.1 at HEX_SMTP_PORT. Mastra's
+// console logger logs at debug (warnings to stderr, the rest to stdout), the watcher's lines
+// among them. Prints `booted` once the boot sweep settled (the watcher starts alongside it), and
+// `moved <n> <Message-ID> to <folder>` for each move, so the test can follow from outside;
+// SIGTERM stops it.
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Mailbox, dateExtractorLayer, outcomeFolder, smtpMailerLayer } from "@hex/adapters";
+import { ConsoleLogger } from "@mastra/core/logger";
 import { Effect, Layer, Redacted } from "effect";
 import { startServer } from "../src/index";
 import {
@@ -56,7 +59,7 @@ const server = await startServer({
   databasePath: join(directory, "mastra.db"),
   observabilityPath: join(directory, "observability.duckdb"),
   port: 0,
-  logger: false,
+  logger: new ConsoleLogger({ name: "hex", level: "debug" }),
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category: "ER", forwarding }),
   },

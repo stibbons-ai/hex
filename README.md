@@ -272,7 +272,7 @@ settings, and runs it for every mail in the intake mailbox (see [Mailbox](#mailb
 
 The workflow, in order:
 
-1. **Ledger check**: an Intake whose Message-ID (trimmed, without `<>`) is in the ledger was
+1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`) is in the ledger was
    processed before; the run ends there, files or forwards nothing and moves its mail to
    `hex/processed` (as in step 7).
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
@@ -350,7 +350,7 @@ The workflow, in order:
 6. **Ledger**: when every branch succeeded, the Intake is recorded as processed with its
    Filings, also when it had no Documents.
 7. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
-   (compared trimmed and without `<>`, as the ledger does, so a re-delivered mail moves too), goes
+   (compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail moves too), goes
    to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
    the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
@@ -526,9 +526,12 @@ folder or the active runs or to wait for news (all at warn, naming the mail when
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
 is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. A move to
-`hex/failed` that fails is tried once more by UID; when that fails too, the Intake's count is
-ended already, so the next look runs it afresh, a new series of 5 runs, as the warning says.
+consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. For a run of
+the watcher's own, a move to `hex/failed` that fails is tried once more by UID; when that fails
+too (or the run was one resumed at boot, which the watcher doesn't follow), the Intake's count is
+ended already, so the next look runs it afresh, a new series of 5 runs, as the warning says. A
+move whose answer was lost although it went through reads as no mail in the folder, not as a
+fresh series.
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after

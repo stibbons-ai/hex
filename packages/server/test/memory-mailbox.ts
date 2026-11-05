@@ -47,6 +47,8 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
   let unreachable = 0;
   /** Operations the server refuses next, by name prefix, each with how many more times. */
   const refusals = new Map<string, number>();
+  /** Operations the server does but whose answer is lost next, by name prefix. */
+  const lostReplies = new Map<string, number>();
   let closed = false;
   /** The folder gets a new UIDVALIDITY right after the next listing. */
   let renumberAfterListing = false;
@@ -59,10 +61,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
   /** Who waits for the next operation, attempted or failed. */
   let operationListeners: ((what: string) => void)[] = [];
 
-  const failure = (what: string, reason: string, cause: MailboxError["reason"]) =>
+  const failure = (what: string, detail: string, reason: MailboxError["reason"]) =>
     new MailboxError({
-      message: `127.0.0.1:993, folder ${folder}: ${what} failed: ${reason}`,
-      reason: cause,
+      message: `127.0.0.1:993, folder ${folder}: ${what} failed: ${detail}`,
+      reason,
     });
   /** Fails `what` while the server is unreachable, refuses it or is closed, else runs `run`. */
   const operation = <A>(what: string, run: () => A) =>
@@ -84,6 +86,14 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
           refusals.set(prefix, left - 1);
           return Effect.fail(
             failure(what, "the server refused it: [NOPERM] not allowed", "refused"),
+          );
+        }
+      }
+      for (const [prefix, left] of lostReplies) {
+        if (left > 0 && what.startsWith(prefix)) {
+          lostReplies.set(prefix, left - 1);
+          return Effect.try({ try: run, catch: (error) => error as MailboxError }).pipe(
+            Effect.andThen(Effect.fail(failure(what, "the connection closed", "connection-lost"))),
           );
         }
       }
@@ -226,6 +236,13 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     /** The server refuses the next `times` operations whose name starts with `prefix`. */
     refuse(prefix: string, times = 1) {
       refusals.set(prefix, times);
+    },
+    /**
+     * The server does the next operation whose name starts with `prefix`, but the connection
+     * drops before its answer: the operation fails with the connection lost, its effect stands.
+     */
+    loseReply(prefix: string) {
+      lostReplies.set(prefix, 1);
     },
     /** The poll interval passed: a waiting watcher looks again. */
     tick() {

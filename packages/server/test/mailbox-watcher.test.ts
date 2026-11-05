@@ -270,14 +270,23 @@ describe("watchMailbox", () => {
     const hex = await freshWatcher();
     hex.mailbox.deliver(emlOf(undefined));
     hex.mailbox.deliver(new TextEncoder().encode("not a mail"));
+    // `Message-ID: <<>>`: blank once its brackets are off, as anyone can send.
+    hex.mailbox.deliver(emlOf("<>"));
     hex.start();
     await hex.scanned();
     expect(hex.mailbox.messageIds()).toEqual([]);
-    expect(hex.mailbox.moves.map(({ to }) => to)).toEqual(["hex/failed", "hex/failed"]);
+    expect(hex.mailbox.moves.map(({ to }) => to)).toEqual([
+      "hex/failed",
+      "hex/failed",
+      "hex/failed",
+    ]);
     expect(hex.asked).toEqual([]);
     expect(await hex.runs()).toEqual([]);
     expect(hex.log()).toContain(
       "warn: hex: mailbox: INBOX UID 1: no Message-ID, so the Intake can't be processed exactly once; moving it to hex/failed",
+    );
+    expect(hex.log()).toContain(
+      "warn: hex: mailbox: INBOX UID 3: no Message-ID, so the Intake can't be processed exactly once; moving it to hex/failed",
     );
   });
 
@@ -517,14 +526,20 @@ describe("watchMailbox", () => {
     );
   });
 
-  /** An always-failing Intake `messageId` driven to its 5th failed run, `refused` moves failing. */
-  async function toFifthFailure(messageId: string, refused: number) {
+  /**
+   * An always-failing Intake `messageId` driven to its 5th failed run, `atFifth` done to the
+   * mailbox just before it.
+   */
+  async function toFifthFailure(
+    messageId: string,
+    atFifth: (mailbox: ReturnType<typeof memoryMailbox>) => void,
+  ) {
     const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
     hex.mailbox.deliver(emlOf(messageId));
     hex.start();
     await hex.scanned();
     for (let run = 2; run <= 5; run++) {
-      if (run === 5) hex.mailbox.refuse("moving mail to hex/failed", refused);
+      if (run === 5) atFifth(hex.mailbox);
       // Well past any retry delay, measured from the real time of the last failure.
       hex.clock.offset = run * 60 * 60_000;
       hex.mailbox.tick();
@@ -535,15 +550,25 @@ describe("watchMailbox", () => {
   }
 
   test("a failed move to hex/failed is tried once more by UID", async () => {
-    const hex = await toFifthFailure("move-once@shop.example", 1);
+    const hex = await toFifthFailure("move-once@shop.example", (mailbox) =>
+      mailbox.refuse("moving mail to hex/failed"),
+    );
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["move-once@shop.example"]);
+    // The run's line says what comes; the watcher's, what came of it.
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^warn: hex: Intake move-once@shop\.example: the run failed: .*failed run 5 of 5, so the Intake failed permanently: moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s,
+      ),
+    );
     expect(hex.log()).toContain(
       "warn: hex: Intake move-once@shop.example: failed permanently; its mail was moved to hex/failed",
     );
   });
 
   test("a move to hex/failed failing twice says the Intake is run afresh at the next look", async () => {
-    const hex = await toFifthFailure("move-never@shop.example", 2);
+    const hex = await toFifthFailure("move-never@shop.example", (mailbox) =>
+      mailbox.refuse("moving mail to hex/failed", 2),
+    );
     expect(hex.mailbox.messageIds()).toEqual(["move-never@shop.example"]);
     expect(hex.log()).toContainEqual(
       expect.stringMatching(
@@ -553,6 +578,19 @@ describe("watchMailbox", () => {
     hex.mailbox.tick();
     await hex.scanned();
     expect(hex.asked).toHaveLength(6);
+  });
+
+  test("a move to hex/failed that went through though its answer was lost promises no fresh runs", async () => {
+    const hex = await toFifthFailure("move-lost@shop.example", (mailbox) =>
+      mailbox.loseReply("moving mail to hex/failed"),
+    );
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["move-lost@shop.example"]);
+    expect(hex.log().at(-1)).toBe(
+      "warn: hex: Intake move-lost@shop.example: failed permanently; no mail of it was in the watched folder",
+    );
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(5);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {
@@ -677,6 +715,10 @@ describe("watchMailbox", () => {
     expect(everyMs).toBe(LONG_RUN_MS);
     hex.clock.advance(10 * 60_000);
     tick();
+    // A logger that throws at the 20 min warning: the timer goes on to the next.
+    hex.failing.line = "has been running";
+    hex.clock.advance(10 * 60_000);
+    tick();
     hex.clock.advance(10 * 60_000);
     tick();
     const warning = (minutes: number) =>
@@ -687,7 +729,7 @@ describe("watchMailbox", () => {
       );
     expect(hex.log().filter((line) => line.includes("has been running"))).toEqual([
       warning(10),
-      warning(20),
+      warning(30),
     ]);
     model.release();
     await hex.scanned();

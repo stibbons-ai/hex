@@ -9,8 +9,13 @@ describe("normalizeMessageId", () => {
     ["< abc@example.com >", "abc@example.com"],
     ["<>", ""],
     ["   ", ""],
-  ])("%j → %j", (raw, expected) => {
+    ["<<>>", ""],
+    ["<<a@b>>", "a@b"],
+    ["< <x> >", "x"],
+    ["<<<a@b>>>", "a@b"],
+  ])("%j → %j, a key that normalises to itself", (raw, expected) => {
     expect(normalizeMessageId(raw)).toBe(expected);
+    expect(normalizeMessageId(normalizeMessageId(raw))).toBe(expected);
   });
 });
 

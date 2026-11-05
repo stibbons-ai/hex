@@ -15,8 +15,9 @@ const moveFates = <To extends MailOutcome>(to: To) =>
     /** No copy in the watched folder (an Intake not from the mailbox, or moved already). */
     Schema.Struct({ status: Schema.Literal("not-in-mailbox"), to: Schema.Literal(to) }),
     /**
-     * The move failed (the mailbox unreachable): the mail stays. The watcher's next look moves a
-     * processed Intake's mail; an Intake that failed permanently it runs afresh instead.
+     * The move failed (the mailbox unreachable or the server refusing it): the mail stays. The
+     * watcher's next look moves a processed Intake's mail; an Intake that failed permanently it
+     * runs afresh instead.
      */
     Schema.Struct({
       status: Schema.Literal("not-moved"),
@@ -57,6 +58,10 @@ export const MAX_FAILED_RUNS = 5;
  */
 export const retryDelayMs = (failedRuns: number) => 5 * 60_000 * 2 ** (failedRuns - 1);
 
+/** A move to `to`'s folder that failed for `reason`. */
+export const notMoved = <To extends MailOutcome>(to: To, reason: string) =>
+  ({ status: "not-moved", to, reason }) as MoveFate<To>;
+
 /**
  * Moves every copy of the Intake's mail in the watched folder to the outcome's folder. A move
  * that fails is reported in the fate, never failing: the Intake's outcome stands.
@@ -69,9 +74,7 @@ export const moveMail = <To extends MailOutcome>(messageId: string, to: To) =>
           ? { status: "moved", to, copies }
           : { status: "not-in-mailbox", to }) as MoveFate<To>,
     ),
-    Effect.catchTag("MailboxError", ({ message }) =>
-      Effect.succeed({ status: "not-moved", to, reason: message } as MoveFate<To>),
-    ),
+    Effect.catchTag("MailboxError", ({ message }) => Effect.succeed(notMoved(to, message))),
   );
 
 /**
@@ -103,26 +106,37 @@ export const recordFailedRun = (messageId: string, runId: string) =>
     return { failedRuns: Math.max(count, MAX_FAILED_RUNS), mail } satisfies FailedRun;
   });
 
-/** Where the mail went, as the end of a sentence about the Intake. */
-export function describeMove(mail: MailFate): string {
+/**
+ * Where the mail went, as the end of a sentence about the Intake. `retryPending`: said by the
+ * run, before the watcher (if it started the run) tries a failed move to `hex/failed` once more.
+ */
+export function describeMove(mail: MailFate, { retryPending = false } = {}): string {
   switch (mail.status) {
     case "moved":
       return `its mail was moved to ${outcomeFolder(mail.to)}`;
     case "not-in-mailbox":
       return "no mail of it was in the watched folder";
     case "not-moved":
-      return mail.to === "failed"
-        ? `moving its mail to hex/failed failed (${mail.reason}); the mailbox watcher runs it afresh (a new series of ${MAX_FAILED_RUNS} runs) at its next look`
-        : `moving its mail to ${outcomeFolder(mail.to)} failed (${mail.reason})`;
+      if (mail.to === "processed")
+        return `moving its mail to hex/processed failed (${mail.reason})`;
+      return retryPending
+        ? `moving its mail to hex/failed failed (${mail.reason}); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh (a new series of ${MAX_FAILED_RUNS} runs) at its next look`
+        : `moving its mail to hex/failed failed (${mail.reason}); the mailbox watcher runs it afresh (a new series of ${MAX_FAILED_RUNS} runs) at its next look`;
     case "kept-for-retry":
       return "any mail of it in the watched folder stays there";
   }
 }
 
-/** A failed run's consequence for the Intake, as Daniel reads it after the failure. */
-export function describeFailedRun({ failedRuns, mail }: FailedRun): string {
+/**
+ * A failed run's consequence for the Intake, as Daniel reads it after the failure;
+ * `retryPending` as for {@link describeMove}.
+ */
+export function describeFailedRun(
+  { failedRuns, mail }: FailedRun,
+  options: { retryPending?: boolean } = {},
+): string {
   if (mail.status !== "kept-for-retry") {
-    return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, so the Intake failed permanently: ${describeMove(mail)}`;
+    return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, so the Intake failed permanently: ${describeMove(mail, options)}`;
   }
   return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}: ${describeMove(mail)}; the mailbox watcher runs it again no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
 }

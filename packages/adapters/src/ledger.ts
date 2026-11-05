@@ -228,8 +228,8 @@ const BUSY_TIMEOUT_MS = 5000;
 
 /**
  * The Intake ledger in the LibSQL file at `databasePath` (Mastra's `mastra.db`; its directory is
- * created if missing), on its own connection, closed when the layer is released. The tables are
- * created if missing.
+ * created if missing), on its own client (a pool of connections), closed when the layer is
+ * released. The tables are created if missing.
  */
 export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedger, LedgerError> {
   return Layer.effect(

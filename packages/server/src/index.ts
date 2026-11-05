@@ -86,9 +86,10 @@ export interface RunningServer {
   hostname: string;
   mastra: Mastra;
   /**
-   * Settles once the runs active in storage were restarted (Mastra's boot sweep, run after the
-   * server started; it settles when the restarted runs finished). The mailbox watcher, if any,
-   * starts alongside it. Never rejects: a failed sweep is logged.
+   * Settles once Mastra's boot sweep of the runs active in storage is done (run after the server
+   * started): when the runs it could restart at once finished; a run whose previous process's
+   * lease was still live is restarted later, by Mastra. The mailbox watcher, if any, starts
+   * alongside the sweep. Never rejects: a failed sweep is logged.
    */
   booted: Promise<void>;
   /**
