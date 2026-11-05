@@ -8,6 +8,8 @@ const intake = (overrides: Record<string, unknown> = {}) => ({
   documents: [{ fileName: "a.pdf", documentDate: "2026-11-02" }],
   ...overrides,
 });
+const dated = (documentDate: unknown) =>
+  intake({ documents: [{ fileName: "a.pdf", documentDate }] });
 
 const message = (input: unknown) => {
   const result = decodeExpectedSet(input);
@@ -21,48 +23,22 @@ describe("expected.json schema", () => {
 
   test.each([
     ["a Document date", intake()],
-    [
-      "a Document without a date",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: null }] }),
-    ],
+    ["a Document without a date", dated(null)],
     [
       "a zero-Document Intake with a description",
       intake({ documents: [], description: "no attachments" }),
     ],
-    [
-      "29 February in a leap year",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "2028-02-29" }] }),
-    ],
+    ["29 February in a leap year", dated("2028-02-29")],
   ])("accepts %s", (_, accepted) => {
     expect(message({ intakes: [accepted] })).toBe("ok");
   });
 
   test.each([
-    [
-      "a German date",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "02.11.2026" }] }),
-      "02.11.2026",
-    ],
-    [
-      "an unpadded ISO date",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "2026-11-2" }] }),
-      "2026-11-2",
-    ],
-    [
-      "30 February",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "2026-02-30" }] }),
-      "2026-02-30",
-    ],
-    [
-      "29 February in a common year",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "2026-02-29" }] }),
-      "2026-02-29",
-    ],
-    [
-      "month 13",
-      intake({ documents: [{ fileName: "a.pdf", documentDate: "2026-13-01" }] }),
-      "2026-13-01",
-    ],
+    ["a German date", dated("02.11.2026"), "02.11.2026"],
+    ["an unpadded ISO date", dated("2026-11-2"), "2026-11-2"],
+    ["30 February", dated("2026-02-30"), "2026-02-30"],
+    ["29 February in a common year", dated("2026-02-29"), "2026-02-29"],
+    ["month 13", dated("2026-13-01"), "2026-13-01"],
     ["a missing documentDate", intake({ documents: [{ fileName: "a.pdf" }] }), "documentDate"],
     [
       "a duplicate fileName within an Intake",

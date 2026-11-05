@@ -82,6 +82,8 @@ function pdfText(data: Uint8Array): string {
 
 const isPdf = (part: Part) => part.contentType === "application/pdf";
 const isImage = (part: Part) => part.contentType.startsWith("image/");
+/** No plausible "tiny image" threshold (issue #6) may be what excludes a part. */
+const sizeFloor = 20 * 1024;
 
 const intakes = (await loadExpectedSet(syntheticFolder)).intakes;
 const mails = new Map<string, Mail>();
@@ -163,7 +165,7 @@ describe("committed synthetic fixture set", () => {
         disposition: "attachment",
       });
       expect(isPdf(part) || isImage(part)).toBe(true);
-      expect(part.data.length).toBeGreaterThan(20 * 1024);
+      expect(part.data.length).toBeGreaterThan(sizeFloor);
     }
   });
 
@@ -237,7 +239,7 @@ describe("committed synthetic fixture set", () => {
   test("has non-Documents that are never labelled: inline logo, Outlook signature, tracking pixel, non-PDF/non-image file", () => {
     const referenced = (part: Part, html: string) =>
       part.contentId !== undefined && html.includes(`cid:${part.contentId}`);
-    const big = (part: Part) => part.data.length > 20 * 1024;
+    const big = (part: Part) => part.data.length > sizeFloor;
     expect(
       nonDocuments.some(
         ({ part, html }) =>

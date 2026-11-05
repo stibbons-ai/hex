@@ -88,8 +88,9 @@ function wireFormat(attachment: Attachment): Omit<FilePart, "fileName"> {
   }
 }
 
-const attachmentNode = (attachment: Attachment) =>
-  filePart({ fileName: attachment.fileName, ...wireFormat(attachment) });
+function attachmentNode(attachment: Attachment): MimeNode {
+  return filePart({ fileName: attachment.fileName, ...wireFormat(attachment) });
+}
 
 /**
  * The MIME tree: `cid:` decorations sit with the HTML in multipart/related, every other

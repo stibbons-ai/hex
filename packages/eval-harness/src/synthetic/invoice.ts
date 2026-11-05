@@ -4,7 +4,7 @@
  */
 import { glyphHeight, textWidth } from "./font.ts";
 import { encodePng } from "./png.ts";
-import { pdfString, writePdf } from "./pdf.ts";
+import { showText, writePdf } from "./pdf.ts";
 import { Bitmap } from "./raster.ts";
 
 export type Language = "de" | "en";
@@ -130,7 +130,7 @@ interface Row {
 }
 
 /** PDF font and size, scan glyph scale per row style. */
-const pdfFont: Record<Style, readonly [string, number]> = {
+const pdfFont: Record<Style, readonly ["F1" | "F2", number]> = {
   title: ["F2", 16],
   heading: ["F2", 14],
   bold: ["F2", 10],
@@ -194,9 +194,8 @@ export function invoicePdf(invoice: Invoice): Uint8Array {
   for (const row of rows(invoice)) {
     if (row.left.length > 95) throw new Error(`row too long for the PDF: ${row.left}`);
     const [font, size] = pdfFont[row.style ?? "body"];
-    if (row.left !== "") ops.push(`BT /${font} ${size} Tf 56 ${y} Td ${pdfString(row.left)} Tj ET`);
-    if (row.right !== undefined)
-      ops.push(`BT /${font} ${size} Tf 430 ${y} Td ${pdfString(row.right)} Tj ET`);
+    if (row.left !== "") ops.push(showText(font, size, 56, y, row.left));
+    if (row.right !== undefined) ops.push(showText(font, size, 430, y, row.right));
     y -= size + 6;
   }
   return writePdf({ content: ops.join("\n"), images: { Logo: banner.gray(8) } });

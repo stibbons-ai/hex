@@ -5,7 +5,7 @@
 import type { GrayImage } from "./raster.ts";
 
 export interface PdfPage {
-  /** Content stream operators (ASCII; build strings with {@link pdfString}). */
+  /** Content stream operators (ASCII; text via {@link showText}). */
   content: string;
   /** Image XObjects the content draws with `/<name> Do`. */
   images: Readonly<Record<string, GrayImage>>;
@@ -25,7 +25,7 @@ const winAnsi: Record<string, number> = {
 };
 
 /** A PDF literal string `( … )` in WinAnsiEncoding, non-ASCII bytes as octal escapes. */
-export function pdfString(text: string): string {
+function pdfString(text: string): string {
   let out = "(";
   for (const char of text) {
     if (char === "(" || char === ")" || char === "\\") out += `\\${char}`;
@@ -37,6 +37,17 @@ export function pdfString(text: string): string {
     }
   }
   return `${out})`;
+}
+
+/** Operators that draw `text` at (x, y) in `/F1` (Helvetica) or `/F2` (Helvetica-Bold). */
+export function showText(
+  font: "F1" | "F2",
+  size: number,
+  x: number,
+  y: number,
+  text: string,
+): string {
+  return `BT /${font} ${size} Tf ${x} ${y} Td ${pdfString(text)} Tj ET`;
 }
 
 function ascii(text: string): Uint8Array {
