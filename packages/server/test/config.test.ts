@@ -76,15 +76,18 @@ describe("loadChatConfig", () => {
     expect(await loadChatConfig(path, {})).toBeUndefined();
   });
 
-  test.each(["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"])(
-    "a missing %s fails, naming it",
-    async (name) => {
-      const path = await configFile(valid);
-      await expect(loadChatConfig(path, { ...slackEnv, [name]: undefined })).rejects.toThrow(
-        `hex config ${path}: channel "slack": environment variable ${name} is not set`,
-      );
-    },
-  );
+  test.each([
+    ["SLACK_APP_TOKEN", undefined],
+    ["SLACK_BOT_TOKEN", undefined],
+    // As .env.example ships it.
+    ["SLACK_APP_TOKEN", ""],
+    ["SLACK_BOT_TOKEN", ""],
+  ])("%s=%j fails as not set, naming it", async (name, value) => {
+    const path = await configFile(valid);
+    await expect(loadChatConfig(path, { ...slackEnv, [name]: value })).rejects.toThrow(
+      `hex config ${path}: channel "slack": environment variable ${name} is not set`,
+    );
+  });
 
   test.each([
     ["SLACK_APP_TOKEN", "xoxb-swapped", "xapp-"],

@@ -30,8 +30,9 @@ export function listenAddress(env: Readonly<Record<string, string | undefined>> 
     throw new Error(`HEX_PORT must be an integer from 0 to 65535, got ${JSON.stringify(portText)}`);
   }
   const given = env["HEX_HOST"] || DEFAULT_HOST;
-  // A name could resolve to any interface, or to another machine's address.
-  if (isIP(given) === 0) {
+  // A name could resolve to any interface, or to another machine's address. An IPv6 zone id
+  // (`fe80::1%en0`) is no address a client can put in a Host header.
+  if (isIP(given) === 0 || given.includes("%")) {
     throw new Error(
       `HEX_HOST must be an IP address (127.0.0.1, or 0.0.0.0 inside a container), got ${JSON.stringify(given)}`,
     );

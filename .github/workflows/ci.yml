@@ -45,15 +45,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # compose.yaml as resolved, with a .env that tries to override every pinned setting: the
-      # port stays published on loopback only, the HEX_* paths and telemetry opt-outs stay pinned,
-      # and only the data volume and the Outbox are mounted. Without HEX_OUTBOX_HOST_DIR, compose
-      # refuses to start.
-      - name: Check compose.yaml's published port, pinned settings and mounts
+      # compose.yaml as resolved, with a .env that tries to override every pinned setting: hex is
+      # the only service, on its own network (never the host's), the port stays published on
+      # loopback only, the HEX_* paths and telemetry opt-outs stay pinned, and only the plain data
+      # volume and the existing Outbox folder are mounted. Without HEX_OUTBOX_HOST_DIR, compose
+      # refuses to start. Compose is run without this job's telemetry variables, which would
+      # otherwise outrank .env in its interpolation and hide a pin that came undone.
+      - name: Check compose.yaml's services, published port, pinned settings and mounts
         run: |
           set -euo pipefail
+          compose() { env -u MASTRA_TELEMETRY_DISABLED -u DO_NOT_TRACK docker compose "$@"; }
           touch .env
-          if docker compose config > /dev/null 2> missing.log; then
+          if compose config > /dev/null 2> missing.log; then
             echo "::error::compose.yaml resolved without HEX_OUTBOX_HOST_DIR"
             exit 1
           fi
@@ -61,15 +64,20 @@ jobs:
           outbox="$(mktemp -d)"
           printf '%s\n' "HEX_OUTBOX_HOST_DIR=$outbox" HEX_HOST=1.2.3.4 HEX_PORT=9999 \
             HEX_DATA_DIR=/tmp HEX_OUTBOX_DIR=/tmp MASTRA_TELEMETRY_DISABLED=0 DO_NOT_TRACK=0 > .env
-          docker compose config --format json | jq -e --arg outbox "$outbox" '
-            .services.hex
-            | .ports == [{mode: "ingress", host_ip: "127.0.0.1", target: 4111, published: "4111", protocol: "tcp"}]
-              and (.environment | .HEX_HOST == "0.0.0.0" and .HEX_PORT == "4111"
-                and .HEX_DATA_DIR == "/data" and .HEX_OUTBOX_DIR == "/outbox"
-                and .MASTRA_TELEMETRY_DISABLED == "1" and .DO_NOT_TRACK == "1")
-              and ([.volumes[] | {type, source, target}]
-                == [{type: "volume", source: "hex-data", target: "/data"},
-                    {type: "bind", source: $outbox, target: "/outbox"}])'
+          compose config --format json | jq -e --arg outbox "$outbox" '
+            (.services | keys) == ["hex"]
+            and (.volumes["hex-data"] | (.driver // null) == null and (.driver_opts // null) == null
+              and (.external // false) == false)
+            and (.services.hex
+              | (.network_mode // null) == null
+                and .ports == [{mode: "ingress", host_ip: "127.0.0.1", target: 4111, published: "4111", protocol: "tcp"}]
+                and (.environment | .HEX_HOST == "0.0.0.0" and .HEX_PORT == "4111"
+                  and .HEX_DATA_DIR == "/data" and .HEX_OUTBOX_DIR == "/outbox"
+                  and .MASTRA_TELEMETRY_DISABLED == "1" and .DO_NOT_TRACK == "1")
+                and ([.volumes[] | {type, source, target}]
+                  == [{type: "volume", source: "hex-data", target: "/data"},
+                      {type: "bind", source: $outbox, target: "/outbox"}])
+                and .volumes[1].bind.create_host_path == false)'
           rm .env missing.log
       - name: Build the arm64 image
         run: docker build --tag hex:ci .

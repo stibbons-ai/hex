@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { type BunLock, readBunLock } from "./bun-lock.ts";
 import { externalsManifest } from "./externals-manifest.ts";
-import { SERVER_EXTERNALS } from "./build-server.ts";
+import { SERVER_EXTERNALS, SERVER_NATIVES } from "./build-server.ts";
 
 const entry = (identity: string, metadata: Record<string, unknown> = {}) =>
   [identity, "", metadata, `sha512-${identity}`] as BunLock["packages"][string];
@@ -158,26 +158,42 @@ describe("externalsManifest", () => {
     );
   });
 
-  test("fails when a native package has no binding for the target, instead of failing at startup", () => {
+  test("fails when a named native package has no binding for the target, instead of failing at startup", () => {
     // The fixture has DuckDB bindings for linux-arm64 and darwin-arm64 only.
+    const x64 = { ...linuxArm64Glibc, cpu: "x64" };
     expect(() =>
-      externalsManifest(lock, ["@duckdb/node-api"], { ...linuxArm64Glibc, cpu: "x64" }),
+      externalsManifest(lock, ["@duckdb/node-api"], x64, ["@duckdb/node-bindings"]),
     ).toThrow("@duckdb/node-bindings has no native binding for linux-x64-glibc");
+    // A renamed or dropped native package fails too, instead of going unchecked.
+    expect(() =>
+      externalsManifest(lock, ["libsql"], linuxArm64Glibc, ["@duckdb/node-bindings"]),
+    ).toThrow("Native package @duckdb/node-bindings isn't among the externals");
+  });
+
+  test("leaves out another package's platform-only optional dependency (an fsevents) without failing", () => {
+    const watcher: BunLock = {
+      ...lock,
+      packages: {
+        watcher: entry("watcher@1.0.0", { optionalDependencies: { fsevents: "2.3.3" } }),
+        fsevents: entry("fsevents@2.3.3", { os: "darwin" }),
+      },
+    };
+    expect(
+      Object.keys(externalsManifest(watcher, ["watcher"], linuxArm64Glibc).lock.packages),
+    ).toEqual(["watcher"]);
   });
 
   test("the repository's lock yields one LibSQL and one DuckDB binding for the image's platform", async () => {
     const repository = await readBunLock(fileURLToPath(new URL("../", import.meta.url)));
-    const { packages } = externalsManifest(repository, SERVER_EXTERNALS, linuxArm64Glibc).lock;
+    const { packages } = externalsManifest(
+      repository,
+      SERVER_EXTERNALS,
+      linuxArm64Glibc,
+      SERVER_NATIVES,
+    ).lock;
     expect(Object.keys(packages).filter((key) => /^@(libsql|duckdb)\/.*linux/.test(key))).toEqual([
       "@duckdb/node-bindings-linux-arm64",
       "@libsql/linux-arm64-gnu",
     ]);
-  });
-
-  test("the repository's lock has no DuckDB binding for 32-bit ARM", async () => {
-    const repository = await readBunLock(fileURLToPath(new URL("../", import.meta.url)));
-    expect(() =>
-      externalsManifest(repository, SERVER_EXTERNALS, { os: "linux", cpu: "arm", libc: "glibc" }),
-    ).toThrow("@duckdb/node-bindings has no native binding for linux-arm-glibc");
   });
 });

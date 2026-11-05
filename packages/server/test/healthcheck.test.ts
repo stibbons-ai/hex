@@ -56,6 +56,11 @@ describe("healthcheck.ts", () => {
   test.each([
     ["a 403", () => new Response("Forbidden host", { status: 403 }), "403: Forbidden host"],
     [
+      'a 503 whose body says {"status":"ok"}',
+      () => Response.json({ status: "ok" }, { status: 503 }),
+      '503: {"status":"ok"}',
+    ],
+    [
       "a 200 with another status",
       () => Response.json({ status: "starting" }),
       '200: {"status":"starting"}',

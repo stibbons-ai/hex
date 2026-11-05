@@ -41,11 +41,18 @@ const fitsLibc = (name: string, metadata: LockMetadata | undefined, libc: Target
  * dependencies that fit `target`), so `bun install --frozen-lockfile` installs
  * exactly the locked versions with their integrity hashes. Dependencies resolve
  * as Bun's lock keys nest them (`libsql/detect-libc` before `detect-libc`).
+ *
+ * `natives` names the packages that load a native addon from one of their
+ * optional dependencies, one per platform (`libsql` → `@libsql/linux-arm64-gnu`):
+ * each must be in the subset with at least one of those that fits `target`, or
+ * the install would succeed and the addon fail to load at startup. Other
+ * packages' optional dependencies (an `fsevents`) may all be left out.
  */
 export function externalsManifest(
   lock: BunLock,
   externals: readonly string[],
   target: Target,
+  natives: readonly string[] = [],
 ): ExternalsManifest {
   assertLockVersion(lock);
   /** The registry entry at `key`: its platform and dependencies are read from its metadata. */
@@ -90,33 +97,26 @@ export function externalsManifest(
     packages[key] = lock.packages[key]!;
     const required = Object.keys(metadata?.dependencies ?? {});
     const optional = Object.keys(metadata?.optionalDependencies ?? {});
-    // Optional dependencies limited to some platforms are a native package's per-platform
-    // bindings (`@libsql/linux-arm64-gnu`, `@duckdb/node-bindings-linux-arm64`): at least one
-    // has to fit, or the install would succeed and the addon fail to load at startup.
-    let platformBindings = 0;
-    let fittingBindings = 0;
     for (const name of [...required, ...optional]) {
       const resolved = resolve(key, name);
       if (resolved === undefined) {
         // Bun locks optional dependencies for every platform, so a missing one is a lock fault too.
         throw new Error(`${key} depends on ${name}, which is not in bun.lock`);
       }
-      const fitsTarget = fits(resolved);
-      if (fitsTarget) queue.push(resolved);
-      if (required.includes(name)) {
-        if (!fitsTarget) {
-          throw new Error(`${key} needs ${name}, which doesn't support ${describe(target)}`);
-        }
-        continue;
-      }
-      const { metadata: binding } = registryEntry(resolved);
-      if (binding?.os !== undefined || binding?.cpu !== undefined) {
-        platformBindings++;
-        if (fitsTarget) fittingBindings++;
+      if (fits(resolved)) queue.push(resolved);
+      else if (required.includes(name)) {
+        throw new Error(`${key} needs ${name}, which doesn't support ${describe(target)}`);
       }
     }
-    if (platformBindings > 0 && fittingBindings === 0) {
-      throw new Error(`${key} has no native binding for ${describe(target)}`);
+  }
+  for (const native of natives) {
+    const keys = Object.keys(packages).filter((key) => keyPath(key).at(-1) === native);
+    if (keys.length === 0) throw new Error(`Native package ${native} isn't among the externals`);
+    for (const key of keys) {
+      const bindings = Object.keys(registryEntry(key).metadata?.optionalDependencies ?? {});
+      if (!bindings.some((name) => resolve(key, name)! in packages)) {
+        throw new Error(`${key} has no native binding for ${describe(target)}`);
+      }
     }
   }
   const name = "hex-server-externals";

@@ -40,19 +40,16 @@ function requireEnv(
 }
 
 /**
- * A Slack token from `env`, read once as Effect `Config.Redacted` (it prints as `<redacted>`) and
- * checked on the redacted value; unwrapped only where the adapter takes it. Throws naming the
- * variable and the prefix it must have, never the value.
+ * A Slack token from `env`, read once as Effect `Config.Redacted` (it prints as `<redacted>`),
+ * checked like {@link requireEnv} on that read, and unwrapped only where the adapter takes it.
  */
 function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted<string> {
   const read = readEnvConfig(Config.Redacted(name), env);
-  if (Result.isFailure(read) || Redacted.value(read.success) === "") {
-    throw new Error(`environment variable ${name} is not set`);
-  }
-  if (!Redacted.value(read.success).startsWith(prefix)) {
-    throw new Error(`environment variable ${name} must start with "${prefix}"`);
-  }
-  return read.success;
+  const value = Result.isSuccess(read) ? Redacted.value(read.success) : undefined;
+  requireEnv({ [name]: value }, name, `start with "${prefix}"`, (token) =>
+    token.startsWith(prefix),
+  );
+  return Redacted.make(value!);
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.

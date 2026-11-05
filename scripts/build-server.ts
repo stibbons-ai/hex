@@ -14,6 +14,13 @@ import { externalsManifest, type Target } from "./externals-manifest.ts";
  */
 export const SERVER_EXTERNALS = ["libsql", "@duckdb/node-api"];
 
+/**
+ * The externals' packages that load their native addon from a per-platform optional dependency
+ * (`@libsql/linux-arm64-gnu`, `@duckdb/node-bindings-linux-arm64`): the build fails when the
+ * target has none, instead of shipping an image that fails at startup.
+ */
+export const SERVER_NATIVES = ["libsql", "@duckdb/node-bindings"];
+
 /** The bundle's entry points in packages/server/src; each becomes `<name>.js` in the output. */
 const ENTRYPOINTS = ["main.ts", "smoke.ts", "healthcheck.ts"];
 
@@ -52,7 +59,12 @@ async function buildServer(out: string, target: Target) {
   });
   if (!build.success) throw new AggregateError(build.logs, "Bundling the server failed");
 
-  const manifest = externalsManifest(await readBunLock(root), SERVER_EXTERNALS, target);
+  const manifest = externalsManifest(
+    await readBunLock(root),
+    SERVER_EXTERNALS,
+    target,
+    SERVER_NATIVES,
+  );
   await Bun.write(join(out, "package.json"), `${JSON.stringify(manifest.packageJson, null, 2)}\n`);
   await Bun.write(join(out, "bun.lock"), `${JSON.stringify(manifest.lock, null, 2)}\n`);
   // Exactly the locked versions and integrity hashes; no lifecycle scripts.

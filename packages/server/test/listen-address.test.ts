@@ -30,7 +30,7 @@ describe("listenAddress", () => {
     expect(listenAddress({ HEX_HOST: host }).hostname).toBe(normal);
   });
 
-  test.each(["localhost", "example.com", "0.0.0.0:4111", "[::1]", " 127.0.0.1"])(
+  test.each(["localhost", "example.com", "0.0.0.0:4111", "[::1]", " 127.0.0.1", "fe80::1%en0"])(
     "rejects HEX_HOST=%j: an IP address only, never a name",
     (host) => {
       expect(() => listenAddress({ HEX_HOST: host })).toThrow(
