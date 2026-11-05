@@ -2,8 +2,7 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Result } from "effect";
-import { decodeExpectedSet, type ExpectedIntake, type ExpectedSet } from "../expected.ts";
+import { loadExpectedSet, type ExpectedIntake, type ExpectedSet } from "../expected.ts";
 import { intakes, recipient, type Attachment, type SyntheticIntake } from "./intakes.ts";
 import { documentDate, invoicePdf, scanPdf, scanPng } from "./invoice.ts";
 import {
@@ -166,16 +165,8 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
  */
 async function isGenerated(folder: string, name: string): Promise<boolean> {
   if (name !== "expected.json") return generatedName.test(name);
-  let json: unknown;
-  try {
-    json = await Bun.file(join(folder, name)).json();
-  } catch {
-    return false;
-  }
-  const result = decodeExpectedSet(json);
-  return (
-    Result.isSuccess(result) && result.success.intakes.every(({ file }) => generatedName.test(file))
-  );
+  const set = await loadExpectedSet(folder).catch(() => undefined);
+  return set !== undefined && set.intakes.every(({ file }) => generatedName.test(file));
 }
 
 /**
