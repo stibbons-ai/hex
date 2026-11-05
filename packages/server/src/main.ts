@@ -1,24 +1,21 @@
 import { resolve } from "node:path";
-import { dateExtractorLayer, smtpMailerLayer } from "@hex/adapters";
+import { dateExtractorLayer, isLoopbackHost, smtpMailerLayer } from "@hex/adapters";
 import { closeInOrder } from "./close";
 import { loadChatConfig } from "./channels";
 import { loadForwardingConfig, loadIntakeConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
+import { listenAddress } from "./listen-address";
 import { dataPaths } from "./paths";
 
-const DEFAULT_PORT = 4111;
-
-function parsePort(value: string | undefined): number {
-  if (!value) return DEFAULT_PORT;
-  const port = /^\d+$/.test(value) ? Number(value) : Number.NaN;
-  if (!(port >= 0 && port <= 65535)) {
-    throw new Error(`HEX_PORT must be an integer from 0 to 65535, got ${JSON.stringify(value)}`);
-  }
-  return port;
+// First: a bad HEX_HOST or HEX_PORT fails before any file is read or opened.
+const { hostname, port } = listenAddress();
+if (!isLoopbackHost(hostname)) {
+  console.warn(
+    `hex: listening on ${hostname}, beyond loopback: the server has no authentication, so anyone who can reach this address can use it; in a container, publish the port on 127.0.0.1 only (ADR 0005)`,
+  );
 }
-
 // HEX_CONFIG names the config file (chat and Intake settings); unset or empty runs without chat.
 const configPath = process.env.HEX_CONFIG ? resolve(process.env.HEX_CONFIG) : undefined;
 const chat = configPath ? await loadChatConfig(configPath, process.env) : undefined;
@@ -32,7 +29,6 @@ if (!chat) {
 const { category, model } = await loadIntakeConfig(configPath);
 // Off without targets; with one enabled, missing SMTP settings fail startup, naming the variable.
 const forwarding = await loadForwardingConfig(configPath, process.env);
-const port = parsePort(process.env.HEX_PORT);
 const paths = dataPaths(process.env);
 // Built now, so a ledger that can't be opened fails startup instead of every later Intake run
 // (the runtime keeps a failed build); disposed after the server stopped.
@@ -58,6 +54,7 @@ await intakeRuntime.context().catch(disposeAfterFailure);
 const starting = startServer({
   databasePath: paths.databasePath,
   observabilityPath: paths.observabilityPath,
+  hostname,
   port,
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category, forwarding }),

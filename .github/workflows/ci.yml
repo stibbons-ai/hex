@@ -30,3 +30,73 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Format, lint, typecheck, catalog and licence policy, tests
         run: bun run check
+
+  # The arm64 image as `docker compose build` makes it on Daniel's Mac (ADR 0005): bundle, pruned
+  # externals and Mastra's capability metadata, built on GitHub's arm64 runner (no emulation),
+  # smoked, booted and health-checked, and compose.yaml's security settings checked. Never pushed
+  # anywhere.
+  image:
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 20
+    env:
+      MASTRA_TELEMETRY_DISABLED: "1"
+      DO_NOT_TRACK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # compose.yaml as resolved, with a .env that tries to override every pinned setting: hex is
+      # the only service, on its own network (never the host's), the port stays published on
+      # loopback only, the HEX_* paths and telemetry opt-outs stay pinned, and only the plain data
+      # volume and the existing Outbox folder are mounted. Without HEX_OUTBOX_HOST_DIR, compose
+      # refuses to start. Compose is run without this job's telemetry variables, which would
+      # otherwise outrank .env in its interpolation and hide a pin that came undone.
+      - name: Check compose.yaml's services, published port, pinned settings and mounts
+        run: |
+          set -euo pipefail
+          compose() { env -u MASTRA_TELEMETRY_DISABLED -u DO_NOT_TRACK docker compose "$@"; }
+          touch .env
+          if compose config > /dev/null 2> missing.log; then
+            echo "::error::compose.yaml resolved without HEX_OUTBOX_HOST_DIR"
+            exit 1
+          fi
+          grep 'required variable HEX_OUTBOX_HOST_DIR is missing a value' missing.log
+          outbox="$(mktemp -d)"
+          printf '%s\n' "HEX_OUTBOX_HOST_DIR=$outbox" HEX_HOST=1.2.3.4 HEX_PORT=9999 \
+            HEX_DATA_DIR=/tmp HEX_OUTBOX_DIR=/tmp MASTRA_TELEMETRY_DISABLED=0 DO_NOT_TRACK=0 > .env
+          compose --profile '*' config --format json | jq -e --arg outbox "$outbox" '
+            (.services | keys) == ["hex"]
+            and (.volumes["hex-data"] | (.driver // null) == null and (.driver_opts // null) == null
+              and (.external // false) == false)
+            and (.services.hex
+              | (.network_mode // null) == null
+                and .ports == [{mode: "ingress", host_ip: "127.0.0.1", target: 4111, published: "4111", protocol: "tcp"}]
+                and (.environment | .HEX_HOST == "0.0.0.0" and .HEX_PORT == "4111"
+                  and .HEX_DATA_DIR == "/data" and .HEX_OUTBOX_DIR == "/outbox"
+                  and .MASTRA_TELEMETRY_DISABLED == "1" and .DO_NOT_TRACK == "1")
+                and ([.volumes[] | {type, source, target}]
+                  == [{type: "volume", source: "hex-data", target: "/data"},
+                      {type: "bind", source: $outbox, target: "/outbox"}])
+                and .volumes[1].bind.create_host_path == false)'
+          rm .env missing.log
+      - name: Build the arm64 image
+        run: docker build --tag hex:ci .
+      - name: Smoke test the image (Mastra capabilities resolve, LibSQL and DuckDB open)
+        run: docker run --rm --entrypoint /usr/local/bin/bun hex:ci /app/smoke.js
+      - name: Boot the image; its health check and /health answer
+        run: |
+          docker run -d --name hex -p 127.0.0.1:4111:4111 -v hex-data:/data hex:ci
+          status=
+          for _ in $(seq 60); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' hex)"
+            if [ "$status" = healthy ]; then break; fi
+            sleep 1
+          done
+          if [ "$status" != healthy ]; then
+            echo "::error::Container health is ${status}, not healthy"
+            exit 1
+          fi
+          test "$(curl -fsS http://127.0.0.1:4111/health)" = '{"status":"ok"}'
+      - name: Server logs
+        if: always()
+        run: docker logs hex || true

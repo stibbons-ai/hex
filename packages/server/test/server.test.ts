@@ -170,6 +170,14 @@ describe("hex server", () => {
   );
 });
 
+test("refuses a hostname that isn't an IP address before opening any file", async () => {
+  const files = dataFiles("named-host");
+  await expect(startServer({ ...files, port: 0, hostname: "localhost" })).rejects.toThrow(
+    'hex: the server listens on an IP address only, got "localhost"',
+  );
+  expect(await Bun.file(files.databasePath).exists()).toBe(false);
+});
+
 test("persists workflow runs through Mastra into the LibSQL file", async () => {
   const databasePath = join(directory, "persist", "mastra.db");
   const other = oneStep("other", async (input) => input);

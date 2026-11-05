@@ -135,6 +135,17 @@ const SmtpEnv = Config.all({
 });
 
 /**
+ * `config` read from `env` through Effect `Config`: the value, or the `ConfigError` saying which
+ * variable is unusable (never its value).
+ */
+export function readEnvConfig<A>(
+  config: Config.Config<A>,
+  env: Env,
+): Result.Result<A, Config.ConfigError> {
+  return Effect.runSync(Effect.result(config.parse(ConfigProvider.fromEnvRecord({ ...env }))));
+}
+
+/**
  * The SMTP settings from `env`: `HEX_SMTP_HOST`, `HEX_SMTP_PORT` (465 when unset),
  * `HEX_SMTP_SECURITY` (`tls` on port 465, else `starttls`, when unset; `plain` only for a
  * loopback IP address, see `isLoopbackHost`), `HEX_SMTP_USER` and `HEX_SMTP_PASSWORD`, both
@@ -145,9 +156,7 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
   for (const name of REQUIRED_SMTP_VARIABLES) {
     if (!env[name]) fail(`environment variable ${name} is not set`);
   }
-  const result = Effect.runSync(
-    Effect.result(SmtpEnv.parse(ConfigProvider.fromEnvRecord({ ...env }))),
-  );
+  const result = readEnvConfig(SmtpEnv, env);
   if (Result.isFailure(result)) {
     // E.g. `Expected a value between 1 and 65535 at ["HEX_SMTP_PORT"]`: the variable, never a value.
     return fail(

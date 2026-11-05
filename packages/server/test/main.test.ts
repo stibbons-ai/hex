@@ -113,6 +113,41 @@ describe("bun packages/server/src/main.ts", () => {
     },
   );
 
+  test("rejects a HEX_HOST that isn't an IP address before opening any file", async () => {
+    const dataDirectory = join(directory, "rejected-host");
+    const child = spawnMain({ HEX_HOST: "localhost", HEX_PORT: "0", HEX_DATA_DIR: dataDirectory });
+    try {
+      expect(await child.exited).toBe(1);
+    } finally {
+      child.kill();
+    }
+    expect(await new Response(child.stderr).text()).toContain(
+      'HEX_HOST must be an IP address (127.0.0.1, or 0.0.0.0 inside a container), got "localhost"',
+    );
+    expect(await Bun.file(join(dataDirectory, "mastra.db")).exists()).toBe(false);
+  });
+
+  test("HEX_HOST=0.0.0.0 warns that there is no authentication and serves loopback Host headers only", async () => {
+    const child = spawnMain({
+      HEX_HOST: "0.0.0.0",
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "wildcard"),
+    });
+    try {
+      const { url } = await listeningUrl(child.stdout);
+      const loopback = `http://127.0.0.1:${url.port}/health`;
+      expect(await (await fetch(loopback)).json()).toEqual({ status: "ok" });
+      const rebound = await fetch(loopback, { headers: { host: `evil.example:${url.port}` } });
+      expect(rebound.status).toBe(403);
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await child.exited).toBe(0);
+    expect(await new Response(child.stderr).text()).toContain(
+      "hex: listening on 0.0.0.0, beyond loopback: the server has no authentication",
+    );
+  });
+
   test("a config that can't be used fails startup with the file and the problem", async () => {
     const config = join(directory, "hex.json");
     await Bun.write(

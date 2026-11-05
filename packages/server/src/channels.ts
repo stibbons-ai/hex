@@ -2,9 +2,16 @@
 // that reading the config file (Mastra Studio does) never loads an adapter package.
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
-import { Schema } from "effect";
+import { Config, Redacted, Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
-import { type Env, chatModel, configError, decodeOrThrow, readConfigFile } from "./config";
+import {
+  type Env,
+  chatModel,
+  configError,
+  decodeOrThrow,
+  readConfigFile,
+  readEnvConfig,
+} from "./config";
 
 /**
  * Builds one platform's channel from its config `options`; secrets come from `env` only. An
@@ -32,8 +39,18 @@ function requireEnv(
   return value;
 }
 
-function requireToken(env: Env, name: string, prefix: string): string {
-  return requireEnv(env, name, `start with "${prefix}"`, (value) => value.startsWith(prefix));
+/**
+ * A Slack token from `env`, read once as Effect `Config.Redacted` (it prints as `<redacted>`),
+ * checked like {@link requireEnv} on that read, and unwrapped only where the adapter takes it.
+ */
+function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted<string> {
+  const read = readEnvConfig(Config.Redacted(name), env);
+  const value = Result.isSuccess(read) ? Redacted.value(read.success) : undefined;
+  return Redacted.make(
+    requireEnv({ [name]: value }, name, `start with "${prefix}"`, (token) =>
+      token.startsWith(prefix),
+    ),
+  );
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
@@ -87,8 +104,8 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
     const apiUrl = env["SLACK_API_URL"];
     const adapter = createSlackAdapter({
       mode,
-      appToken: requireToken(env, "SLACK_APP_TOKEN", "xapp-"),
-      botToken: requireToken(env, "SLACK_BOT_TOKEN", "xoxb-"),
+      appToken: Redacted.value(requireToken(env, "SLACK_APP_TOKEN", "xapp-")),
+      botToken: Redacted.value(requireToken(env, "SLACK_BOT_TOKEN", "xoxb-")),
       // Optional: another Slack Web API base URL (tests point it at a fake Slack).
       ...(apiUrl ? { apiUrl } : {}),
     });

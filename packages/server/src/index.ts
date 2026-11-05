@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { IMastraLogger } from "@mastra/core/logger";
 import type { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
@@ -9,17 +10,12 @@ import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
 import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
+import { DEFAULT_HOST } from "./listen-address";
 import { router } from "./router";
 
 export { contract } from "./contract";
 export type { ChatOptions } from "./chat";
 export { loadIntakeConfig } from "./config";
-
-/**
- * Loopback only: other machines can't connect. Local browsers still can, so requests are also
- * held to a loopback Host header (DNS rebinding).
- */
-const HOSTNAME = "127.0.0.1";
 
 export interface ServerOptions {
   /** LibSQL database file; its directory is created if missing. */
@@ -29,6 +25,13 @@ export interface ServerOptions {
    * a time can open it.
    */
   observabilityPath: string;
+  /**
+   * IP address to listen on, never a name; default 127.0.0.1, so other machines can't connect.
+   * Local browsers still can, so requests are also held to a loopback Host header or the bound
+   * address itself (DNS rebinding, see `allowedHosts`). The container image listens on 0.0.0.0
+   * inside its own network namespace and is published on the host's loopback only (ADR 0005).
+   */
+  hostname?: string;
   /** TCP port; 0 picks a free one. */
   port: number;
   /**
@@ -99,6 +102,7 @@ export interface RunningServer {
 export async function startServer({
   databasePath,
   observabilityPath,
+  hostname = DEFAULT_HOST,
   port,
   logger,
   workflows,
@@ -106,6 +110,13 @@ export async function startServer({
   chat,
   chatStartTimeoutMs = DEFAULT_CHAT_START_TIMEOUT_MS,
 }: ServerOptions): Promise<RunningServer> {
+  // Before anything opens: a DNS name in the Host allow-list would let a page whose name resolves
+  // here pass the DNS rebinding check.
+  if (isIP(hostname) === 0) {
+    throw new Error(
+      `hex: the server listens on an IP address only, got ${JSON.stringify(hostname)}`,
+    );
+  }
   const storage = await createHexStore({ databasePath, observabilityPath });
   // Slack: closes the socket (and stops its reconnect loop). Every adapter is disconnected even
   // if another fails. Safe to run more than once.
@@ -204,7 +215,7 @@ export async function startServer({
     // The bound port is known only after Bun.serve, so the check reads the set per request.
     let hosts = new Set<string>();
     const server = Bun.serve({
-      hostname: HOSTNAME,
+      hostname,
       port,
       async fetch(request) {
         if (!hosts.has(request.headers.get("host") ?? "")) {
@@ -228,7 +239,7 @@ export async function startServer({
         return new Response("Internal server error", { status: 500 });
       },
     });
-    hosts = allowedHosts(server.port ?? port);
+    hosts = allowedHosts(server.port ?? port, hostname);
     return {
       url: server.url,
       hostname: server.hostname ?? "",

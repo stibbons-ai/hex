@@ -8,3 +8,4 @@ Superseded in part: mounting Mastra's routes via `@mastra/hono` is replaced by o
 
 - Mastra versions are pinned exactly; a Mastra upgrade re-checks the bundle's model-capability metadata, the schema helper, and hex's sendability sniff in `packages/domain/src/document.ts` (mirrors Mastra's `isValidInlineContent`; the contract tests in `packages/adapters/test/date-extractor.test.ts` catch a tightened check).
 - Not covered by iconograph and still to prove in hex: Mastra Channels (Slack socket mode) under the Bun entrypoint.
+- The bundle's details (the externals `libsql` and `@duckdb/node-api`, the pruned install, the copied capability metadata) and the container image are recorded in [ADR 0005](0005-container-binds-all-interfaces-publish-on-loopback.md).
