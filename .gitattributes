@@ -1,0 +1,4 @@
+# The synthetic fixtures are compared byte for byte (issue #11): no end-of-line conversion of the
+# .eml files (CRLF by design), and expected.json stays LF on every platform.
+packages/eval-harness/fixtures/synthetic/*.eml -text
+packages/eval-harness/fixtures/synthetic/expected.json text eol=lf
