@@ -133,6 +133,11 @@ describe("DateExtractor (live layer on a mock model)", () => {
       });
     });
 
+    test("none when the provider reported input tokens but no output count", async () => {
+      const { model } = usageModel({ inputTokens: 1200 }, reply);
+      expect(success(await extract(model, pdfDocument)).usage).toBeUndefined();
+    });
+
     test("none when the provider reported no counts; the answer still counts", async () => {
       const { model } = usageModel(undefined, reply);
       expect(success(await extract(model, pdfDocument))).toEqual({

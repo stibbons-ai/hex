@@ -139,10 +139,12 @@ export const ModelReport = Schema.Struct({
   cost: Cost,
   /** {@link cost} per answered call: what a Document costs; unpriced when `cost` is. */
   costPerDocument: Cost,
-  /** Over every call made (answered or failed); `null` when none was made. */
+  /** Over every call made (answered or failed): their count, median and maximum milliseconds. */
   latency: Schema.Struct({
     calls: Schema.Int,
+    /** `null` when no call was made. */
     medianMs: Schema.NullOr(Schema.Number),
+    /** `null` when no call was made. */
     maxMs: Schema.NullOr(LatencyMs),
   }),
   intakes: Schema.Array(IntakeRow),
@@ -231,9 +233,9 @@ function totalCost(
 ): ModelReport["cost"] {
   if (pricing.status === "unpriced") return { status: "unpriced", reason: pricing.reason };
   if (answered.length === 0) return { status: "unpriced", reason: "no answered call" };
-  const unreported = answered.filter(({ tokens }) => tokens === null).length;
-  if (unreported > 0) {
-    return { status: "unpriced", reason: `${unreported} answered call(s) reported no token usage` };
+  const unpriced = answered.filter(({ costUsd }) => costUsd === null).length;
+  if (unpriced > 0) {
+    return { status: "unpriced", reason: `${unpriced} answered call(s) reported no token usage` };
   }
   return { status: "priced", usd: answered.reduce((sum, { costUsd }) => sum + costUsd!, 0) };
 }
@@ -301,6 +303,12 @@ function predictedCell(row: DocumentRow): string {
 const costCell = (cost: ModelReport["cost"]) =>
   cost.status === "priced" ? formatUsd(cost.usd) : "unpriced";
 
+/** A model's total cost, saying when failed calls (which report no tokens) aren't in it. */
+const totalCostCell = ({ cost, extraction: { failed } }: ModelReport) =>
+  cost.status === "priced" && failed > 0
+    ? `${formatUsd(cost.usd)} (${failed} failed call${failed === 1 ? "" : "s"} not counted)`
+    : costCell(cost);
+
 const msCell = (ms: number | null) => (ms === null ? "n/a" : formatMs(ms));
 
 /** `1200 in (1024 cached), 80 out (64 reasoning)`. */
@@ -351,7 +359,7 @@ export function renderMarkdown(report: Report): string {
         formatRatio(model.extraction.exact),
         formatRatio(model.extraction.month),
         String(model.extraction.failed),
-        costCell(model.cost),
+        totalCostCell(model),
         costCell(model.costPerDocument),
         msCell(model.latency.medianMs),
         msCell(model.latency.maxMs),
@@ -404,7 +412,7 @@ export function renderMarkdown(report: Report): string {
       `| Not sent | ${extraction.notSent} |`,
       `| Failed | ${extraction.failed} |`,
       `| Tokens | ${tokensCell(model.tokens)} |`,
-      `| Total cost | ${model.cost.status === "priced" ? formatUsd(model.cost.usd) : `unpriced (${cell(model.cost.reason)})`} |`,
+      `| Total cost | ${model.cost.status === "priced" ? totalCostCell(model) : `unpriced (${cell(model.cost.reason)})`} |`,
       `| Cost per Document | ${costCell(model.costPerDocument)} |`,
       `| Price entry (LiteLLM) | ${model.priceEntry ?? "none"} |`,
       `| Latency median / max | ${msCell(model.latency.medianMs)} / ${msCell(model.latency.maxMs)} (${model.latency.calls} calls) |`,

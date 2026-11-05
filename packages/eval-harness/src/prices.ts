@@ -1,7 +1,8 @@
 /**
  * LiteLLM's model price data (`model_prices_and_context_window.json`): per-token prices and the
- * PDF-input flag of each model, fetched once per eval run. Untrusted input: an entry that doesn't
- * decode is left out, never the whole table.
+ * PDF-input flag of each model, fetched once per eval run. Untrusted input: each field the eval
+ * reads is decoded on its own, so a malformed field never costs the rest of its entry, and an
+ * entry that is no object never costs the rest of the file.
  */
 import type { TokenUsage } from "@hex/adapters";
 import { messageOf } from "@hex/adapters";
@@ -14,22 +15,46 @@ export const LITELLM_PRICES_URL =
 /** How long the fetch may take before the run goes on without prices. */
 const FETCH_TIMEOUT_MS = 30_000;
 
-/** USD per token; `null` (as some entries have) counts as absent. */
-const Price = Schema.optionalKey(
-  Schema.NullOr(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0))),
-);
+/** The fields of a LiteLLM entry the eval reads, each with its schema; the rest are ignored. */
+const FIELDS = {
+  litellm_provider: Schema.String,
+  input_cost_per_token: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+  output_cost_per_token: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+  cache_read_input_token_cost: Schema.Number.check(
+    Schema.isFinite(),
+    Schema.isGreaterThanOrEqualTo(0),
+  ),
+  supports_pdf_input: Schema.Boolean,
+} as const;
+type Field = keyof typeof FIELDS;
 
-/** The fields of a LiteLLM entry the eval uses; every other field is ignored. */
-const PriceEntry = Schema.Struct({
-  litellm_provider: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  input_cost_per_token: Price,
-  output_cost_per_token: Price,
-  cache_read_input_token_cost: Price,
-  supports_pdf_input: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-});
-type PriceEntry = typeof PriceEntry.Type;
+/**
+ * One LiteLLM entry as far as the eval reads it: each field's value when it decodes; absent when
+ * missing or `null` (as some entries have it), or when it doesn't decode, which `malformed` then
+ * names.
+ */
+type PriceEntry = { readonly [F in Field]?: (typeof FIELDS)[F]["Type"] } & {
+  readonly malformed: readonly Field[];
+};
 
-const decodeEntry = Schema.decodeUnknownOption(PriceEntry);
+const decoders = Object.fromEntries(
+  Object.entries(FIELDS).map(([field, schema]) => [field, Schema.decodeUnknownOption(schema)]),
+) as Record<Field, (input: unknown) => Option.Option<unknown>>;
+
+/** `value` as a {@link PriceEntry}; undefined when it is no JSON object. */
+function decodeEntry(value: unknown): PriceEntry | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const entry: Record<string, unknown> = {};
+  const malformed: Field[] = [];
+  for (const field of Object.keys(FIELDS) as Field[]) {
+    if (raw[field] === undefined || raw[field] === null) continue;
+    const decoded = decoders[field](raw[field]);
+    if (Option.isSome(decoded)) entry[field] = decoded.value;
+    else malformed.push(field);
+  }
+  return { ...entry, malformed } as PriceEntry;
+}
 
 /** The fetched price data, by where it came from: its entries by LiteLLM key, or why there is none. */
 export type PriceData = { readonly url: string } & (
@@ -38,8 +63,8 @@ export type PriceData = { readonly url: string } & (
 );
 
 /**
- * The price data in `json` (LiteLLM's file from `url`, parsed): every entry that decodes as far
- * as the eval reads it. Unavailable when `json` is no object of entries.
+ * The price data in `json` (LiteLLM's file from `url`, parsed): every entry that is an object,
+ * decoded field by field. Unavailable when `json` is no object of entries.
  */
 export function decodePriceData(url: string, json: unknown): PriceData {
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
@@ -48,7 +73,7 @@ export function decodePriceData(url: string, json: unknown): PriceData {
   const entries = new Map<string, PriceEntry>();
   for (const [key, value] of Object.entries(json)) {
     const entry = decodeEntry(value);
-    if (Option.isSome(entry)) entries.set(key, entry.value);
+    if (entry !== undefined) entries.set(key, entry);
   }
   return { url, status: "available", entries };
 }
@@ -99,7 +124,8 @@ const litellmProvider = (provider: string) => (provider === "google" ? "gemini" 
  * `<litellm provider>/<model>` and `<model>` whose `litellm_provider` is the model's LiteLLM
  * provider ({@link litellmProvider}), so `openai/gpt-5-mini` is `gpt-5-mini`,
  * `anthropic/claude-haiku-4-5` is `claude-haiku-4-5` and `google/gemini-2.5-flash` is
- * `gemini/gemini-2.5-flash`. Priced when that entry has an input and an output price.
+ * `gemini/gemini-2.5-flash`. Priced when that entry has an input and an output price, not both
+ * zero, and none of its three prices is malformed; its `supports_pdf_input` counts either way.
  */
 export function modelPrices(prices: PriceData, model: string): ModelPrices {
   const unpriced = (reason: string): ModelPrices => ({
@@ -119,15 +145,30 @@ export function modelPrices(prices: PriceData, model: string): ModelPrices {
     return unpriced(`no LiteLLM entry (${keys.join(" or ")} with litellm_provider ${provider})`);
   }
   const entry = prices.entries.get(key)!;
-  const pdfInput = entry.supports_pdf_input ?? null;
-  const input = entry.input_cost_per_token ?? undefined;
-  const output = entry.output_cost_per_token ?? undefined;
+  const found = (pricing: ModelPrices["pricing"]): ModelPrices => ({
+    entry: key,
+    pdfInput: entry.supports_pdf_input ?? null,
+    pricing,
+  });
+  const malformedPrices = entry.malformed.filter((field) => field !== "supports_pdf_input");
+  if (malformedPrices.length > 0) {
+    const reason = `LiteLLM entry ${key} has a malformed ${malformedPrices.join(" and ")}`;
+    return found({ status: "unpriced", reason });
+  }
+  const { input_cost_per_token: input, output_cost_per_token: output } = entry;
   if (input === undefined || output === undefined) {
-    const reason = `LiteLLM entry ${key} has no input and output price`;
-    return { entry: key, pdfInput, pricing: { status: "unpriced", reason } };
+    const missing = [
+      ...(input === undefined ? ["input_cost_per_token"] : []),
+      ...(output === undefined ? ["output_cost_per_token"] : []),
+    ];
+    const reason = `LiteLLM entry ${key} has no ${missing.join(" and no ")}`;
+    return found({ status: "unpriced", reason });
+  }
+  if (input === 0 && output === 0) {
+    return found({ status: "unpriced", reason: `zero prices in LiteLLM entry ${key}` });
   }
   const rates = { input, output, cachedInput: entry.cache_read_input_token_cost ?? null };
-  return { entry: key, pdfInput, pricing: { status: "priced", rates } };
+  return found({ status: "priced", rates });
 }
 
 /**

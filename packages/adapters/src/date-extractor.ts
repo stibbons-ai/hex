@@ -109,8 +109,9 @@ const USAGE_FIELDS = [
 
 /**
  * The call's usage: the sum over its steps. Not Mastra's `totalUsage`: after a retried
- * transient error (an attempt that reported nothing) Mastra 1.80.0 loses the counts there,
- * while the step that answered keeps them. A field no step reported stays absent.
+ * transient error (an attempt that reported nothing) `totalUsage` loses the counts (as of
+ * `@mastra/core` 1.80.0), while the step that answered keeps them. A field no step reported
+ * stays absent; without both an input and an output count the call has no usage.
  */
 function tokenUsageOf(steps: readonly { readonly usage?: StepUsage | undefined }[]) {
   const sum: Partial<Record<(typeof USAGE_FIELDS)[number], number>> = {};

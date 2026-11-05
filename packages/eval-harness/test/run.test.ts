@@ -12,6 +12,8 @@ import type { TokenUsage } from "@hex/adapters";
 import { Effect, Layer, Schema } from "effect";
 import { Report, decodePriceData, loadExpectedSet, runEval } from "../src/index.ts";
 import type { EvalOptions, ExpectedSet } from "../src/index.ts";
+import { modelReport } from "../src/report.ts";
+import type { IntakeRow } from "../src/report.ts";
 import { syntheticFolder } from "../src/synthetic/generate.ts";
 
 let directory: string;
@@ -105,12 +107,13 @@ const priceTable = {
     output_cost_per_token: 9,
     supports_pdf_input: false,
   },
+  // Excluded although a price is malformed: each field counts on its own.
   "gpt-text-only": {
     litellm_provider: "openai",
     input_cost_per_token: 1e-7,
+    output_cost_per_token: "cheap",
     supports_pdf_input: false,
   },
-  "gpt-broken": { litellm_provider: "openai", input_cost_per_token: "cheap" },
 };
 const prices = decodePriceData(PRICES_URL, priceTable);
 
@@ -463,6 +466,109 @@ describe("runEval on a model matrix", () => {
     expect(await readFile(join(folder, "report.md"), "utf8")).toContain(
       "- openai/gpt-text-only: no PDF input",
     );
+  });
+
+  test("a priced model's cost sums its answered calls only; failed and unsent Documents add nothing", async () => {
+    const multiple = label("13-de-multiple-documents.eml");
+    const fixtures = await fixtureFolder([
+      label("01-de-pdf-invoice.eml"),
+      {
+        ...multiple,
+        documents: [
+          ...multiple.documents.filter(({ fileName }) => fileName !== "Kassenbeleg.png"),
+          { fileName: "Hinweise.txt", documentDate: null },
+        ],
+      },
+      label("07-en-scan-pdf.eml"),
+    ]);
+    const usage = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
+    const { layer, calls } = scriptedExtractor({
+      "Rechnung-RE-2026-1042.pdf": { answer: answer("2026-11-02"), usage: usage(1000, 10) },
+      "Rechnung-RE-2026-0612.pdf": { answer: answer("2026-06-12"), usage: usage(2000, 20) },
+      "Gutschrift-GS-2026-0031.pdf": { answer: answer("2026-06-10"), usage: usage(3000, 30) },
+      "scan-0001.pdf": new DateExtractionError({ message: "provider down" }),
+    });
+    const { report, folder } = await runOne(layer, {
+      fixtures,
+      resultsRoot: newFolder("results"),
+      prices,
+      models: ["openai/gpt-5-mini"],
+    });
+    expect(calls).toHaveLength(4);
+    const [model] = report.models;
+    expect(model!.extraction).toMatchObject({ notSent: 1, failed: 1 });
+    // $0.25/M input, $2/M output: 6000 input and 60 output tokens over the three answered calls.
+    const total = 6000 * 2.5e-7 + 60 * 2e-6;
+    expect(model!.cost).toEqual({ status: "priced", usd: expect.closeTo(total, 15) });
+    expect(model!.costPerDocument).toEqual({
+      status: "priced",
+      usd: expect.closeTo(total / 3, 15),
+    });
+    expect(model!.tokens).toEqual({ input: 6000, output: 60, cachedInput: null, reasoning: null });
+    const markdown = await readFile(join(folder, "report.md"), "utf8");
+    expect(markdown).toContain("| 1 | $0.001620 (1 failed call not counted) | $0.000540 |");
+    expect(markdown).toContain("| Total cost | $0.001620 (1 failed call not counted) |");
+  });
+
+  test("calls run one at a time, model after model", async () => {
+    let inFlight = 0;
+    let most = 0;
+    const counting = Layer.succeed(DateExtractor, {
+      extract: () =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            most = Math.max(most, ++inFlight);
+          }),
+          () => Effect.as(Effect.sleep(2), { answer: answer(null), usage: USAGE }),
+          () => Effect.sync(() => void inFlight--),
+        ),
+    });
+    const { report } = await runEval({
+      fixtures: syntheticFolder,
+      models: ["scripted/a", "scripted/b"],
+      dateExtractor: () => counting,
+      prices: noPrices,
+      resultsRoot: newFolder("results"),
+    });
+    expect(report.models.map(({ latency }) => latency.calls)).toEqual([14, 14]);
+    expect(most).toBe(1);
+  });
+});
+
+describe("modelReport's latency figures", () => {
+  /** Rows of answered calls that took `latencies` ms each. */
+  const rows = (latencies: readonly number[]): IntakeRow[] => [
+    {
+      file: "x.eml",
+      documents: latencies.map((latencyMs, index) => ({
+        fileName: `${index}.pdf`,
+        expected: null,
+        exact: true,
+        month: true,
+        status: "answered" as const,
+        predicted: null,
+        latencyMs,
+        tokens: null,
+        costUsd: null,
+      })),
+    },
+  ];
+  const unpriced = {
+    entry: null,
+    pdfInput: null,
+    pricing: { status: "unpriced", reason: "x" },
+  } as const;
+
+  test.each([
+    ["an odd count: the middle one", [5, 1, 9], 5, 9],
+    ["an even count: the mean of the two middle ones", [4, 1, 10, 2], 3, 10],
+    ["one call", [7], 7, 7],
+  ])("%s", (_case, latencies, medianMs, maxMs) => {
+    expect(modelReport("scripted/model", unpriced, rows(latencies)).latency).toEqual({
+      calls: latencies.length,
+      medianMs,
+      maxMs,
+    });
   });
 });
 

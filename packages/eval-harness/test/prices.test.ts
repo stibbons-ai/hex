@@ -40,6 +40,8 @@ const litellm = {
     cache_read_input_token_cost: null,
   },
   "gpt-no-output-price": { litellm_provider: "openai", input_cost_per_token: 1e-7 },
+  "gpt-no-prices": { litellm_provider: "openai", mode: "chat" },
+  "gpt-free": { litellm_provider: "openai", input_cost_per_token: 0, output_cost_per_token: 0 },
   "gpt-malformed": {
     litellm_provider: "openai",
     input_cost_per_token: "1e-7",
@@ -49,6 +51,20 @@ const litellm = {
     litellm_provider: "openai",
     input_cost_per_token: -1,
     output_cost_per_token: 1,
+  },
+  // A malformed price must not hide that the model can't read PDFs.
+  "gpt-text-only": {
+    litellm_provider: "openai",
+    input_cost_per_token: 1e-7,
+    output_cost_per_token: 2e-7,
+    cache_read_input_token_cost: "0.1",
+    supports_pdf_input: false,
+  },
+  "gpt-odd-flag": {
+    litellm_provider: "openai",
+    input_cost_per_token: 1e-7,
+    output_cost_per_token: 2e-7,
+    supports_pdf_input: "true",
   },
   "not-an-entry": [1, 2, 3],
 };
@@ -65,14 +81,46 @@ describe("decodePriceData", () => {
     });
   });
 
-  test("leaves out a malformed entry, never the whole table", () => {
-    for (const model of ["openai/gpt-malformed", "openai/gpt-negative", "openai/not-an-entry"]) {
-      expect(modelPrices(prices, model).pricing).toMatchObject({
+  test("a malformed price makes its model unpriced, naming the entry and the field", () => {
+    expect(modelPrices(prices, "openai/gpt-malformed")).toEqual({
+      entry: "gpt-malformed",
+      pdfInput: null,
+      pricing: {
         status: "unpriced",
-        reason: expect.stringMatching(/^no LiteLLM entry/),
-      });
-    }
+        reason: "LiteLLM entry gpt-malformed has a malformed input_cost_per_token",
+      },
+    });
+    expect(modelPrices(prices, "openai/gpt-negative").pricing).toEqual({
+      status: "unpriced",
+      reason: "LiteLLM entry gpt-negative has a malformed input_cost_per_token",
+    });
     expect(modelPrices(prices, "anthropic/claude-haiku-4-5").pricing.status).toBe("priced");
+  });
+
+  test("the other fields of an entry still count: supports_pdf_input false beside a malformed price", () => {
+    expect(modelPrices(prices, "openai/gpt-text-only")).toEqual({
+      entry: "gpt-text-only",
+      pdfInput: false,
+      pricing: {
+        status: "unpriced",
+        reason: "LiteLLM entry gpt-text-only has a malformed cache_read_input_token_cost",
+      },
+    });
+  });
+
+  test("a malformed supports_pdf_input is unknown; the prices still count", () => {
+    expect(modelPrices(prices, "openai/gpt-odd-flag")).toEqual({
+      entry: "gpt-odd-flag",
+      pdfInput: null,
+      pricing: { status: "priced", rates: { input: 1e-7, output: 2e-7, cachedInput: null } },
+    });
+  });
+
+  test("an entry that is no object is no entry, never the whole table", () => {
+    expect(modelPrices(prices, "openai/not-an-entry").pricing).toEqual({
+      status: "unpriced",
+      reason: "no LiteLLM entry (openai/not-an-entry or not-an-entry with litellm_provider openai)",
+    });
   });
 
   test.each([
@@ -121,14 +169,21 @@ describe("modelPrices: provider/model to a LiteLLM entry", () => {
     });
   });
 
-  test("an entry without an output price is unpriced, naming it", () => {
-    expect(modelPrices(prices, "openai/gpt-no-output-price")).toEqual({
-      entry: "gpt-no-output-price",
+  test.each([
+    ["without an output price", "gpt-no-output-price", "has no output_cost_per_token"],
+    ["without prices", "gpt-no-prices", "has no input_cost_per_token and no output_cost_per_token"],
+  ])("an entry %s is unpriced, naming the missing field", (_case, key, problem) => {
+    expect(modelPrices(prices, `openai/${key}`)).toEqual({
+      entry: key,
       pdfInput: null,
-      pricing: {
-        status: "unpriced",
-        reason: "LiteLLM entry gpt-no-output-price has no input and output price",
-      },
+      pricing: { status: "unpriced", reason: `LiteLLM entry ${key} ${problem}` },
+    });
+  });
+
+  test("an entry priced at zero for input and output is unpriced, never $0", () => {
+    expect(modelPrices(prices, "openai/gpt-free").pricing).toEqual({
+      status: "unpriced",
+      reason: "zero prices in LiteLLM entry gpt-free",
     });
   });
 
@@ -157,6 +212,11 @@ describe("callCost", () => {
       reasoningTokens: 60,
     };
     expect(callCost(rates, usage)).toBeCloseTo(200e-6 + 800e-7 + 500e-6, 15);
+  });
+
+  test("cached tokens beyond the input count are capped at it", () => {
+    const usage = { inputTokens: 100, outputTokens: 0, cachedInputTokens: 500 };
+    expect(callCost(rates, usage)).toBeCloseTo(100e-7, 15);
   });
 
   test("cached input tokens without a cached-input price cost the input price", () => {
