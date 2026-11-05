@@ -2,6 +2,7 @@ import {
   FILING_TIME_ZONE,
   calendarDateIn,
   contentIdReferences,
+  isCalendarDate,
   normalizeMessageId,
 } from "@hex/domain";
 import { Data, Effect, Schema } from "effect";
@@ -19,8 +20,8 @@ export const IntakeAttachment = Schema.Struct({
   /** Content-ID as sent, usually in angle brackets. */
   contentId: Schema.optionalKey(Schema.String),
   /**
-   * Decoded content as canonical, padded base64 (no whitespace), so its decoded size, which
-   * detection goes by, follows from its length.
+   * Decoded content as unwrapped, padded base64 (no whitespace or line breaks), so its decoded
+   * size, which detection goes by, follows from its length.
    */
   content: Schema.String.check(Schema.isBase64()),
 });
@@ -45,7 +46,7 @@ export const Intake = Schema.Struct({
       const date = new Date(value);
       return (
         (!Number.isNaN(date.getTime()) && date.toISOString() === value && isFilable(date)) ||
-        "a real UTC instant whose year in Europe/Berlin is 1000 to 9999"
+        `a real UTC instant whose year in ${FILING_TIME_ZONE} is 1000 to 9999`
       );
     }),
   ),
@@ -63,11 +64,13 @@ export class IntakeReadError extends Data.TaggedError("IntakeReadError")<{
   readonly cause?: unknown;
 }> {}
 
-/** Whether an instant can be filed: its calendar year in the filing time zone is 1000 to 9999. */
+/** Whether an instant can be filed: its calendar date in the filing time zone is valid. */
 function isFilable(instant: Date): boolean {
-  const { year } = calendarDateIn(instant, FILING_TIME_ZONE);
-  return year >= 1000 && year <= 9999;
+  return isCalendarDate(calendarDateIn(instant, FILING_TIME_ZONE));
 }
+
+/** `value` without its comments; nested comments are not recognised. */
+const withoutComments = (value: string) => value.replace(/\([^()]*\)/g, " ");
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
@@ -99,17 +102,13 @@ const MAIL_DATE =
 
 /**
  * The instant a mail header date-time names (see {@link MAIL_DATE}), or undefined unless it has
- * that shape with a zone (so it never depends on the host's time zone), a valid time (hours up
- * to 23, minutes up to 59, seconds up to 60; zone offsets up to 23:59), a day that exists in its
- * month, and a calendar year in the filing time zone from 1000 to 9999.
+ * that shape with a zone (so it never depends on the host's time zone), a header year of 1000 or
+ * later, a valid time (hours up to 23, minutes up to 59, seconds up to 60, a leap second `:60`
+ * read as `:59`; zone offsets up to 23:59), a day that exists in its month, and a calendar year
+ * in the filing time zone from 1000 to 9999.
  */
 function parseMailDate(value: string): Date | undefined {
-  const match = MAIL_DATE.exec(
-    value
-      .replace(/\([^()]*\)/g, " ")
-      .replace(/\s+/g, " ")
-      .trim(),
-  );
+  const match = MAIL_DATE.exec(withoutComments(value).replace(/\s+/g, " ").trim());
   if (!match) return undefined;
   const [
     ,
@@ -186,7 +185,10 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
         message: `${source}: no Message-ID, so the Intake can't be processed exactly once`,
       });
     }
-    const topmostReceived = email.headers.find(({ key }) => key === "received")?.value ?? "";
+    // Comments first: a `;` inside a trailing comment must not split the header.
+    const topmostReceived = withoutComments(
+      email.headers.find(({ key }) => key === "received")?.value ?? "",
+    );
     const separator = topmostReceived.lastIndexOf(";");
     const dateHeader = email.headers.find(({ key }) => key === "date")?.value;
     const received =
@@ -194,7 +196,7 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
       (dateHeader === undefined ? undefined : parseMailDate(dateHeader));
     if (!received) {
       return yield* new IntakeReadError({
-        message: `${source}: no Received or Date header with a valid RFC 5322 date, so no received date`,
+        message: `${source}: no Received or Date header with a usable date ([Day,] D Mon YYYY HH:MM[:SS] zone), so no received date`,
       });
     }
     const sender = email.from?.address;

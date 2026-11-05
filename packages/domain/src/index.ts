@@ -13,6 +13,7 @@ export {
   DEFAULT_CATEGORY,
   FILING_TIME_ZONE,
   calendarDateIn,
+  isCalendarDate,
   planFiling,
 } from "./filing";
 export type { CalendarDate, Category, FilingPlan } from "./filing";

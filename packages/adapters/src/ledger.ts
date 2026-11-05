@@ -6,10 +6,7 @@ import { localDatabaseUrl } from "./storage";
 
 /** One Document's Filing: which attachment it was and where it landed, relative to the Outbox. */
 export const Filing = Schema.Struct({
-  /**
-   * The Document's 0-based index among the Intake's attachments; a nameless one is filed as
-   * `document-<index + 1>`.
-   */
+  /** The Document's 0-based index among the Intake's attachments. */
   index: Schema.Int,
   path: Schema.String,
 });

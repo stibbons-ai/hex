@@ -252,6 +252,16 @@ describe("Intake workflow", () => {
       expect(await hex.outbox()).toEqual({});
     });
 
+    test("a receivedAt whose Berlin year is 10000 is rejected; nothing filed or recorded", async () => {
+      const hex = freshHex();
+      const intake = { ...base, receivedAt: "9999-12-31T23:30:00.000Z", attachments: [apiPdf] };
+      await expect(runIntake(intake, { paths: hex, category: "ER" })).rejects.toThrow(
+        "whose year in Europe/Berlin is 1000 to 9999",
+      );
+      expect(await hex.outbox()).toEqual({});
+      expect(await hex.ledger("api@shop.example")).toBeUndefined();
+    });
+
     test("an image's size is its content's, whatever size the caller claims", async () => {
       const hex = freshHex();
       const tinyImage = {
@@ -277,7 +287,7 @@ describe("Intake workflow", () => {
       };
       await expect(
         runIntake({ ...base, attachments: [padded] }, { paths: hex, category: "ER" }),
-      ).rejects.toThrow("content");
+      ).rejects.toThrow("Expected a base64 encoded string");
       expect(await hex.outbox()).toEqual({});
     });
 

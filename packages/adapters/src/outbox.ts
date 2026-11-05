@@ -84,9 +84,10 @@ async function linkToFreeName(partial: string, directory: string, name: string) 
  * final name. `link()` fails with EEXIST instead of replacing an existing file (a `rename()`
  * would replace it), so a name taken meanwhile, by a concurrent write or anything else, moves
  * on to the next free name. Before the link exists, an error removes the `.partial` and is
- * rethrown. Once it exists the Document is filed: the folder (and every folder created for it)
- * is flushed and the `.partial` removed, and a failure of either only adds to `warnings`. A
- * crash or kill can still leave a `.partial` behind.
+ * rethrown; if that `.partial` can't be removed either, a warning says so. Once the link exists
+ * the Document is filed: the folder (and every folder created for it) is flushed and the
+ * `.partial` removed, and a failure of either only adds a warning. A crash or kill can still
+ * leave a `.partial` behind.
  */
 async function writeNew(
   root: string,
@@ -123,7 +124,9 @@ async function writeNew(
   try {
     await syncDirectory(directory);
     // Each folder mkdir created is an entry in its parent: flush those parents too.
+    // Up to the parent of the first created folder; never past the filesystem root.
     for (let parent = directory; created !== undefined && parent !== dirname(created);) {
+      if (dirname(parent) === parent) break;
       parent = dirname(parent);
       await syncDirectory(parent);
     }

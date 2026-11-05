@@ -170,8 +170,8 @@ describe("readEml", () => {
     expect(intake.receivedAt).toBe("2026-10-30T09:00:00.000Z");
   });
 
-  // The topmost Received date is used only after a `;` and only when it is a strict RFC 5322
-  // date-time with a zone; otherwise the Date header (30 Oct 2026 10:00 +0100) is.
+  // The topmost Received date is used only after a `;` and only in the accepted form
+  // ([Day,] D Mon YYYY HH:MM[:SS] zone); otherwise the Date header (30 Oct 2026 10:00 +0100) is.
   test.each([
     ["no ';' (a date-like id)", "from a by mx.example.org id 2024", "2026-10-30T09:00:00.000Z"],
     [
@@ -230,6 +230,22 @@ describe("readEml", () => {
       "from a by b; Mon, 1 Jan 1000 00:30:00 +0200",
       "2026-10-30T09:00:00.000Z",
     ],
+    ["offset hours 24", "from a by b; Tue, 4 Nov 2026 10:00:00 +2400", "2026-10-30T09:00:00.000Z"],
+    [
+      "last filable minute in Berlin",
+      "from a by b; Fri, 31 Dec 9999 22:00:00 +0000",
+      "9999-12-31T22:00:00.000Z",
+    ],
+    [
+      "leap second read as :59",
+      "from a by b; Tue, 4 Nov 2026 23:59:60 +0000",
+      "2026-11-04T23:59:59.000Z",
+    ],
+    [
+      "';' inside a trailing comment",
+      "from a by b; Tue, 4 Nov 2026 10:00:00 +0000 (foo; bar)",
+      "2026-11-04T10:00:00.000Z",
+    ],
   ])("Received %s → %s", async (_case, received, expected) => {
     const intake = await read(eml(`Received: ${received}`, ...headers.slice(2), "", "body"));
     expect(intake.receivedAt).toBe(expected);
@@ -248,7 +264,7 @@ describe("readEml", () => {
       eml(...lines, ...(date ? [date] : []), "", "body"),
       "/mail/no-date.eml",
     );
-    expect(message).toContain("/mail/no-date.eml: no Received or Date header with a valid");
+    expect(message).toContain("/mail/no-date.eml: no Received or Date header with a usable date");
   });
 
   test("no Message-ID fails, naming the file", async () => {

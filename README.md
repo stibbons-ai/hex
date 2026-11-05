@@ -91,7 +91,8 @@ The workflow, in order:
    as a calendar date in `Europe/Berlin`. The received date is the date after the last `;` of the
    topmost `Received:` header, else the `Date:` header, each only in the form
    `[Day,] D Mon YYYY HH:MM[:SS] zone` (four-digit year, two-digit hours, comments such as
-   `(CET)` ignored) with a valid time and a day that exists. The zone is `±HHMM` (up to 23:59) or
+   `(CET)` ignored), a header year of 1000 or later, a valid time (a leap second `:60` is read
+   as `:59`) and a day that exists. The zone is `±HHMM` (up to 23:59) or
    a name: `UT`, `GMT` and the US names have their offsets, any other name (`UTC`, `Z`, `CET`)
    counts as UTC, as RFC 5322 §4.3 says. The date must fall in the years 1000 to 9999 in
    `Europe/Berlin`. The file name is the
@@ -103,9 +104,10 @@ The workflow, in order:
    A name already taken becomes `name (1).pdf`, `name (2).pdf`, …; nothing is ever overwritten.
    Each file is written as `<name>.<id>.partial` in the target folder (hex-sync skips
    `*.partial`), flushed, then hard-linked into place, which fails instead of replacing a file
-   that appeared meanwhile; the folder is then flushed (a failed flush only logs a warning: the
-   Document is filed). A failed write removes its
-   `.partial`; a crash or kill mid-write can leave one behind.
+   that appeared meanwhile; the folder is then flushed and the `.partial` removed. Once linked,
+   the Document is filed: a failed flush or a `.partial` that can't be removed only logs a
+   warning. A failed write removes its `.partial` (logging a warning if it can't); a crash or
+   kill mid-write can leave one behind.
 4. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
    Documents.
 
