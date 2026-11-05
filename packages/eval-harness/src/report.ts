@@ -204,8 +204,8 @@ function sumReported(values: readonly (number | null)[]): number | null {
 function sumTokens(all: readonly Tokens[]): Tokens | null {
   if (all.length === 0) return null;
   return {
-    input: sumReported(all.map(({ input }) => input))!,
-    output: sumReported(all.map(({ output }) => output))!,
+    input: all.reduce((sum, { input }) => sum + input, 0),
+    output: all.reduce((sum, { output }) => sum + output, 0),
     cachedInput: sumReported(all.map(({ cachedInput }) => cachedInput)),
     reasoning: sumReported(all.map(({ reasoning }) => reasoning)),
   };
@@ -314,6 +314,8 @@ export function formatTokens({ input, output, cachedInput, reasoning }: Tokens):
 const tokensCell = (tokens: Tokens | null) =>
   tokens === null ? "not reported" : formatTokens(tokens);
 
+const usdCell = (usd: number | null) => (usd === null ? "unpriced" : formatUsd(usd));
+
 function documentLine(document: DocumentRow): string {
   const answered = document.status === "answered" ? document : undefined;
   return row([
@@ -324,7 +326,7 @@ function documentLine(document: DocumentRow): string {
     document.month ? "yes" : "no",
     document.status === "not-sent" ? "n/a" : msCell(document.latencyMs),
     answered ? tokensCell(answered.tokens) : "n/a",
-    answered ? (answered.costUsd === null ? "unpriced" : formatUsd(answered.costUsd)) : "n/a",
+    answered ? usdCell(answered.costUsd) : "n/a",
   ]);
 }
 
