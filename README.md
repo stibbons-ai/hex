@@ -91,9 +91,12 @@ devenv then refuses to open the shell unless a reason is set too, for example
 bun run start
 ```
 
-The server binds to `127.0.0.1` only, on `HEX_PORT` (default `4111`; `0` picks a free port), and
-answers only requests whose `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (on port
-80 also `127.0.0.1` and `localhost` without the port; 403 otherwise, against DNS rebinding). It stores Mastra's state in a LibSQL file at
+The server binds to `HEX_HOST`, default `127.0.0.1` (an IP address, never a name; a non-loopback
+address logs a warning that the server has no authentication), on `HEX_PORT` (default `4111`; `0`
+picks a free port), and answers only requests whose `Host` header is `127.0.0.1:<port>` or
+`localhost:<port>`, or `<HEX_HOST>:<port>` when `HEX_HOST` is a specific address rather than a
+wildcard such as `0.0.0.0` (on port 80 also without the port; 403 otherwise, against DNS
+rebinding). It stores Mastra's state in a LibSQL file at
 `<data dir>/mastra.db`, and the traces, logs and metrics of every agent call and workflow run in
 a DuckDB file, `<data dir>/observability.duckdb` (see [Traces and Studio](#traces-and-studio)).
 The data directory is `HEX_DATA_DIR`, default `.data` relative to the
@@ -129,6 +132,48 @@ await hex.workflows.list();
 
 Mastra's own REST routes (`/api/...`) are not served, so Studio and other clients of those routes
 don't work against this entrypoint; Studio runs as its own dev-only server instead.
+
+## Container
+
+One `docker compose up` runs hex on this Mac (OrbStack or Docker Desktop, arm64): the image is
+built locally from the `Dockerfile` and never pushed anywhere (ADR 0005).
+
+```sh
+cp .env.example .env            # then set HEX_OUTBOX_HOST_DIR, and the model keys you use
+mkdir -p ~/hex-outbox           # the folder HEX_OUTBOX_HOST_DIR names must exist
+docker compose up --build -d
+docker compose ps               # STATUS "Up … (healthy)" once /health answers
+curl http://127.0.0.1:4111/health   # {"status":"ok"}
+docker compose logs -f hex
+docker compose down             # stops it; the data volume stays
+```
+
+- **Image**: distroless (glibc, non-root uid 65532) with `bun`, the server as a Bun JS bundle
+  (`bun scripts/build-server.ts`, ADR 0002) and a production install of only LibSQL's and
+  DuckDB's native addons, pruned from `bun.lock` to the target platform, plus Mastra's
+  model-capability metadata copied beside them. Its `HEALTHCHECK` runs `/app/healthcheck.js`
+  with `bun` (no shell or curl in the image); `/app/smoke.js` checks that model capabilities
+  resolve and that LibSQL and DuckDB open, as CI does for every change (`image` job, on GitHub's
+  arm64 runner).
+- **Data** lives in the named volume `hex_hex-data`, mounted at `/data`: `mastra.db` (LibSQL)
+  and `observability.duckdb` (DuckDB). `docker compose down -v` deletes it.
+- **Outbox**: the host folder `HEX_OUTBOX_HOST_DIR` (required; compose refuses to start without
+  it and never creates it) is bind-mounted at `/outbox`. Nothing else from the host is mounted:
+  never Proton Drive or the Archive. On Linux the folder must be writable by uid 65532.
+- **Secrets** stay in `.env`, which is git-ignored; `.env.example` lists every variable with
+  empty values. hex reads its own secrets (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`,
+  `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`) as Effect `Config.Redacted`; Mastra's model router reads
+  the model keys (`OPENAI_API_KEY`, …) straight from the environment.
+- **Pinned settings**: `compose.yaml` sets `HEX_HOST=0.0.0.0`, `HEX_PORT=4111`,
+  `HEX_DATA_DIR=/data`, `HEX_OUTBOX_DIR=/outbox`, `MASTRA_TELEMETRY_DISABLED=1` and
+  `DO_NOT_TRACK=1` under `environment:`, which a `.env` line can't override. No config file is
+  mounted yet, so chat and Forwarding stay off (`hex: chat off: HEX_CONFIG is not set`).
+- **Network**: inside its container the server listens on every interface, which is why it logs
+  the no-authentication warning; the port is published on the Mac's loopback only
+  (`127.0.0.1:4111:4111`). Never publish it as `-p 4111:4111` or `"4111:4111"` without
+  `127.0.0.1:`: that hands the unauthenticated server, your Documents and your model keys to the
+  network. Keep the host port equal to the container's 4111 too: the `Host` header check only
+  allows `127.0.0.1:4111` and `localhost:4111`, so another host port answers 403.
 
 ## Traces and Studio
 

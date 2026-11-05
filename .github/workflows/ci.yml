@@ -30,3 +30,38 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Format, lint, typecheck, catalog and licence policy, tests
         run: bun run check
+
+  # The arm64 image as `docker compose build` makes it on Daniel's Mac (ADR 0005): bundle, pruned
+  # externals and Mastra's capability metadata, built on GitHub's arm64 runner (no emulation),
+  # smoked, booted and health-checked. Never pushed anywhere.
+  image:
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 20
+    env:
+      MASTRA_TELEMETRY_DISABLED: "1"
+      DO_NOT_TRACK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the arm64 image
+        run: docker build --tag hex:ci .
+      - name: Smoke test the image (Mastra capabilities resolve, LibSQL and DuckDB open)
+        run: docker run --rm --entrypoint /usr/local/bin/bun hex:ci /app/smoke.js
+      - name: Boot the image; its health check and /health answer
+        run: |
+          docker run -d --name hex -p 127.0.0.1:4111:4111 -v hex-data:/data hex:ci
+          status=
+          for _ in $(seq 60); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' hex)"
+            if [ "$status" = healthy ]; then break; fi
+            sleep 1
+          done
+          if [ "$status" != healthy ]; then
+            echo "::error::Container health is ${status}, not healthy"
+            exit 1
+          fi
+          test "$(curl -fsS http://127.0.0.1:4111/health)" = '{"status":"ok"}'
+      - name: Server logs
+        if: always()
+        run: docker logs hex || true
