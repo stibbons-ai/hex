@@ -50,7 +50,10 @@ export const ExpectedIntake = Schema.Struct({
   ),
 });
 
-/** The labels of one fixture folder: its `expected.json`. */
+/**
+ * The labels of one fixture folder: its `expected.json`. Decoding this schema directly is lax
+ * (unknown keys are dropped); hand-written labels go through {@link decodeExpectedSet}.
+ */
 export const ExpectedSet = Schema.Struct({
   intakes: Schema.Array(ExpectedIntake).check(
     unique((intake: ExpectedIntake) => intake.file, "file"),
@@ -67,16 +70,20 @@ const decodeStrict = Schema.decodeUnknownResult(ExpectedSet, {
 });
 
 /**
- * Decodes hand-written labels strictly: unknown (mistyped) keys fail, and every element-level
- * problem is reported at once. The duplicate `file` / `fileName` checks run only once every element
- * decodes. The options are fixed, so callers cannot loosen them.
+ * Decodes hand-written labels strictly: unknown (mistyped) keys fail, and every problem inside the
+ * elements is reported at once. The duplicate `file` / `fileName` checks run only once every
+ * element decodes. The options are fixed, so callers cannot loosen them.
  */
 export function decodeExpectedSet(input: unknown): Result.Result<ExpectedSet, Schema.SchemaError> {
   return decodeStrict(input);
 }
 
-/** Reads and decodes one labels file. Rejects, naming the file, when it is missing, is not JSON or does not decode. */
-export async function readExpectedFile(path: string): Promise<ExpectedSet> {
+/**
+ * Reads and decodes `<folder>/expected.json`. Rejects, naming the file, when it is missing, is not
+ * JSON or does not decode.
+ */
+export async function loadExpectedSet(folder: string): Promise<ExpectedSet> {
+  const path = join(folder, "expected.json");
   let json: unknown;
   try {
     json = JSON.parse(await Bun.file(path).text());
@@ -86,9 +93,4 @@ export async function readExpectedFile(path: string): Promise<ExpectedSet> {
   const result = decodeExpectedSet(json);
   if (Result.isFailure(result)) throw new Error(`${path}: ${result.failure.message}`);
   return result.success;
-}
-
-/** Reads and decodes `<folder>/expected.json`; see {@link readExpectedFile}. */
-export function loadExpectedSet(folder: string): Promise<ExpectedSet> {
-  return readExpectedFile(join(folder, "expected.json"));
 }

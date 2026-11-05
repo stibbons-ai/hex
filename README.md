@@ -271,10 +271,11 @@ bun run test          # bun test
 
 The evals run against folders of `.eml` Intakes, each labelled by one `expected.json`: per
 Intake, its Documents in MIME order with their Document dates (`null` when a Document carries
-none). `@hex/eval-harness` exports the Effect Schema (`ExpectedSet`, `decodeExpectedSet`) and
-`loadExpectedSet(folder)`. Decoding reports every problem at once and rejects malformed or
-impossible dates, duplicate `file` or `fileName` entries and unknown (mistyped) keys;
-`loadExpectedSet` names the file in its errors.
+none). `@hex/eval-harness` exports their types plus `decodeExpectedSet` and
+`loadExpectedSet(folder)`, which decode strictly: they reject malformed or impossible dates,
+duplicate `file` or `fileName` entries and unknown (mistyped) keys, report every problem inside the
+Intakes at once (the duplicate checks run once those decode), and `loadExpectedSet` names the file
+in its errors.
 
 `packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
 without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
@@ -285,14 +286,16 @@ regenerate; a test fails when the committed files drift from the generator's out
 
 ```sh
 bun run fixtures:generate             # rewrites packages/eval-harness/fixtures/synthetic/
-bun run fixtures:generate /tmp/set    # any other folder; relative paths resolve against your directory
+bun run fixtures:generate new-set     # or a missing or empty folder, relative to your directory
 ```
 
-The generator replaces only files it recognises as its own by content: regular `.eml` files whose
-headers carry its `Message-ID <synthetic-…@hex-fixtures.example>`, and an `expected.json` that
-decodes and whose listed files, where present, are such files. Before touching anything it refuses
-a folder holding any other `.eml` or `expected.json` (any letter case), naming each file and why.
-Run it from the repo root or a folder below it outside the workspace packages.
+Run it from the repo root or a folder below it outside the workspace packages. Before touching
+anything it checks the target and accepts exactly two kinds: a missing or empty folder, which it
+fills, and the committed folder, which it replaces in place. There it overwrites `expected.json`
+(tracked by git) and deletes an `.eml` only if it is a regular file whose header block carries
+the generator's `Message-ID <synthetic-…@hex-fixtures.example>`; any other entry makes it refuse.
+Every other target (a non-empty folder elsewhere, a file) is refused with a message naming the
+folder and why, so real fixtures are never overwritten.
 
 | Intake                       | Covers                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -313,9 +316,9 @@ Run it from the repo root or a folder below it outside the workspace packages.
 
 Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
 folder. The root `.gitignore` guards against committing them by accident (`git add -f` still
-can): it ignores every `.eml` (any letter case) and `expected.json` except the direct children
-of the synthetic folder, any `fixtures/real/` and `fixtures/private/` folder, and eval results in
-any `eval-results/` folder.
+can): it ignores every `.eml` (any letter case) and `expected.json` except the lower-case `.eml`
+files and `expected.json` directly in the synthetic folder, any `fixtures/real/` and
+`fixtures/private/` folder, and eval results in any `eval-results/` folder.
 
 ## Packages
 

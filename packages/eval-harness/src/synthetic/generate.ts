@@ -1,8 +1,8 @@
 /** Renders the synthetic Intakes to `.eml` files plus their `expected.json`, byte for byte reproducibly. */
-import { lstat, mkdir, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readExpectedFile, type ExpectedIntake, type ExpectedSet } from "../expected.ts";
+import type { ExpectedIntake, ExpectedSet } from "../expected.ts";
 import { intakes, recipient, type Attachment, type SyntheticIntake } from "./intakes.ts";
 import { documentDate, invoicePdf, scanPdf, scanPng } from "./invoice.ts";
 import {
@@ -170,64 +170,79 @@ const syntheticMessageId = new RegExp(
   "im",
 );
 
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 /**
- * Why the `.eml` at `path` is not one this generator wrote, or `undefined` when it is (or is
- * absent): it must be a regular file whose header block carries the synthetic `Message-ID`.
+ * Why the `.eml` at `path` is not one this generator wrote, or `undefined` when it is: a regular
+ * file with a header block (ended by a blank line) that carries the synthetic `Message-ID`.
  */
 async function emlRefusal(path: string): Promise<string | undefined> {
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) return undefined;
-  if (!stats.isFile()) return "not a regular file";
-  const eml = await Bun.file(path).text();
-  const end = eml.search(/\r?\n\r?\n/);
-  return syntheticMessageId.test(end === -1 ? eml : eml.slice(0, end))
-    ? undefined
-    : `no Message-ID <synthetic-…@${syntheticDomain}>`;
-}
-
-/**
- * Why the labels at `path` are not ones this generator wrote, or `undefined` when they are: a
- * regular file that decodes and whose listed files in `folder`, where present, pass {@link emlRefusal}.
- */
-async function labelsRefusal(folder: string, path: string): Promise<string | undefined> {
-  if (!(await lstat(path)).isFile()) return "not a regular file";
-  let set: ExpectedSet;
   try {
-    set = await readExpectedFile(path);
+    if (!(await lstat(path)).isFile()) return "not a regular file";
+    const eml = await Bun.file(path).text();
+    const end = eml.search(/\r?\n\r?\n/);
+    if (end === -1) return "no blank line ends its headers";
+    return syntheticMessageId.test(eml.slice(0, end))
+      ? undefined
+      : `no Message-ID <synthetic-…@${syntheticDomain}> in its headers`;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return message(error);
   }
-  for (const { file } of set.intakes) {
-    const reason = await emlRefusal(join(folder, file));
-    if (reason !== undefined) return `lists ${file}, which is ${reason}`;
-  }
-  return undefined;
 }
 
+/** Why the entry `name` of the committed folder may not be replaced, or `undefined` when it may. */
+async function committedEntryRefusal(folder: string, name: string): Promise<string | undefined> {
+  const path = join(folder, name);
+  if (name === "expected.json") {
+    // Tracked by git, so overwriting it is recoverable.
+    try {
+      return (await lstat(path)).isFile() ? undefined : "not a regular file";
+    } catch (error) {
+      return message(error);
+    }
+  }
+  if (name.endsWith(".eml")) return emlRefusal(path);
+  return "not part of the synthetic set";
+}
+
+/** `path`'s real path, or `path` itself while it does not exist. */
+const realPath = (path: string) => realpath(path).catch(() => resolve(path));
+
 /**
- * Replaces the generated `.eml` files and `expected.json` in `folder` with a freshly rendered set.
- * Renders first, then refuses, touching nothing, when the folder holds any `.eml` or
- * `expected.json` (any letter case) this generator did not write, judged by content: those may be
- * real fixtures, which git ignores and so cannot restore.
+ * Writes a freshly rendered set into `folder`. Renders first, then accepts exactly two targets
+ * before touching anything:
+ * - a missing or empty folder, which it creates and fills;
+ * - the committed folder (`committed`, by default {@link syntheticFolder}), which it replaces in
+ *   place: it overwrites `expected.json` (tracked by git) and deletes an `.eml` only when it is a
+ *   generated one ({@link emlRefusal}); any other entry there is refused.
+ *
+ * Anything else, a non-empty folder elsewhere or a path that is not a folder, is refused with one
+ * message naming the folder and why: it may hold real fixtures, which git ignores and so cannot
+ * restore.
  */
-export async function writeFixtureSet(folder: string): Promise<void> {
+export async function writeFixtureSet(folder: string, committed = syntheticFolder): Promise<void> {
   const files = renderFixtureSet();
+  const refuse = (why: string) =>
+    new Error(`refusing to write the synthetic set into ${folder}: ${why}`);
+  const stats = await lstat(folder).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw refuse(message(error));
+  });
+  if (stats !== undefined && !stats.isDirectory()) throw refuse("it is not a folder");
+  const entries = stats === undefined ? [] : await readdir(folder);
+  if (entries.length > 0) {
+    if ((await realPath(folder)) !== (await realPath(committed))) {
+      throw refuse("it is neither empty nor the committed synthetic folder");
+    }
+    const refused: string[] = [];
+    for (const name of entries) {
+      const reason = await committedEntryRefusal(folder, name);
+      if (reason !== undefined) refused.push(`${name} (${reason})`);
+    }
+    if (refused.length > 0)
+      throw refuse(`it holds files this generator did not write: ${refused.join("; ")}`);
+  }
   await mkdir(folder, { recursive: true });
-  const replaced = (await readdir(folder)).filter((name) =>
-    /^(?:.*\.eml|expected\.json)$/i.test(name),
-  );
-  const refused: string[] = [];
-  for (const name of replaced) {
-    const path = join(folder, name);
-    const reason =
-      name.toLowerCase() === "expected.json"
-        ? await labelsRefusal(folder, path)
-        : await emlRefusal(path);
-    if (reason !== undefined) refused.push(`${name} (${reason})`);
-  }
-  if (refused.length > 0) {
-    throw new Error(`${folder} holds files this generator did not write: ${refused.join("; ")}`);
-  }
-  for (const name of replaced) await rm(join(folder, name));
+  for (const name of entries) if (name !== "expected.json") await rm(join(folder, name));
   for (const [name, bytes] of files) await Bun.write(join(folder, name), bytes);
 }

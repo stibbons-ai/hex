@@ -192,7 +192,7 @@ function rows(invoice: Invoice): Row[] {
 
 /**
  * The invoice's printed text, one string per row (`left` and amount). Scans draw these rows in the
- * bitmap font, i.e. upper case with `ß` → `SS` and `€` → `EUR` (see `glyphText`).
+ * bitmap font, i.e. upper case with `ß` → `SS`, `€` → `EUR` and `–`/`—` → `-` (see `glyphText`).
  */
 export function printedLines(invoice: Invoice): string[] {
   return rows(invoice).map((row) =>

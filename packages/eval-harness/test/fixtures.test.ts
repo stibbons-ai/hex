@@ -222,9 +222,10 @@ describe("committed synthetic fixture set", () => {
     for (const { part, fileName, intake } of documents) {
       expect({
         fileName,
+        parts: mailOf(intake).parts.filter((candidate) => candidate.fileName === fileName).length,
         disposition: part.disposition,
         cid: referenced(part, mailOf(intake).html),
-      }).toEqual({ fileName, disposition: "attachment", cid: false });
+      }).toEqual({ fileName, parts: 1, disposition: "attachment", cid: false });
       expect(isPdf(part) || isImage(part)).toBe(true);
       expect(part.data.length).toBeGreaterThan(sizeFloor);
     }
