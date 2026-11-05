@@ -276,7 +276,7 @@ The workflow, in order:
 every run attempts each of them, even when another failed, unless the ledger can't be read or an
 unexpected defect occurs; then the run fails at once. An unreadable ledger fails it before
 anything is sent; a defect can come after earlier targets were sent to, and the failed run's
-output then doesn't list them (the ledger has them, so a re-run skips them). When any branch
+output then doesn't list them (the ledger has those that were recorded, so a re-run skips them). When any branch
 failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
 Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
 same Intake) repeats only the branches the ledger has no record of: a target recorded as having
