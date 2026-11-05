@@ -54,19 +54,76 @@ export class DateExtractionError extends Data.TaggedError("DateExtractionError")
   readonly message: string;
 }> {}
 
+/**
+ * The provider-reported tokens of one model call, as Mastra's model router reports them:
+ * `inputTokens` includes `cachedInputTokens`, `outputTokens` includes
+ * `reasoningTokens`. The two details are present only when the provider reports them.
+ */
+export interface TokenUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cachedInputTokens?: number;
+  readonly reasoningTokens?: number;
+}
+
+/** What one {@link DateExtractor} call got back. */
+export interface DateExtraction {
+  /**
+   * The model's answer, undecoded: undefined when the model's reply yields no object matching
+   * the schema (no JSON, a schema mismatch, an empty reply, one cut off at the token limit or
+   * withheld by a content filter).
+   */
+  readonly answer: unknown;
+  /** The call's tokens; undefined when the provider reported no input or output count. */
+  readonly usage: TokenUsage | undefined;
+}
+
 /** Reads a Document's Document date with a model. */
 export class DateExtractor extends Context.Service<
   DateExtractor,
   {
     /**
-     * The model's answer for `document`, undecoded: undefined when the model's reply yields no
-     * object matching the schema (no JSON, a schema mismatch, an empty reply, one cut off at the
-     * token limit or withheld by a content filter). Fails only when the model call itself fails,
-     * never for an unusable answer.
+     * The model's answer for `document` and the call's token usage. Fails only when the model
+     * call itself fails, never for an unusable answer.
      */
-    readonly extract: (document: DocumentFile) => Effect.Effect<unknown, DateExtractionError>;
+    readonly extract: (
+      document: DocumentFile,
+    ) => Effect.Effect<DateExtraction, DateExtractionError>;
   }
 >()("hex/DateExtractor") {}
+
+/** The usage Mastra reports for one step of a call. */
+interface StepUsage {
+  readonly inputTokens?: number | undefined;
+  readonly outputTokens?: number | undefined;
+  readonly cachedInputTokens?: number | undefined;
+  readonly reasoningTokens?: number | undefined;
+}
+
+const USAGE_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cachedInputTokens",
+  "reasoningTokens",
+] as const;
+
+/**
+ * The call's usage: the sum over its steps. Not Mastra's `totalUsage`: after a retried
+ * transient error (an attempt that reported nothing) Mastra 1.80.0 loses the counts there,
+ * while the step that answered keeps them. A field no step reported stays absent.
+ */
+function tokenUsageOf(steps: readonly { readonly usage?: StepUsage | undefined }[]) {
+  const sum: Partial<Record<(typeof USAGE_FIELDS)[number], number>> = {};
+  for (const { usage } of steps) {
+    for (const field of USAGE_FIELDS) {
+      const count = usage?.[field];
+      if (count !== undefined) sum[field] = (sum[field] ?? 0) + count;
+    }
+  }
+  const { inputTokens, outputTokens, ...details } = sum;
+  if (inputTokens === undefined || outputTokens === undefined) return undefined;
+  return { inputTokens, outputTokens, ...details } satisfies TokenUsage;
+}
 
 const INSTRUCTIONS = `You read the Document date from a business document: an invoice, receipt, credit note or similar, in German or English.
 
@@ -178,6 +235,11 @@ export function dateExtractorLayer(
             message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,
           });
         },
-      }).pipe(Effect.map(({ object }): unknown => object)),
+      }).pipe(
+        Effect.map(({ object, steps }): DateExtraction => ({
+          answer: object,
+          usage: tokenUsageOf(steps),
+        })),
+      ),
   });
 }

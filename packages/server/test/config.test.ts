@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redacted } from "effect";
 import { loadChatConfig } from "../src/channels";
-import { loadForwardingConfig, loadIntakeConfig } from "../src/config";
+import { loadEvalConfig, loadForwardingConfig, loadIntakeConfig } from "../src/config";
 import { BOT_ACCOUNT, BOT_ACI, DANIEL as DANIEL_ACI } from "./fake-signal-cli";
 
 const signalEnv = { SIGNAL_ACCOUNT: BOT_ACCOUNT, SIGNAL_CLI_URL: "http://127.0.0.1:8080" };
@@ -297,6 +297,70 @@ describe("loadIntakeConfig", () => {
     await expect(loadIntakeConfig(path)).rejects.toThrow(
       `hex config ${path}: cannot read the file`,
     );
+  });
+});
+
+describe("loadEvalConfig", () => {
+  test("the models of the eval section, in file order", async () => {
+    const models = [
+      "openai/gpt-5.4-mini",
+      "anthropic/claude-haiku-4-5",
+      "google/gemini-2.5-flash-lite",
+    ] as const;
+    const path = await configFile({
+      ...valid,
+      intake: { model: "openai/gpt-5.1-codex-mini" },
+      eval: { models },
+    });
+    expect(await loadEvalConfig(path)).toEqual({ models });
+  });
+
+  test.each([
+    ["without a config file", undefined, "openai/gpt-5.1-codex-mini"],
+    ["without an eval section", { ...valid }, "openai/gpt-5.1-codex-mini"],
+    [
+      "without an eval section, with intake.model",
+      { intake: { model: "openai/gpt-5.4-nano" } },
+      "openai/gpt-5.4-nano",
+    ],
+  ])("%s: the Intake's model alone", async (_case, content, model) => {
+    const path = content === undefined ? undefined : await configFile(content);
+    expect(await loadEvalConfig(path)).toEqual({ models: [model] });
+  });
+
+  test("needs no chat section", async () => {
+    const path = await configFile({ eval: { models: ["openai/gpt-5.4-nano"] } });
+    expect(await loadEvalConfig(path)).toEqual({ models: ["openai/gpt-5.4-nano"] });
+  });
+
+  test.each([
+    ["an empty model list", { eval: { models: [] } }, '["eval"]["models"]'],
+    [
+      "a model listed twice",
+      { eval: { models: ["openai/gpt-5", "openai/gpt-5"] } },
+      '["eval"]["models"]',
+    ],
+    ["a model without provider", { eval: { models: ["gpt-5"] } }, '["eval"]["models"][0]'],
+    [
+      "a model that is no string",
+      { eval: { models: ["openai/gpt-5", 5] } },
+      '["eval"]["models"][1]',
+    ],
+    ["models that are no list", { eval: { models: "openai/gpt-5" } }, '["eval"]["models"]'],
+    ["an eval section without models", { eval: {} }, '["eval"]["models"]'],
+    ["an unknown eval key", { eval: { models: ["openai/gpt-5"], runs: 3 } }, '["eval"]["runs"]'],
+    ["an unknown top-level key", { eval: { models: ["openai/gpt-5"] }, evals: {} }, '["evals"]'],
+    ["an invalid intake section", { intake: { category: "AR" } }, '["intake"]["category"]'],
+  ])("%s fails, naming the file and the key", async (_case, content, at) => {
+    const path = await configFile(content);
+    const loading = loadEvalConfig(path);
+    await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
+    await expect(loadEvalConfig(path)).rejects.toThrow(`at ${at}`);
+  });
+
+  test("the server's loaders still need the chat section", async () => {
+    const path = await configFile({ eval: { models: ["openai/gpt-5.4-nano"] } });
+    await expect(loadIntakeConfig(path)).rejects.toThrow('at ["chat"]');
   });
 });
 

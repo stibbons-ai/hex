@@ -17,9 +17,14 @@ interface Call {
 /**
  * A mock language model (through Mastra's model path, as the router's models are) that records
  * every call and answers the n-th call with `replies[n]` (the last one for any later call) as its
- * text, or fails with it when it is an Error.
+ * text, reporting one input and one output token, or fails with it when it is an Error.
  */
 function scriptedModel(...replies: (string | Error)[]) {
+  return usageModel({ inputTokens: 1, outputTokens: 1, totalTokens: 2 }, ...replies);
+}
+
+/** {@link scriptedModel}, reporting `usage` (the AI SDK's) on each answer. */
+function usageModel(usage: Record<string, number> | undefined, ...replies: (string | Error)[]) {
   const calls: Call[] = [];
   const model = new MastraLanguageModelV2Mock({
     doGenerate: async (options: Call) => {
@@ -29,7 +34,7 @@ function scriptedModel(...replies: (string | Error)[]) {
       return {
         content: [{ type: "text", text: reply }],
         finishReason: "stop",
-        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        usage,
         warnings: [],
       };
     },
@@ -69,8 +74,9 @@ const userParts = (call: Call | undefined) =>
 describe("DateExtractor (live layer on a mock model)", () => {
   test("a PDF goes to the model natively; a structured answer comes back as the date", async () => {
     const { model, calls } = scriptedModel('{"year":2026,"month":10,"day":5}');
-    const answer = success(await extract(model, pdfDocument));
+    const { answer, usage } = success(await extract(model, pdfDocument));
     expect(answer).toEqual({ year: 2026, month: 10, day: 5 });
+    expect(usage).toEqual({ inputTokens: 1, outputTokens: 1 });
     expect(calls).toHaveLength(1);
     const parts = userParts(calls[0]);
     const file = parts.find(({ type }) => type === "file");
@@ -86,7 +92,7 @@ describe("DateExtractor (live layer on a mock model)", () => {
 
   test("an image goes to the model with its media type and bytes", async () => {
     const { model, calls } = scriptedModel('{"year":null,"month":null,"day":null}');
-    const answer = success(
+    const { answer } = success(
       await extract(model, { content: PNG, mediaType: "image/png", fileName: "Beleg.png" }),
     );
     expect(answer).toEqual({ year: null, month: null, day: null });
@@ -102,7 +108,56 @@ describe("DateExtractor (live layer on a mock model)", () => {
     ["a fractional day", '{"year":2026,"month":10,"day":5.5}'],
   ])("an answer that is %s is no usable date, not an error", async (_case, reply) => {
     const { model } = scriptedModel(reply);
-    expect(success(await extract(model, pdfDocument))).toBeUndefined();
+    expect(success(await extract(model, pdfDocument)).answer).toBeUndefined();
+  });
+
+  describe("the call's token usage, as the provider reported it", () => {
+    const reply = '{"year":2026,"month":10,"day":5}';
+
+    test("input and output, with cached-input and reasoning tokens when reported", async () => {
+      const { model } = usageModel(
+        {
+          inputTokens: 1200,
+          outputTokens: 80,
+          totalTokens: 1280,
+          cachedInputTokens: 1024,
+          reasoningTokens: 64,
+        },
+        reply,
+      );
+      expect(success(await extract(model, pdfDocument)).usage).toEqual({
+        inputTokens: 1200,
+        outputTokens: 80,
+        cachedInputTokens: 1024,
+        reasoningTokens: 64,
+      });
+    });
+
+    test("none when the provider reported no counts; the answer still counts", async () => {
+      const { model } = usageModel(undefined, reply);
+      expect(success(await extract(model, pdfDocument))).toEqual({
+        answer: { year: 2026, month: 10, day: 5 },
+        usage: undefined,
+      });
+    });
+
+    test("of the call that answered, after a retried transient error", async () => {
+      const overloaded = Object.assign(new Error("503 Service Unavailable"), {
+        name: "AI_APICallError",
+        statusCode: 503,
+        isRetryable: true,
+      });
+      const { model, calls } = usageModel(
+        { inputTokens: 300, outputTokens: 20, totalTokens: 320 },
+        overloaded,
+        reply,
+      );
+      expect(success(await extract(model, pdfDocument)).usage).toEqual({
+        inputTokens: 300,
+        outputTokens: 20,
+      });
+      expect(calls).toHaveLength(2);
+    });
   });
 
   describe("Mastra sends every Document hex's sniff (documentMediaType) lets through", () => {
@@ -139,7 +194,11 @@ describe("DateExtractor (live layer on a mock model)", () => {
 
     test("is retried: the next answer counts", async () => {
       const { model, calls } = scriptedModel(overloaded(), '{"year":2026,"month":10,"day":5}');
-      expect(success(await extract(model, pdfDocument))).toEqual({ year: 2026, month: 10, day: 5 });
+      expect(success(await extract(model, pdfDocument)).answer).toEqual({
+        year: 2026,
+        month: 10,
+        day: 5,
+      });
       expect(calls).toHaveLength(2);
     });
 

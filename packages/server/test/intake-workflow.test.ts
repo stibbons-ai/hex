@@ -62,7 +62,7 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
         const answer = script(document);
         return answer instanceof Error
           ? Effect.fail(new DateExtractionError({ message: answer.message }))
-          : Effect.succeed(answer);
+          : Effect.succeed({ answer, usage: undefined });
       }),
   });
   const mailer = recordingMailer();

@@ -72,6 +72,19 @@ const ConfigFile = Schema.Struct({
       targets: Schema.Record(TargetName, Schema.Struct({ to: Address, enabled: Schema.Boolean })),
     }),
   ),
+  /** The eval (`bun run eval`): the models it compares; `intake.model` alone when absent. */
+  eval: Schema.optionalKey(
+    Schema.Struct({
+      /** Mastra model-router ids, `provider/model`: at least one, none twice. */
+      models: Schema.NonEmptyArray(ModelId).check(Schema.isUnique()),
+    }),
+  ),
+});
+
+/** The config file as the eval reads it: the same file, with the chat section optional. */
+const EvalConfigFile = Schema.Struct({
+  ...ConfigFile.fields,
+  chat: Schema.optionalKey(ConfigFile.fields.chat),
 });
 
 /** Throws the config error for `path`: the file, then the problem. */
@@ -80,10 +93,13 @@ export function configError(path: string, problem: string, cause?: unknown): nev
 }
 
 /**
- * Reads and decodes the hex config file (`HEX_CONFIG`). Throws an error naming the file and the
- * problem on an unreadable file, malformed JSON or a shape mismatch.
+ * Reads the hex config file at `path` and decodes it with `schema`. Throws an error naming the
+ * file and the problem on an unreadable file, malformed JSON or a shape mismatch.
  */
-export async function readConfigFile(path: string): Promise<typeof ConfigFile.Type> {
+async function decodeConfigFile<S extends Schema.ConstraintDecoder<unknown>>(
+  path: string,
+  schema: S,
+): Promise<S["Type"]> {
   const fail = (problem: string, cause?: unknown) => configError(path, problem, cause);
   const text = await readFile(path, "utf8").catch((error: unknown) =>
     fail(`cannot read the file (${(error as Error).message})`, error),
@@ -94,7 +110,15 @@ export async function readConfigFile(path: string): Promise<typeof ConfigFile.Ty
   } catch (error) {
     return fail(`not valid JSON (${(error as Error).message})`, error);
   }
-  return decodeOrThrow(ConfigFile, json, `hex config ${path}: invalid config`);
+  return decodeOrThrow(schema, json, `hex config ${path}: invalid config`);
+}
+
+/**
+ * Reads and decodes the hex config file (`HEX_CONFIG`). Throws an error naming the file and the
+ * problem on an unreadable file, malformed JSON or a shape mismatch.
+ */
+export function readConfigFile(path: string): Promise<typeof ConfigFile.Type> {
+  return decodeConfigFile(path, ConfigFile);
 }
 
 /** The chat agent's model settings in the config file's `chat` section. */
@@ -179,6 +203,24 @@ export async function loadIntakeConfig(path: string | undefined): Promise<Intake
     category: intake?.category ?? DEFAULT_CATEGORY,
     model: intake?.model ?? DEFAULT_INTAKE_MODEL,
   };
+}
+
+/** Eval settings from the config file. */
+export interface EvalConfig {
+  /** Mastra model-router ids of the models the eval compares, `provider/model`, in file order. */
+  models: readonly [string, ...string[]];
+}
+
+/**
+ * The eval settings from the hex config file at `path`: the models of its `eval` section, else
+ * the one model the Intake uses (`intake.model`, {@link DEFAULT_INTAKE_MODEL} without one or
+ * without a file). The chat section is optional here, so a file holding only `eval` (or
+ * `intake`) works; every section present is checked as {@link readConfigFile} checks it, failing
+ * the same way, e.g. on an empty or repeated model list or an unknown key.
+ */
+export async function loadEvalConfig(path: string | undefined): Promise<EvalConfig> {
+  const file = path === undefined ? undefined : await decodeConfigFile(path, EvalConfigFile);
+  return { models: file?.eval?.models ?? [file?.intake?.model ?? DEFAULT_INTAKE_MODEL] };
 }
 
 /**

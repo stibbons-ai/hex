@@ -292,6 +292,7 @@ serialises runs.
 | `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                                                                             |
 | `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                                                                           |
 | `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`                                                            |
+| `HEX_CONFIG` `eval.models`     | The models `bun run eval` compares, `provider/model` each (see [Evals](#evals)); not read by the Intake                                                             |
 | `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config                                                 |
 | `HEX_CONFIG` `forwarding`      | Forwarding: `from` (the sender address) and `targets`, each name → `{ "to": address, "enabled": true/false }`; off when absent                                      |
 | `HEX_SMTP_HOST`                | SMTP server to forward through; required (as are user and password) once a target is enabled                                                                        |
@@ -641,13 +642,14 @@ synthetic folder, any `fixtures/real/` and
 ## Evals
 
 `bun run eval` measures hex's two model-relevant decisions on a labelled fixture folder:
-Document detection (`detectDocuments`) and Document date extraction (the DateExtractor on the
-configured model). Run it by hand, with a real API key (the
-[development shell](#development-shell-and-model-keys) exports it): it makes at most one model
-call per labelled Document (none for one not sent), plus the DateExtractor's retries of transient
-provider errors (up to 2 per call). No CI job runs it against a real model (`bun run check` runs
-its test against a loopback fake), and it refuses to run (exit 1, nothing written, no model call)
-when the `CI` environment variable is set to a non-empty value.
+Document detection (`detectDocuments`) and Document date extraction (the DateExtractor), and
+compares the configured models side by side on accuracy, cost and latency. Run it by hand, with
+real API keys (the [development shell](#development-shell-and-model-keys) exports them): it
+makes at most one model call per labelled Document and model (none for one not sent), plus the
+DateExtractor's retries of transient provider errors (up to 2 per call), one call at a time. No
+CI job runs it against a real model (`bun run check` runs its test against a loopback fake), and
+it refuses to run (exit 1, nothing written, no model call) when the `CI` environment variable is
+set to a non-empty value.
 
 ```sh
 bun run eval                                   # the committed synthetic set
@@ -659,9 +661,28 @@ OPENAI_API_KEY=… bun run eval                  # outside the development shell
   `packages/eval-harness/fixtures/synthetic/`. Only read, never written.
 - `HEX_EVAL_RESULTS`: where reports go; default `eval-results/` in the repo root (git-ignored).
   It must not lie inside the fixture folder.
-- `HEX_CONFIG`: the path of hex's config file; the model is its `intake.model`, or
-  `openai/gpt-5.1-codex-mini` when the variable is unset or the file names none. Its API key
-  comes from the provider's usual variable (`OPENAI_API_KEY`, …).
+- `HEX_CONFIG`: the path of hex's config file. The models are its `eval.models`; without that
+  section, the one model the Intake uses (`intake.model`, or `openai/gpt-5.1-codex-mini` when the
+  variable is unset or the file names none). Each model's API key comes from its provider's
+  usual variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`).
+- `HEX_EVAL_PRICES_URL`: where LiteLLM's price data comes from; default
+  `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`.
+
+`eval.models` is a list of Mastra model-router ids, at least one, none twice, compared in that
+order. The eval reads the config file without requiring its `chat` section, so a file holding
+only this works; any other section present is checked as the server checks it:
+
+```json
+{
+  "eval": {
+    "models": [
+      "openai/gpt-5.1-codex-mini",
+      "anthropic/claude-haiku-4-5",
+      "google/gemini-2.5-flash-lite"
+    ]
+  }
+}
+```
 
 Relative paths resolve against the directory you ran it from, as for `fixtures:generate`. A label
 names an attachment by its original file name or, when it has none, by the name hex would file it
@@ -671,16 +692,49 @@ use (`report.md` collapses whitespace in names). A label naming no attachment of
 one of several attachments with that name (such an Intake can't be labelled), or an `.eml` that
 can't be read, fails the run before any model call, naming the file and the label; so does a
 results folder that can't be created or written to. A failed model call is recorded on its
-Document and the run goes on; the command exits 1 after writing the reports.
+Document and the run goes on; the command exits 1 after writing the reports, as it does when
+every configured model was excluded.
 
 What it measures, per attachment matched to the labels by its file name:
 
 - **Detection precision**: detected attachments that are labelled Documents / detected
   attachments. **Recall**: labelled Documents detected / labelled Documents. A zero denominator
-  is not applicable (`null` in JSON, `n/a` in Markdown).
-- **Exact accuracy**: labelled Documents whose predicted Document date is the labelled day /
-  labelled Documents. **Month accuracy**: the same for year and month. A Document labelled
-  undated is right only when no date is predicted; a failed call is always wrong.
+  is not applicable (`null` in JSON, `n/a` in Markdown). Detection involves no model, so it runs
+  once per run.
+- **Exact accuracy**, per model: labelled Documents whose predicted Document date is the
+  labelled day / labelled Documents. **Month accuracy**: the same for year and month. A Document
+  labelled undated is right only when no date is predicted; a failed call is always wrong.
+- **Cost**, per model: the provider-reported token usage of each answered call priced with
+  LiteLLM's price data. A call costs input tokens × `input_cost_per_token` + output tokens ×
+  `output_cost_per_token`; when the provider reports cached input tokens and LiteLLM has a
+  `cache_read_input_token_cost`, those tokens cost that instead of the input price. Input tokens
+  include the cached ones and output tokens the reasoning ones, as Mastra's model router reports
+  them, so reasoning is priced as output; cache writes are priced as input, tiered (long-context)
+  prices are not applied. The total is the sum over the answered calls, the cost per Document the
+  total / answered calls; a failed call reports no tokens and adds nothing. A model is
+  **unpriced**, with the reason, and still runs, never costs 0, when the price data couldn't be
+  fetched (`price data unavailable: <error>`), has no entry for it (`no LiteLLM entry`) or no input
+  and output price, when one of its answered calls reported no token usage, or when no call
+  answered.
+- **Latency**, per call: the wall-clock time of the DateExtractor call, from sending to the
+  answer or the failure, retries and their waits included; per model the median and the maximum
+  over its calls (answered and failed).
+
+LiteLLM's price data is fetched once per run, before the first model call, and decoded as
+untrusted input: an entry that doesn't decode (a price that is no non-negative number, a field of
+the wrong type) is left out, never the whole file; a fetch that fails, answers no 2xx, isn't JSON
+or takes over 30 s leaves every model unpriced and the run goes on. A model id `provider/model`
+maps to the first of the entries `<provider>/<model>` and `<model>` whose `litellm_provider` is the
+provider, where `google` is LiteLLM's `gemini` (the Gemini API; the bare `gemini-…` entries are
+Vertex AI's): `openai/gpt-5.4-mini` is `gpt-5.4-mini`, `anthropic/claude-haiku-4-5` is
+`claude-haiku-4-5`, `google/gemini-2.5-flash-lite` is `gemini/gemini-2.5-flash-lite`.
+
+**PDF input**: the same entry's `supports_pdf_input` decides whether a model can read the
+Documents. A model whose entry says `false` is excluded before any call and listed in both reports
+with the reason. A model without an entry or the flag, or a run without price data, is not
+excluded: its row says "PDF input unknown". Mastra's own model data (`@mastra/core`'s
+`capabilities/<provider>.json`) has only a generic attachment list, not PDF input, and lacks
+`openai/gpt-5.1-codex-mini`, so the eval doesn't use it.
 
 Extraction runs on every labelled Document, whatever detection decided, so detection errors don't
 reach its figures, and as the Intake workflow runs it: a Document whose content
@@ -690,15 +744,21 @@ deterministic Mastra scorers (`createScorer`, run through the scorer's `run`):
 `document-detection`, `document-date-exact` and `document-date-month`. No model judges them: a
 set of attachments and a calendar day have exact right answers.
 
-Each run writes `report.json` and `report.md` into its own folder,
-`<results>/<UTC start time>_<model>/`, e.g. `2026-11-05T15-26-39-000Z_openai-gpt-5.1-codex-mini/`
-(`-2`, `-3`… if taken, never overwritten): the fixture
-folder, model, start time and duration; detection precision and recall with true positive,
-false positive and false negative counts; exact and month accuracy with counts (`11/13 (84.6 %)`)
-and the counts of Documents not sent and failed; and per Intake the attachment names by detection
-verdict and per labelled Document the expected and predicted date (none, not sent, or the error)
-with both verdicts. `report.json` decodes with `Report`, exported by `@hex/eval-harness`; `runEval`
-takes the DateExtractor as a Layer, so a test can script the model.
+Each run writes `report.json` and `report.md` into its own folder: `<results>/<UTC start
+time>_<model>/` for one configured model, e.g.
+`2026-11-05T15-26-39-000Z_openai-gpt-5.1-codex-mini/`, `<results>/<UTC start time>_matrix/` for
+several (`-2`, `-3`… if taken, never overwritten). `report.md` starts with the comparison table,
+one row per evaluated model: exact and month accuracy with counts (`11/13 (84.6 %)`), failed
+calls, total cost and cost per Document (or "unpriced"), latency median and maximum, and PDF input
+(yes, or "PDF input unknown"); below it each unpriced model's reason and the excluded models with
+theirs. Then the fixture folder, start time, duration and price data URL (with the error when the
+fetch failed); detection precision and recall with true positive, false positive and false
+negative counts, and per Intake the attachment names by detection verdict; and per model its
+figures (tokens, LiteLLM entry) and per labelled Document the expected and predicted date (none,
+not sent, or the error) with both verdicts, the call's latency, tokens and cost. The summary on
+the terminal prints one line per model. `report.json` decodes with `Report`, exported by
+`@hex/eval-harness`; `runEval` takes a DateExtractor Layer per model and the fetched price data,
+so a test can script both.
 
 ## Packages
 

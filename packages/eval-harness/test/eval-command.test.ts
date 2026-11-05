@@ -1,5 +1,6 @@
 // Walkthrough: Daniel runs `bun run eval` by hand and reads the summary and both reports; the model
-// is a fake OpenAI on loopback that answers 2 November 2026 for every Document.
+// is a fake OpenAI on loopback that answers 2 November 2026 for every Document, and LiteLLM's
+// price data comes from a loopback server.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,10 +10,25 @@ import { fakeOpenAI } from "../../server/test/fake-openai.ts";
 import type { FakeOpenAI } from "../../server/test/fake-openai.ts";
 import { Report } from "../src/index.ts";
 import { syntheticFolder } from "../src/synthetic/generate.ts";
+import { fakePrices } from "./fake-prices.ts";
+import type { FakePrices } from "./fake-prices.ts";
 import { repoRoot } from "./paths.ts";
 
 const NOVEMBER_2 = '{"year":2026,"month":11,"day":2}';
 const model = fakeOpenAI(() => NOVEMBER_2);
+/** $1 per million input tokens, $2 per million output tokens; the fake reports 1 and 1 per call. */
+const openaiEntry = {
+  litellm_provider: "openai",
+  input_cost_per_token: 1e-6,
+  output_cost_per_token: 2e-6,
+  supports_pdf_input: true,
+};
+const prices = fakePrices({
+  "gpt-5.1-codex-mini": openaiEntry,
+  "gpt-5.4-mini": openaiEntry,
+  "gpt-5.4-nano": { ...openaiEntry, supports_pdf_input: undefined },
+  "gpt-4o-mini-tts": { litellm_provider: "openai", supports_pdf_input: false },
+});
 let directory: string;
 let fixtures: string;
 
@@ -24,6 +40,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await model.server.stop(true);
+  await prices.server.stop(true);
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -33,12 +50,16 @@ let runs = 0;
  * `bun run eval` from `cwd` (default the repository root), as from a person's shell: `CI`,
  * `INIT_CWD` and `npm_config_local_prefix` are removed from the inherited environment (an outer
  * `bun run test` sets the last, and Bun 1.4.2 keeps an inherited one instead of the caller's
- * directory). `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank and `HEX_EVAL_RESULTS` a fresh temp folder
- * unless `env` sets them.
+ * directory). `HEX_CONFIG` and `HEX_EVAL_FIXTURES` blank, `HEX_EVAL_RESULTS` a fresh temp folder
+ * and `HEX_EVAL_PRICES_URL` the loopback price data unless `env` sets them.
  */
 async function evalCommand(
   env: Record<string, string>,
-  { openai = model, cwd = repoRoot }: { openai?: FakeOpenAI; cwd?: string } = {},
+  {
+    openai = model,
+    cwd = repoRoot,
+    priceData = prices,
+  }: { openai?: FakeOpenAI; cwd?: string; priceData?: FakePrices } = {},
 ) {
   const { CI: _, INIT_CWD: __, npm_config_local_prefix: ___, ...inherited } = process.env;
   const results = join(directory, `results-${++runs}`);
@@ -49,6 +70,7 @@ async function evalCommand(
       HEX_CONFIG: "",
       HEX_EVAL_FIXTURES: "",
       HEX_EVAL_RESULTS: results,
+      HEX_EVAL_PRICES_URL: priceData.url,
       OPENAI_BASE_URL: openai.baseUrl,
       OPENAI_API_KEY: "sk-hex-eval-walkthrough-0123456789",
       ...env,
@@ -87,26 +109,118 @@ describe("bun run eval", () => {
   test("evaluates the fixture folder, prints the figures and writes both reports", async () => {
     const before = await snapshot(fixtures);
     const requests = model.requests.length;
+    const fetches = prices.fetches;
     const { stdout, stderr, code, results } = await evalCommand({ HEX_EVAL_FIXTURES: fixtures });
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     const { folder, report } = await onlyReport(results);
-    expect(stdout).toBe(
+    const latency = /latency median \d+ ms, max \d+ ms/g;
+    expect(stdout.match(latency)).toHaveLength(1);
+    expect(stdout.replace(latency, "latency median <n> ms, max <n> ms")).toBe(
       [
         `hex eval: openai/gpt-5.1-codex-mini on ${fixtures}`,
+        `  Price data: ${prices.url}`,
         "  Document detection: precision 14/14 (100.0 %), recall 14/14 (100.0 %)",
-        "  Document date: exact 2/14 (14.3 %), month 2/14 (14.3 %); not sent 0, failed 0",
+        "  Document date:",
+        "  openai/gpt-5.1-codex-mini: exact 2/14 (14.3 %), month 2/14 (14.3 %); not sent 0, failed 0; cost $0.000042; latency median <n> ms, max <n> ms",
         `  Reports: ${join(folder, "report.md")}`,
         `           ${join(folder, "report.json")}`,
         "",
       ].join("\n"),
     );
     expect(model.requests.length - requests).toBe(14);
+    expect(prices.fetches - fetches).toBe(1);
     expect(model.requests.at(-1)!.model).toBe("gpt-5.1-codex-mini");
-    expect(report).toMatchObject({ fixtures, model: "openai/gpt-5.1-codex-mini" });
-    expect(await readFile(join(folder, "report.md"), "utf8")).toContain(
-      "| Rechnung-RE-2026-1042.pdf | 2026-11-02 | 2026-11-02 | yes | yes |",
+    expect(folder).toEndWith("_openai-gpt-5.1-codex-mini");
+    expect(report).toMatchObject({ fixtures, prices: { url: prices.url, error: null } });
+    expect(report.models[0]).toMatchObject({
+      model: "openai/gpt-5.1-codex-mini",
+      pdfInput: true,
+      tokens: { input: 14, output: 14 },
+      cost: { status: "priced", usd: expect.closeTo(14 * 3e-6, 12) },
+    });
+    const markdown = await readFile(join(folder, "report.md"), "utf8");
+    expect(markdown).toContain(
+      "| openai/gpt-5.1-codex-mini | 2/14 (14.3 %) | 2/14 (14.3 %) | 0 | $0.000042 | $0.000003 |",
+    );
+    expect(markdown).toMatch(
+      /\| Rechnung-RE-2026-1042\.pdf \| 2026-11-02 \| 2026-11-02 \| yes \| yes \| \d+ ms \| 1 in \(0 cached\), 1 out \(0 reasoning\) \| \$0\.000003 \|/,
     );
     expect(await snapshot(fixtures)).toEqual(before);
+  });
+
+  test("compares the models HEX_CONFIG lists: one line each, price data fetched once", async () => {
+    const config = join(directory, "matrix.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        eval: { models: ["openai/gpt-5.4-mini", "openai/gpt-4o-mini-tts", "openai/gpt-5.4-nano"] },
+      }),
+    );
+    const requests = model.requests.length;
+    const fetches = prices.fetches;
+    const { stdout, stderr, code, results } = await evalCommand({
+      HEX_CONFIG: config,
+      HEX_EVAL_FIXTURES: fixtures,
+    });
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+    expect(prices.fetches - fetches).toBe(1);
+    // 14 calls per included model; none for the model without PDF input.
+    const asked = model.requests.slice(requests).map(({ model: id }) => id);
+    expect(asked).toEqual([...Array(14).fill("gpt-5.4-mini"), ...Array(14).fill("gpt-5.4-nano")]);
+    const lines = stdout.split("\n");
+    expect(lines[0]).toBe(`hex eval: 3 models on ${fixtures}`);
+    expect(lines.filter((line) => line.startsWith("  openai/"))).toEqual([
+      expect.stringMatching(
+        /^ {2}openai\/gpt-5\.4-mini: exact 2\/14 \(14\.3 %\), .*; cost \$0\.000042; latency median \d+ ms, max \d+ ms$/,
+      ),
+      expect.stringMatching(
+        /^ {2}openai\/gpt-5\.4-nano: exact 2\/14 \(14\.3 %\), .*; cost \$0\.000042; latency/,
+      ),
+      "  openai/gpt-4o-mini-tts: excluded, no PDF input (LiteLLM entry gpt-4o-mini-tts: supports_pdf_input false)",
+    ]);
+    const { folder, report } = await onlyReport(results);
+    expect(folder).toEndWith("_matrix");
+    expect(report.models.map(({ model: id, pdfInput }) => [id, pdfInput])).toEqual([
+      ["openai/gpt-5.4-mini", true],
+      ["openai/gpt-5.4-nano", null],
+    ]);
+    const markdown = await readFile(join(folder, "report.md"), "utf8");
+    const table = markdown.slice(
+      markdown.indexOf("## Models"),
+      markdown.indexOf("## Document detection"),
+    );
+    expect(table).toContain(
+      "| openai/gpt-5.4-mini | 2/14 (14.3 %) | 2/14 (14.3 %) | 0 | $0.000042 |",
+    );
+    expect(table).toMatch(/\| openai\/gpt-5\.4-nano \| .* \| PDF input unknown \|/);
+    expect(table).toContain("- openai/gpt-4o-mini-tts: no PDF input");
+    expect(markdown).toContain("## Document dates by openai/gpt-5.4-nano");
+  });
+
+  test("without price data the run goes on, every model unpriced", async () => {
+    const down = fakePrices("unavailable", 503);
+    try {
+      const { stdout, code, results } = await evalCommand(
+        { HEX_EVAL_FIXTURES: fixtures },
+        { priceData: down },
+      );
+      expect(code).toBe(0);
+      expect(down.fetches).toBe(1);
+      expect(stdout).toContain(
+        `  Price data: ${down.url} unavailable (HTTP 503); every model unpriced\n`,
+      );
+      expect(stdout).toContain("; unpriced (price data unavailable: HTTP 503); latency median");
+      const { folder, report } = await onlyReport(results);
+      expect(report.models[0]!.cost).toEqual({
+        status: "unpriced",
+        reason: "price data unavailable: HTTP 503",
+      });
+      expect(await readFile(join(folder, "report.md"), "utf8")).toContain(
+        "| 2/14 (14.3 %) | 2/14 (14.3 %) | 0 | unpriced | unpriced |",
+      );
+    } finally {
+      await down.server.stop(true);
+    }
   });
 
   test("uses the committed synthetic set without HEX_EVAL_FIXTURES", async () => {
@@ -183,8 +297,8 @@ describe("bun run eval", () => {
       expect(code).toBe(1);
       expect(stderr).toBe("hex eval: 1 model call(s) failed; see the report\n");
       const { folder, report } = await onlyReport(results);
-      expect(report.extraction.failed).toBe(1);
-      expect(report.intakes[0]!.documents[0]).toMatchObject({
+      expect(report.models[0]!.extraction.failed).toBe(1);
+      expect(report.models[0]!.intakes[0]!.documents[0]).toMatchObject({
         fileName: "Rechnung-RE-2026-1042.pdf",
         status: "failed",
         exact: false,
