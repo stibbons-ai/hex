@@ -1,25 +1,26 @@
-# Only sources and manifests reach the build; never keys, databases, Intakes or local state.
-# Adapted from stibbons-ai/iconograph's .dockerignore (MIT).
+# Only sources and manifests reach the build; never keys, databases, Intakes or local state, at
+# any depth. Adapted from stibbons-ai/iconograph's .dockerignore (MIT).
 **/node_modules
-.data
-.mastra
-dist
-coverage
-eval-results
+**/.data
+**/.mastra
+**/dist
+**/coverage
+**/eval-results
 .git
 .github
-.devenv*
-.direnv
-.env
-.env.*
-.envrc
+**/.devenv*
+**/.direnv
+**/.env
+**/.env.*
+**/.envrc
 .work
-*.db
-*.db-shm
-*.db-wal
-*.duckdb
-*.eml
-*.EML
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.duckdb
+**/*.duckdb.wal
+**/*.eml
+**/*.EML
 **/fixtures
 crates
 docs
