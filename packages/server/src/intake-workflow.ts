@@ -324,10 +324,10 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
     inputSchema: toMastraSchema(Dated),
     outputSchema: toMastraSchema(Filed),
     execute: ({ inputData: { documents, failure }, getInitData }) => {
+      if (failure !== undefined) return Schema.decodeUnknownPromise(Filed)({ failure });
       const intake = getInitData<Intake>();
       const messageId = messageIdOf(intake);
       const received = calendarDateIn(new Date(intake.receivedAt), FILING_TIME_ZONE);
-      if (failure !== undefined) return Schema.decodeUnknownPromise(Filed)({ failure });
       return run(
         Filed,
         Effect.gen(function* () {

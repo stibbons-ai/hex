@@ -199,8 +199,11 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
           [id],
           "reading",
         ).pipe(
-          Effect.flatMap(({ rows }) => decodeForwardingRows(rows)),
-          Effect.mapError(ledgerError(`unreadable Forwardings for ${id}`)),
+          Effect.flatMap(({ rows }) =>
+            decodeForwardingRows(rows).pipe(
+              Effect.mapError(ledgerError(`unreadable Forwardings for ${id}`)),
+            ),
+          ),
           Effect.map((rows) =>
             rows.map((row) => ({ target: row.target, forwardedAt: row.forwarded_at })),
           ),
@@ -211,8 +214,11 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
           [id],
           "reading",
         ).pipe(
-          Effect.flatMap(({ rows }) => decodeFilingRows(rows)),
-          Effect.mapError(ledgerError(`unreadable Filings for ${id}`)),
+          Effect.flatMap(({ rows }) =>
+            decodeFilingRows(rows).pipe(
+              Effect.mapError(ledgerError(`unreadable Filings for ${id}`)),
+            ),
+          ),
           Effect.map((rows) =>
             rows.map((row) => ({
               index: row.document_index,
