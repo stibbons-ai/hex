@@ -207,9 +207,11 @@ const FILE_STEP_ID = "file-documents";
  * branch as `sent-unrecorded`: running the Intake again sends it again. The run fails, naming each
  * failed branch, when any failed; the Intake is recorded as processed only when all succeeded.
  * Only a ledger that can't be read, or an unexpected defect, ends the run before every branch was
- * attempted (before anything is sent, when it happens in the Forwarding step). A failed model call
- * fails the Filing branch before any of its Documents is filed. An Intake without Documents
- * forwards nothing and is recorded with no Filings. Every ledger call takes the Intake's
+ * attempted. An unreadable ledger ends it before anything is sent; a defect may come after earlier
+ * targets were sent to, and the failed run's {@link IntakeRunError} then lists no Forwardings
+ * (the ledger has those that were recorded). A failed model call fails the Filing branch before
+ * any of its Documents is filed. An Intake without Documents forwards nothing and is recorded with
+ * no Filings. Every ledger call takes the Intake's
  * Message-ID as given (the ledger normalises it). Each step decodes its own output.
  */
 export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWorkflowOptions) {

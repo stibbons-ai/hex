@@ -274,14 +274,17 @@ The workflow, in order:
 
 **Branches and retries.** Forwarding to each target and Filing (steps 4 and 5) are branches:
 every run attempts each of them, even when another failed, unless the ledger can't be read or an
-unexpected defect occurs (then the run fails at once; in the Forwarding step, before anything is
-sent). When any branch
+unexpected defect occurs; then the run fails at once. An unreadable ledger fails it before
+anything is sent; a defect can come after earlier targets were sent to, and the failed run's
+output then doesn't list them (the ledger has them, so a re-run skips them). When any branch
 failed, the run fails, naming each failed branch, and the Intake is not recorded as processed.
 Running the Intake again (`bun run intake` on the same `.eml`, or `workflows.start` with the
 same Intake) repeats only the branches the ledger has no record of: a target recorded as having
 the Intake is not sent it again, and a Document recorded as filed is neither read by the model
 again nor filed again. A branch done but not recorded (the ledger failing right after) is done
-again: a send as described in step 3, a Filing as a second copy `name (1).pdf`.
+again: a send as described in step 3, a Filing as a second copy `name (1).pdf`. Running the same
+Intake twice at the same time is unsupported and may duplicate Forwardings and Filings; #9
+serialises runs.
 
 | Setting                        | Meaning                                                                                                                                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -320,8 +323,9 @@ bare (`local@domain`, no display name, one per target). A disabled target sends 
 records nothing; with no target enabled (or no `forwarding` section) Forwarding is off and no
 SMTP setting is needed. Plaintext SMTP (`HEX_SMTP_SECURITY=plain`) is refused unless the host is
 a loopback IP address, an IPv4 `127.x.x.x` or `::1`, so the credentials never cross a network
-unencrypted. Names, `localhost` included, are refused: the SMTP client resolves a name through
-DNS, not `/etc/hosts`, so it could reach another machine; use `127.0.0.1`. The SMTP Mailer
+unencrypted. Names, `localhost` included, are refused: the SMTP client resolves a name first
+through DNS, before `/etc/hosts`, so it could reach another machine; use `127.0.0.1`. The SMTP
+Mailer
 itself refuses it too, without connecting. The SMTP settings are
 read as Effect `Config` from the environment: the login (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) is
 declared in `secretspec.toml`, so the development shell exports it like the model keys; set

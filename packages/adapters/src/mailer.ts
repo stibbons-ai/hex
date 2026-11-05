@@ -41,14 +41,14 @@ export class Mailer extends Context.Service<
 /**
  * How the connection is secured: `tls` is implicit TLS (port 465), `starttls` requires the
  * STARTTLS upgrade before anything else (never AUTH in plaintext), `plain` never encrypts and is
- * only allowed for a mail server on the same machine ({@link isLoopbackHost}).
+ * only allowed for a host that is a loopback IP address ({@link isLoopbackHost}).
  */
 export type SmtpSecurity = "tls" | "starttls" | "plain";
 
 /**
  * Whether `host` is a loopback IP address: IPv4 in 127.0.0.0/8 or `::1`. Names never count, not
- * even `localhost`: nodemailer resolves a name through DNS, not `/etc/hosts`, so it could reach
- * another machine.
+ * even `localhost`: nodemailer resolves a name first through DNS, before `/etc/hosts`, so it could
+ * reach another machine.
  */
 export function isLoopbackHost(host: string): boolean {
   return (isIPv4(host) && host.startsWith("127.")) || (isIPv6(host) && host === "::1");
@@ -67,8 +67,8 @@ export interface SmtpSettings {
  * The Mailer on an SMTP server: one connection per mail, secured as `security` says, logging in
  * as `user`. Attachments are only ever the bytes given; file and URL access are off. Timeouts
  * keep a dead server from holding a run: 30 s to connect and for the greeting, 60 s of silence.
- * `plain` for a host other than this machine sends nothing: every send fails without connecting,
- * so the credentials never cross a network unencrypted.
+ * `plain` for a host that isn't a loopback IP address sends nothing: every send fails without
+ * connecting, so the credentials never cross a network unencrypted.
  */
 export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
   const { host, port, security } = settings;

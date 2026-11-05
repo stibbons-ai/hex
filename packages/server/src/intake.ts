@@ -51,8 +51,8 @@ function describe(
 }
 
 /**
- * What a failed run did nonetheless: this run's Filings and the targets that have the Documents.
- * Each failed branch is left to the error, which names it.
+ * What a failed run did nonetheless: this run's Filings and the targets recorded as having the
+ * Documents. Each failed branch is left to the error, which names it.
  */
 function describeFailedRun(
   messageId: string,
