@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadChatConfig } from "../src/config";
+import { loadChatConfig, loadIntakeConfig } from "../src/config";
 import { BOT_ACCOUNT, BOT_ACI, DANIEL as DANIEL_ACI } from "./fake-signal-cli";
 
 const signalEnv = { SIGNAL_ACCOUNT: BOT_ACCOUNT, SIGNAL_CLI_URL: "http://127.0.0.1:8080" };
@@ -245,5 +245,43 @@ describe("loadChatConfig", () => {
         "anything-goes",
       ]);
     });
+  });
+});
+
+describe("loadIntakeConfig", () => {
+  test("without a config file the Category is ER", async () => {
+    expect(await loadIntakeConfig(undefined)).toEqual({ category: "ER" });
+  });
+
+  test.each([
+    ["no intake section", valid],
+    ["no category", { ...valid, intake: {} }],
+    ["category ER", { ...valid, intake: { category: "ER" } }],
+  ])("%s files under ER", async (_case, content) => {
+    expect(await loadIntakeConfig(await configFile(content))).toEqual({ category: "ER" });
+  });
+
+  test("reads the intake section without the chat secrets", async () => {
+    // Slack tokens are missing from the environment; only the chat config would need them.
+    const path = await configFile({ ...valid, intake: { category: "ER" } });
+    expect(await loadIntakeConfig(path)).toEqual({ category: "ER" });
+  });
+
+  test.each([
+    ["another Category", { category: "AR" }, '["intake"]["category"]'],
+    ["a lowercase er", { category: "er" }, '["intake"]["category"]'],
+    ["an unknown intake key", { category: "ER", folder: "x" }, '["intake"]["folder"]'],
+  ])("%s fails, naming the file and the key", async (_case, intake, at) => {
+    const path = await configFile({ ...valid, intake });
+    const loading = loadIntakeConfig(path);
+    await expect(loading).rejects.toThrow(`hex config ${path}: invalid config`);
+    await expect(loadIntakeConfig(path)).rejects.toThrow(`at ${at}`);
+  });
+
+  test("a missing file fails, naming it", async () => {
+    const path = join(directory, "missing.json");
+    await expect(loadIntakeConfig(path)).rejects.toThrow(
+      `hex config ${path}: cannot read the file`,
+    );
   });
 });

@@ -5,8 +5,11 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@hex/domain": "workspace:*",
+    "@libsql/client": "catalog:",
     "@mastra/core": "catalog:",
     "@mastra/libsql": "catalog:",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "postal-mime": "catalog:"
   }
 }
