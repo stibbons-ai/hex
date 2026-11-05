@@ -3,8 +3,8 @@
  * PDF-input flag of each model, fetched once per eval run. Untrusted input: each field the eval
  * reads is decoded on its own, and a field that doesn't decode is named, never trusted: a
  * malformed price makes its model unpriced, a malformed `supports_pdf_input` leaves PDF input
- * unknown, a malformed `litellm_provider` matches no model. An entry that is no object is left
- * out, never the rest of the file.
+ * unknown, and an entry whose `litellm_provider` is malformed is named but neither prices nor
+ * excludes the model. An entry that is no object is left out, never the rest of the file.
  */
 import type { TokenUsage } from "@hex/adapters";
 import { messageOf } from "@hex/adapters";

@@ -117,7 +117,10 @@ export const ModelReport = Schema.Struct({
   model: Schema.String,
   /** LiteLLM's `supports_pdf_input` for the model: `true`, or `null` (unknown). */
   pdfInput: Schema.NullOr(Schema.Literal(true)),
-  /** The LiteLLM entry the model is priced and checked by; `null` when none matched. */
+  /**
+   * The LiteLLM entry the model is priced and checked by, or, when its `litellm_provider` is
+   * malformed, the entry it may be; `null` when none matched.
+   */
   priceEntry: Schema.NullOr(Schema.String),
   extraction: Schema.Struct({
     /**

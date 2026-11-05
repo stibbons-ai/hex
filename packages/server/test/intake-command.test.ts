@@ -342,7 +342,7 @@ describe("bun run intake", () => {
     }
   });
 
-  test("without a config file the default model, anthropic/claude-haiku-5-5, reads the Documents", async () => {
+  test("without a config file the Documents go to the default model, anthropic/claude-haiku-5-5", async () => {
     const dataDirectory = join(directory, "no-config");
     const outbox = join(directory, "no-config-outbox");
     const eml = await writeMail("no-config.eml", {
