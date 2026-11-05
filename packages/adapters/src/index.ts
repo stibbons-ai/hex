@@ -1,7 +1,6 @@
 export {
   DateExtractionError,
   DateExtractor,
-  DocumentDateAnswer,
   dateExtractorLayer,
   documentDateOf,
 } from "./date-extractor";
