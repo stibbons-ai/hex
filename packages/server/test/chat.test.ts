@@ -8,7 +8,8 @@ import { LibSQLStore } from "@mastra/libsql";
 import { type ChatOptions, type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_ERROR_REPLY, CHAT_RESOURCE_ID, createChatAgent } from "../src/chat";
 import { FakeChatAdapter } from "./fake-chat-adapter";
-import { REPLY, mockModel, toolCallingModel } from "./mock-model";
+import { REPLY, heldModel, mockModel, numberedModel, toolCallingModel } from "./mock-model";
+import { stored } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 const DANIEL = "U0DANIEL";
@@ -346,6 +347,123 @@ describe("chat channels (fake adapter)", () => {
         channels: { slack: { adapter, allowlist: [DANIEL] } },
       }),
     ).toThrow('chat channel "slack": its adapter reports platform "fake"');
+  });
+});
+
+describe("chat conversation queue", () => {
+  test("a message sent while its conversation's run is busy is answered and saved, even when stop() follows its reply at once", async () => {
+    const FIRST = "first words";
+    const SECOND = "second words";
+    const { model, prompts, busy, release } = heldModel();
+    const adapter = new FakeChatAdapter();
+    const options = serverOptions(chatOptions(adapter, model));
+    const server = await startServer(options);
+    const stopped = Promise.withResolvers<void>();
+    const post = adapter.postMessage.bind(adapter);
+    adapter.postMessage = async (threadId, message) => {
+      const posted = await post(threadId, message);
+      // The reply posted by the model call that saw SECOND: stop 0 ms after it.
+      if (prompts.at(-1)?.includes(SECOND)) stopped.resolve(server.stop());
+      return posted;
+    };
+    const first = adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: FIRST });
+    await within(busy, "the first run to start");
+    await adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: SECOND });
+    release();
+    await first;
+    await within(stopped.promise, "stop() after the answer to the second message");
+
+    const { threads, messages } = await stored(options.databasePath);
+    expect(threads).toHaveLength(1);
+    const exchange = messages.map((message) => [message.role, JSON.stringify(message.content)]);
+    expect(exchange).toEqual([
+      ["signal", expect.stringContaining(FIRST)],
+      ["assistant", expect.stringContaining("reply 1")],
+      ["signal", expect.stringContaining(SECOND)],
+      ["assistant", expect.stringContaining("reply 2")],
+    ]);
+  });
+
+  test("two first messages back to back in a new conversation share one memory thread", async () => {
+    const { server, adapter } = await start(numberedModel());
+    await Promise.all([
+      adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "one" }),
+      adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "two" }),
+    ]);
+    await adapter.posts(2);
+
+    const threads = (await allThreads(server)).filter(
+      (thread) => thread.metadata?.["channel_externalThreadId"] === "fake:dm-daniel",
+    );
+    expect(threads).toHaveLength(1);
+    const messages = await allMessages(server);
+    expect(messages.map((message) => message.threadId)).toEqual(messages.map(() => threads[0]?.id));
+    const said = JSON.stringify(messages.filter((message) => message.role === "signal"));
+    expect(said).toContain("one");
+    expect(said).toContain("two");
+  });
+
+  test("messages queued behind a busy run are one turn per sender: a stranger's is ignored and stays out of Daniel's", async () => {
+    const { model, prompts, busy, release } = heldModel();
+    const { server, adapter } = await start(model);
+    const conversation = "general";
+    const warnings = await logged(server, "warn", async () => {
+      const first = adapter.receive({
+        conversation,
+        sender: DANIEL,
+        text: "@hex hi",
+        mention: true,
+      });
+      await within(busy, "the first run to start");
+      // Queued while the run is busy: a batch that mixes both senders.
+      await adapter.receive({ conversation, sender: STRANGER, text: "stranger one" });
+      await adapter.receive({ conversation, sender: STRANGER, text: "stranger two" });
+      await adapter.receive({ conversation, sender: DANIEL, text: "daniel two" });
+      await adapter.receive({ conversation, sender: DANIEL, text: "daniel three" });
+      release();
+      await first;
+    });
+    // Both stranger messages reached the guard as one turn: one line, without their text.
+    expect(warnings).toEqual([[IGNORED, { platform: "fake", sender: STRANGER }]]);
+    expect(JSON.stringify(warnings)).not.toContain("stranger");
+    // Daniel's two queued messages were one turn too, answered once, with neither stranger message.
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("daniel two");
+    expect(prompts[1]).toContain("daniel three");
+    expect(prompts[1]).not.toContain("stranger");
+    expect(adapter.posted.map(({ text }) => text)).toEqual(["reply 1", "reply 2"]);
+    expect(JSON.stringify(await allMessages(server))).not.toContain("stranger");
+  });
+
+  test("a message still queued when stop() begins is dropped and logged, not answered", async () => {
+    const { model, busy, release } = heldModel();
+    const adapter = new FakeChatAdapter();
+    const options = serverOptions(chatOptions(adapter, model));
+    const server = await startServer(options);
+    const disconnect = adapter.disconnect.bind(adapter);
+    adapter.disconnect = async () => {
+      await disconnect();
+      // Only now, with stop() under way, may the busy run go on.
+      release();
+    };
+    const first = adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
+    await within(busy, "the first run to start");
+    await adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "late words" });
+    let warnings: unknown[][] = [];
+    const errors = await logged(server, "error", async () => {
+      warnings = await logged(server, "warn", async () => {
+        await server.stop();
+        await first;
+      });
+    });
+    expect(warnings).toEqual([
+      ["hex: ignored message while hex is shutting down", { platform: "fake", sender: DANIEL }],
+    ]);
+    expect(errors).toEqual([]);
+    expect(adapter.posted.map(({ text }) => text)).toEqual(["reply 1"]);
+    expect(JSON.stringify((await stored(options.databasePath)).messages)).not.toContain(
+      "late words",
+    );
   });
 });
 
