@@ -26,10 +26,10 @@ describe("planFiling", () => {
     expect(plan).toEqual({ folder, date: fellBack ? received : documentDate!, fellBack });
   });
 
-  test("an invalid fallback date is a RangeError", () => {
-    expect(() => planFiling(undefined, { year: 2026, month: 2, day: 30 }, "ER")).toThrow(
-      RangeError,
-    );
+  test("an invalid fallback date is a RangeError, even when the Document date is valid", () => {
+    const invalid = { year: 2026, month: 2, day: 30 };
+    expect(() => planFiling(undefined, invalid, "ER")).toThrow(RangeError);
+    expect(() => planFiling({ year: 2026, month: 3, day: 1 }, invalid, "ER")).toThrow(RangeError);
   });
 });
 

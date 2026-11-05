@@ -122,8 +122,23 @@ describe("Outbox", () => {
     const { file } = freshOutbox();
     const exit = await file("../escaped", "x.pdf", "x");
     expect(Exit.isFailure(exit)).toBe(true);
+    expect(String(exit)).toContain("not a safe file name in the Outbox");
     expect(Object.keys(await contents(directory)).filter((path) => /x\.pdf/.test(path))).toEqual(
       [],
     );
+  });
+
+  test("a write that fails after the .partial was created leaves no .partial behind", async () => {
+    const root = join(directory, `outbox-${outboxes++}`);
+    // Content that can't be written: the failure comes after the .partial file was opened.
+    const unwritable = { length: 1 } as unknown as Uint8Array;
+    const exit = await Effect.runPromiseExit(
+      Outbox.use((outbox) => outbox.file("2026-11/ER", "scan.pdf", unwritable)).pipe(
+        Effect.provide(outboxLayer(root)),
+      ),
+    );
+    expect(Exit.isFailure(exit)).toBe(true);
+    expect(String(exit)).toContain('filing "scan.pdf" into 2026-11/ER failed');
+    expect(await readdir(join(root, "2026-11/ER"))).toEqual([]);
   });
 });

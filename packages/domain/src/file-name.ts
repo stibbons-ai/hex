@@ -9,6 +9,7 @@ export const MAX_FILE_NAME_BYTES = 200;
 /** An extension longer than this (in bytes) is not kept whole when a name is shortened. */
 const MAX_EXTENSION_BYTES = 32;
 
+/** UTF-8 length; the domain has no `TextEncoder` (its `lib` is ES2022 only, no DOM or Node). */
 function utf8Bytes(text: string): number {
   let bytes = 0;
   for (const character of text) {
@@ -43,9 +44,13 @@ function truncateBytes(name: string, maxBytes: number): string {
   return kept;
 }
 
+/** Control and format characters (NUL, line breaks, bidi overrides, zero-width characters). */
+const INVISIBLE = /[\p{Cc}\p{Cf}]/u;
+const EVERY_INVISIBLE = new RegExp(INVISIBLE, "gu");
+
 /**
- * Leading dots and whitespace (hidden files, `.`, `..`) and trailing `.partial` suffixes (which
- * the sync skips) stripped, until neither is left.
+ * Leading dots and whitespace (hidden files, `.`, `..`), trailing `.partial` suffixes (which the
+ * sync skips) and surrounding whitespace stripped, until none is left.
  */
 function stripReserved(name: string): string {
   let current = name;
@@ -61,12 +66,30 @@ function stripReserved(name: string): string {
 }
 
 /**
- * Makes a sender's attachment file name safe to file: a single path segment that is never empty,
- * `.` or `..`, never hidden, never ends in `.partial`, holds no control or format characters
- * (NUL, bidi overrides), and is at most {@link MAX_FILE_NAME_BYTES} UTF-8 bytes with its
- * extension kept. Otherwise the original name is kept as it is (NFC-normalised); only its last
- * `/`- or `\`-separated segment counts. A name with nothing left becomes
- * `document-<position>.<extension from the MIME type>`.
+ * Whether `name` is safe to file as it is: one non-empty path segment (no `/`, `\` or NUL), not
+ * hidden (no leading dot, so never `.` or `..`), no surrounding whitespace, no control or format
+ * characters, not ending in `.partial`, at most {@link MAX_FILE_NAME_BYTES} UTF-8 bytes. Every
+ * {@link safeFileName} result is.
+ */
+export function isSafeFileName(name: string): boolean {
+  return (
+    name !== "" &&
+    !/[/\\]/.test(name) &&
+    !INVISIBLE.test(name) &&
+    stripReserved(name) === name &&
+    utf8Bytes(name) <= MAX_FILE_NAME_BYTES
+  );
+}
+
+/**
+ * Makes a sender's attachment file name safe to file (see {@link isSafeFileName}), otherwise
+ * keeping it (NFC-normalised): only its last `/`- or `\`-separated segment counts; every control
+ * and format character (`\p{Cc}`, `\p{Cf}`: NUL, line breaks, bidi overrides, zero-width
+ * characters) is removed; leading dots, surrounding whitespace and trailing `.partial` suffixes
+ * are stripped; a name over {@link MAX_FILE_NAME_BYTES} UTF-8 bytes is cut, keeping its
+ * extension unless that is over 32 bytes. A name with nothing left becomes
+ * `document-<position>.<extension from the MIME type>`, where `position` is the attachment's
+ * 1-based position among all of the Intake's attachments.
  */
 export function safeFileName(
   original: string | undefined,
@@ -74,7 +97,7 @@ export function safeFileName(
   position: number,
 ): string {
   const lastSegment = (original ?? "").normalize("NFC").split(/[/\\]/).pop() ?? "";
-  const cleaned = stripReserved(lastSegment.replace(/[\p{Cc}\p{Cf}]/gu, ""));
+  const cleaned = stripReserved(lastSegment.replace(EVERY_INVISIBLE, ""));
   let [stem, extension] = splitExtension(cleaned);
   if (utf8Bytes(extension) > MAX_EXTENSION_BYTES) [stem, extension] = [cleaned, ""];
   const bounded = stripReserved(

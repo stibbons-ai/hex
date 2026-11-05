@@ -5,6 +5,8 @@ export interface Part {
   /** `Content-Disposition` value without the file name, e.g. `attachment` or `inline`. */
   disposition?: string;
   fileName?: string;
+  /** RFC 2231 `filename*`, already percent-encoded UTF-8, e.g. `..%2Fx.pdf`. */
+  encodedFileName?: string;
   /** Without angle brackets. */
   contentId?: string;
   content: Uint8Array;
@@ -60,7 +62,9 @@ export function buildEml({
     html,
   ];
   for (const part of parts) {
-    const name = part.fileName === undefined ? "" : `; filename="${part.fileName}"`;
+    const name =
+      (part.fileName === undefined ? "" : `; filename="${part.fileName}"`) +
+      (part.encodedFileName === undefined ? "" : `; filename*=UTF-8''${part.encodedFileName}`);
     lines.push(
       `--${boundary}`,
       `Content-Type: ${part.contentType}`,

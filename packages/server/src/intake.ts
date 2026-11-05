@@ -2,7 +2,7 @@
 // `.eml` against the configured data directory and Outbox, and prints what it did.
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { readEml } from "@hex/adapters";
+import { messageOf, readEml } from "@hex/adapters";
 import { Effect } from "effect";
 import { loadIntakeConfig } from "./config";
 import { runIntake } from "./intake-workflow";
@@ -26,7 +26,7 @@ async function main(argv: readonly string[]): Promise<string> {
   if (argv.length !== 1 || !argv[0]) throw new Error("usage: bun run intake <path.eml>");
   const source = resolve(argv[0]);
   const bytes = await readFile(source).catch((error: unknown) => {
-    throw new Error(`cannot read ${source} (${(error as Error).message})`, { cause: error });
+    throw new Error(`cannot read ${source} (${messageOf(error)})`, { cause: error });
   });
   const intake = await Effect.runPromise(readEml(bytes, source));
   const configPath = process.env.HEX_CONFIG;
@@ -38,6 +38,6 @@ async function main(argv: readonly string[]): Promise<string> {
 try {
   console.log(await main(process.argv.slice(2)));
 } catch (error) {
-  console.error(`hex intake: ${(error as Error).message}`);
+  console.error(`hex intake: ${messageOf(error)}`);
   process.exitCode = 1;
 }

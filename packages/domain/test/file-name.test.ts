@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_FILE_NAME_BYTES, freeFileName, safeFileName } from "../src";
+import { MAX_FILE_NAME_BYTES, freeFileName, isSafeFileName, safeFileName } from "../src";
 
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
 
@@ -71,5 +71,42 @@ describe("safeFileName", () => {
     const original = `${"a".repeat(MAX_FILE_NAME_BYTES - 8)}.partial${"b".repeat(100)}`;
     const name = safeFileName(original, "application/pdf", 1);
     expect(name).toBe("a".repeat(MAX_FILE_NAME_BYTES - 8));
+  });
+});
+
+describe("isSafeFileName", () => {
+  test.each([
+    ["Rechnung (1).pdf", true],
+    ["document-3.pdf", true],
+    ["a".repeat(MAX_FILE_NAME_BYTES), true],
+    ["a".repeat(MAX_FILE_NAME_BYTES + 1), false],
+    ["", false],
+    [".", false],
+    ["..", false],
+    [".hidden.pdf", false],
+    ["a/b.pdf", false],
+    ["a\\b.pdf", false],
+    ["x\0.pdf", false],
+    ["x\u202E.pdf", false],
+    [" x.pdf", false],
+    ["x.pdf ", false],
+    ["x.pdf.partial", false],
+    ["x.pdf.PARTIAL", false],
+  ])("%j → %p", (name, expected) => {
+    expect(isSafeFileName(name)).toBe(expected);
+  });
+
+  test.each([
+    "../../x.pdf",
+    "..",
+    "",
+    "\u0000\u0007",
+    "x.pdf.partial",
+    " .hidden ",
+    `${"ä".repeat(300)}.pdf`,
+    `x.${"y".repeat(300)}`,
+    `${"a".repeat(MAX_FILE_NAME_BYTES - 8)}.partial${"b".repeat(100)}`,
+  ])("every safeFileName result is safe: %j", (original) => {
+    expect(isSafeFileName(safeFileName(original, "application/pdf", 1))).toBe(true);
   });
 });

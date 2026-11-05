@@ -158,4 +158,26 @@ describe("bun run intake", () => {
     expect(run.stderr).toStartWith(`hex intake: hex config ${config}: invalid config`);
     expect(await readdir(dataDirectory).catch(() => [])).toEqual([]);
   });
+
+  test("a Filing that fails mid-run exits 1 naming the Outbox failure, and records nothing", async () => {
+    const dataDirectory = join(directory, "outbox-is-a-file");
+    const outbox = join(directory, "not-a-folder");
+    await writeFile(outbox, "a regular file where the Outbox should be");
+    const eml = await writeMail("blocked.eml", {
+      messageId: "blocked@shop.example",
+      received: RECEIVED,
+      parts: [pdf("a.pdf")],
+    });
+    const run = await intake([eml], { HEX_DATA_DIR: dataDirectory, HEX_OUTBOX_DIR: outbox });
+    expect(run).toMatchObject({ code: 1, stdout: "" });
+    expect(run.stderr).toStartWith(
+      'hex intake: the Intake workflow did not finish: filing "a.pdf" into 2026-11/ER failed',
+    );
+    const entry = await Effect.runPromise(
+      IntakeLedger.use((ledger) => ledger.find("blocked@shop.example")).pipe(
+        Effect.provide(intakeLedgerLayer(join(dataDirectory, "mastra.db"))),
+      ),
+    );
+    expect(entry).toBeUndefined();
+  });
 });

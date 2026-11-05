@@ -1,16 +1,14 @@
 import { isDocument, normalizeContentId } from "./document";
 import type { AttachmentFacts } from "./document";
 import { safeFileName } from "./file-name";
+import { unbracket } from "./ids";
 
 /**
  * The key an Intake is processed once by: its Message-ID trimmed, without surrounding angle
  * brackets. Empty when the Message-ID is blank.
  */
 export function normalizeMessageId(messageId: string): string {
-  return messageId
-    .trim()
-    .replace(/^<(.*)>$/s, "$1")
-    .trim();
+  return unbracket(messageId);
 }
 
 /** One attachment as an Intake carries it. */
@@ -29,13 +27,14 @@ export interface DetectedDocument {
 
 /**
  * The Documents among an Intake's attachments, in order, each with the safe name to file it
- * under; `cidReferences` are the Content-IDs the HTML body references (`contentIdReferences`).
+ * under; `cidReferences` are the Content-IDs the HTML body references (`contentIdReferences`),
+ * with or without angle brackets, any case.
  */
 export function detectDocuments(
   attachments: readonly IntakeAttachmentFacts[],
   cidReferences: Iterable<string>,
 ): DetectedDocument[] {
-  const references = new Set(cidReferences);
+  const references = new Set(Array.from(cidReferences, normalizeContentId));
   return attachments.flatMap((attachment, index) => {
     const referencedByCid =
       attachment.contentId !== undefined &&

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Exit } from "effect";
+import { TestClock } from "effect/testing";
 import { IntakeLedger, intakeLedgerLayer } from "../src";
 
 let directory: string;
@@ -38,18 +39,21 @@ describe("IntakeLedger", () => {
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("<a@x>")))).toBe(
       undefined,
     );
+    const filings = [{ index: 1, path: "2026-11/ER/a.pdf" }];
     success(
       await withLedger(databasePath, (ledger) =>
-        ledger.record("<a@x>", { documentCount: 2, filings: [{ path: "2026-11/ER/a.pdf" }] }),
+        TestClock.setTime(Date.UTC(2026, 10, 5, 12, 30)).pipe(
+          Effect.andThen(ledger.record("<a@x>", { documentCount: 1, filings })),
+          Effect.provide(TestClock.layer()),
+        ),
       ),
     );
-    const entry = success(await withLedger(databasePath, (ledger) => ledger.find("<a@x>")));
-    expect(entry).toMatchObject({
+    expect(success(await withLedger(databasePath, (ledger) => ledger.find("<a@x>")))).toEqual({
       messageId: "a@x",
-      documentCount: 2,
-      filings: [{ path: "2026-11/ER/a.pdf" }],
+      processedAt: "2026-11-05T12:30:00.000Z",
+      documentCount: 1,
+      filings,
     });
-    expect(Number.isNaN(Date.parse(entry!.processedAt))).toBe(false);
   });
 
   test("the Message-ID is normalised: brackets and whitespace don't make a new Intake", async () => {
@@ -69,7 +73,10 @@ describe("IntakeLedger", () => {
     const databasePath = freshDatabase();
     success(
       await withLedger(databasePath, (ledger) =>
-        ledger.record("c@x", { documentCount: 1, filings: [{ path: "2026-11/ER/c.pdf" }] }),
+        ledger.record("c@x", {
+          documentCount: 1,
+          filings: [{ index: 0, path: "2026-11/ER/c.pdf" }],
+        }),
       ),
     );
     const again = await withLedger(databasePath, (ledger) =>

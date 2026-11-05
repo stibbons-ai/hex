@@ -27,6 +27,11 @@ describe("detectDocuments", () => {
       { index: 1, fileName: "scan.png" },
       { index: 2, fileName: "photo.png" },
     ]);
+    // References as an API caller may send them: bracketed, any case.
+    expect(detectDocuments(attachments, ["<LOGO@shop>"])).toEqual([
+      { index: 1, fileName: "scan.png" },
+      { index: 2, fileName: "photo.png" },
+    ]);
   });
 
   test("names come from the sender, made safe; a nameless one by its position", () => {

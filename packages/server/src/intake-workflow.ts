@@ -9,7 +9,13 @@ import {
   toMastraSchema,
 } from "@hex/adapters";
 import type { LedgerError } from "@hex/adapters";
-import { FILING_TIME_ZONE, calendarDateIn, detectDocuments, planFiling } from "@hex/domain";
+import {
+  FILING_TIME_ZONE,
+  calendarDateIn,
+  detectDocuments,
+  normalizeMessageId,
+  planFiling,
+} from "@hex/domain";
 import type { Category } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
@@ -100,8 +106,13 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     outputSchema: toMastraSchema(Documents),
     execute: ({ getInitData }) => {
       const { attachments, cidReferences } = getInitData<Intake>();
+      // The size detection goes by is the content's, never a claimed one.
+      const facts = attachments.map(({ content, ...attachment }) => ({
+        ...attachment,
+        size: Buffer.byteLength(content, "base64"),
+      }));
       return Schema.decodeUnknownPromise(Documents)({
-        documents: detectDocuments(attachments, cidReferences),
+        documents: detectDocuments(facts, cidReferences),
       });
     },
   });
@@ -119,9 +130,11 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
         Filed,
         Outbox.use((outbox) =>
           Effect.forEach(inputData.documents, ({ index, fileName }) =>
-            outbox.file(folder, fileName, Buffer.from(attachments[index]!.content, "base64")),
+            outbox
+              .file(folder, fileName, Buffer.from(attachments[index]!.content, "base64"))
+              .pipe(Effect.map((path) => ({ index, path }))),
           ),
-        ).pipe(Effect.map((paths) => ({ filings: paths.map((path) => ({ path })) }))),
+        ).pipe(Effect.map((filings) => ({ filings }))),
       );
     },
   });
@@ -131,7 +144,7 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
     inputSchema: toMastraSchema(Filed),
     outputSchema: toMastraSchema(IntakeResult),
     execute: ({ inputData, getInitData }) => {
-      const { messageId } = getInitData<Intake>();
+      const messageId = normalizeMessageId(getInitData<Intake>().messageId);
       const { filings } = inputData;
       return run(
         IntakeResult,
@@ -158,7 +171,7 @@ export function createIntakeWorkflow({ runtime, category }: IntakeWorkflowOption
 /**
  * Runs the Intake workflow once, in process, on `intake` against the data at `paths`, with its
  * own Mastra (persisting the run in `mastra.db`) and runtime, closed again afterwards. Throws when
- * the run does not succeed.
+ * the run does not succeed. A failure to close is logged and never replaces the run's outcome.
  */
 export async function runIntake(
   intake: Intake,
@@ -181,6 +194,12 @@ export async function runIntake(
     }
     return result.result;
   } finally {
-    await closeInOrder([() => mastra.shutdown(), () => storage.close(), () => runtime.dispose()]);
+    await closeInOrder([
+      () => mastra.shutdown(),
+      () => storage.close(),
+      () => runtime.dispose(),
+    ]).catch((error: unknown) => {
+      console.error("hex: closing after the Intake run failed", error);
+    });
   }
 }

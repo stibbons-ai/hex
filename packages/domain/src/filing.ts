@@ -67,19 +67,19 @@ export interface FilingPlan {
 
 /**
  * Plans the Filing of one Document: by its Document date when that is a valid
- * {@link CalendarDate}, else by `fallbackDate` (the Intake's received date). An invalid fallback
- * is a RangeError, since there is nothing left to fall back to.
+ * {@link CalendarDate}, else by `fallbackDate` (the Intake's received date). An invalid
+ * `fallbackDate` is a RangeError, whether or not it is needed.
  */
 export function planFiling(
   documentDate: CalendarDate | undefined,
   fallbackDate: CalendarDate,
   category: Category,
 ): FilingPlan {
-  const fellBack = documentDate === undefined || !isCalendarDate(documentDate);
-  const date = fellBack ? fallbackDate : documentDate;
-  if (!isCalendarDate(date)) {
+  if (!isCalendarDate(fallbackDate)) {
     throw new RangeError(`invalid fallback date ${JSON.stringify(fallbackDate)}`);
   }
+  const fellBack = documentDate === undefined || !isCalendarDate(documentDate);
+  const date = fellBack ? fallbackDate : documentDate;
   const month = String(date.month).padStart(2, "0");
   return { folder: `${date.year}-${month}/${category}`, date, fellBack };
 }

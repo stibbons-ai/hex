@@ -1,10 +1,15 @@
 import { normalizeMessageId } from "@hex/domain";
 import { createClient } from "@libsql/client";
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
+import { messageOf } from "./errors";
 import { localDatabaseUrl } from "./storage";
 
-/** One Document's Filing: where it landed, relative to the Outbox. */
-export const Filing = Schema.Struct({ path: Schema.String });
+/** One Document's Filing: which attachment it was and where it landed, relative to the Outbox. */
+export const Filing = Schema.Struct({
+  /** The Document's index among the Intake's attachments. */
+  index: Schema.Int,
+  path: Schema.String,
+});
 export type Filing = typeof Filing.Type;
 
 /** What the ledger knows about one processed Intake. */
@@ -70,7 +75,7 @@ function key(messageId: string): Effect.Effect<string, LedgerError> {
 }
 
 const ledgerError = (what: string) => (cause: unknown) =>
-  new LedgerError({ message: `Intake ledger: ${what}: ${(cause as Error).message}`, cause });
+  new LedgerError({ message: `Intake ledger: ${what}: ${messageOf(cause)}`, cause });
 
 /**
  * The Intake ledger in the LibSQL file at `databasePath` (Mastra's `mastra.db`; its directory is

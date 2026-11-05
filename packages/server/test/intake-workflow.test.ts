@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IntakeLedger, intakeLedgerLayer, readEml } from "@hex/adapters";
+import type { Intake } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
 import { Effect } from "effect";
 import { runIntake } from "../src/intake-workflow";
@@ -75,9 +76,9 @@ describe("Intake workflow", () => {
       ],
     });
     const filings = [
-      { path: "2026-11/ER/Rechnung 2026-10.pdf" },
-      { path: "2026-11/ER/Beleg.jpg" },
-      { path: "2026-11/ER/Rechnung 2026-10 (1).pdf" },
+      { index: 0, path: "2026-11/ER/Rechnung 2026-10.pdf" },
+      { index: 1, path: "2026-11/ER/Beleg.jpg" },
+      { index: 2, path: "2026-11/ER/Rechnung 2026-10 (1).pdf" },
     ];
     expect(result).toEqual({
       messageId: "happy@shop.example",
@@ -133,11 +134,12 @@ describe("Intake workflow", () => {
           fileName: "brief.docx",
           content: big,
         },
-        // Apple Mail: a scan sent inline, not referenced by the body.
+        // Apple Mail: a scan sent inline with a Content-ID the body doesn't reference.
         {
           contentType: "application/pdf",
           disposition: "inline",
           fileName: "Scan.pdf",
+          contentId: "scan-part@apple.example",
           content: bytes(9),
         },
       ],
@@ -145,7 +147,7 @@ describe("Intake workflow", () => {
     expect(result).toEqual({
       messageId: "mixed@shop.example",
       status: "processed",
-      filings: [{ path: "2026-11/ER/Scan.pdf" }],
+      filings: [{ index: 6, path: "2026-11/ER/Scan.pdf" }],
     });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Scan.pdf"]);
   });
@@ -185,7 +187,7 @@ describe("Intake workflow", () => {
     expect(second).toEqual({
       messageId: "twice@shop.example",
       status: "already-processed",
-      filings: [{ path: "2026-11/ER/Rechnung.pdf" }],
+      filings: [{ index: 0, path: "2026-11/ER/Rechnung.pdf" }],
     });
     expect(first).toMatchObject({ status: "processed" });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Rechnung.pdf"]);
@@ -205,6 +207,12 @@ describe("Intake workflow", () => {
         pdf("x.pdf.partial"),
         pdf("..\\..\\win.pdf"),
         pdf("."),
+        {
+          contentType: "application/pdf",
+          disposition: "attachment",
+          encodedFileName: "..%2F..%2Fencoded.pdf",
+          content: bytes(5),
+        },
       ],
     });
     const paths = [
@@ -214,15 +222,65 @@ describe("Intake workflow", () => {
       "2026-11/ER/x (1).pdf",
       "2026-11/ER/win.pdf",
       "2026-11/ER/document-6.pdf",
+      "2026-11/ER/encoded.pdf",
     ];
     expect(result).toEqual({
       messageId: "hostile@shop.example",
       status: "processed",
-      filings: paths.map((path) => ({ path })),
+      filings: paths.map((path, index) => ({ index, path })),
     });
     expect(Object.keys(await hex.outbox()).sort()).toEqual([...paths].sort());
     // Nothing next to the Outbox either: only the database (and its WAL files) and the Outbox.
     const siblings = await readdir(join(hex.outboxDirectory, ".."));
     expect(siblings.filter((name) => !name.startsWith("mastra.db"))).toEqual(["outbox"]);
   });
+
+  describe("an Intake sent as workflow input (workflows.start) is held to the reader's rules", () => {
+    const base = {
+      messageId: "<api@shop.example>",
+      receivedAt: "2026-11-02T07:15:00.000Z",
+      cidReferences: [],
+      attachments: [] as Intake["attachments"],
+    };
+
+    test("an impossible receivedAt is rejected before anything is filed", async () => {
+      const hex = freshHex();
+      const intake = { ...base, receivedAt: "2026-02-30T10:00:00.000Z", attachments: [apiPdf] };
+      await expect(runIntake(intake, { paths: hex, category: "ER" })).rejects.toThrow(
+        "a real UTC instant",
+      );
+      expect(await hex.outbox()).toEqual({});
+    });
+
+    test("an image's size is its content's, whatever size the caller claims", async () => {
+      const hex = freshHex();
+      const tinyImage = {
+        mimeType: "image/png",
+        fileName: "pixel.png",
+        content: Buffer.from("x".repeat(50)).toString("base64"),
+        size: 20_000,
+      };
+      const result = await runIntake({ ...base, attachments: [tinyImage] } as unknown as Intake, {
+        paths: hex,
+        category: "ER",
+      });
+      expect(result.filings).toEqual([]);
+      expect(await hex.outbox()).toEqual({});
+    });
+
+    test("the result names the normalised Message-ID, on both runs", async () => {
+      const hex = freshHex();
+      const intake = { ...base, attachments: [apiPdf] };
+      const first = await runIntake(intake, { paths: hex, category: "ER" });
+      const second = await runIntake(intake, { paths: hex, category: "ER" });
+      expect([first.messageId, second.messageId]).toEqual(["api@shop.example", "api@shop.example"]);
+      expect(second.status).toBe("already-processed");
+    });
+  });
 });
+
+const apiPdf = {
+  mimeType: "application/pdf",
+  fileName: "api.pdf",
+  content: Buffer.from("%PDF").toString("base64"),
+};

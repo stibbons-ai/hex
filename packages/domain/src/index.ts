@@ -7,7 +7,7 @@ export {
   normalizeContentId,
 } from "./document";
 export type { AttachmentFacts } from "./document";
-export { MAX_FILE_NAME_BYTES, freeFileName, safeFileName } from "./file-name";
+export { MAX_FILE_NAME_BYTES, freeFileName, isSafeFileName, safeFileName } from "./file-name";
 export {
   CATEGORIES,
   DEFAULT_CATEGORY,

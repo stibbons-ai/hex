@@ -28,20 +28,32 @@ if (!chat) {
   );
 }
 const { category } = await loadIntakeConfig(configPath);
+const port = parsePort(process.env.HEX_PORT);
 const paths = dataPaths(process.env);
-// Built on the first Intake workflow run; disposed after the server stopped.
+// Built now, so a ledger that can't be opened fails startup instead of every later Intake run
+// (the runtime keeps a failed build); disposed after the server stopped.
 const intakeRuntime = createIntakeRuntime(paths);
+await intakeRuntime.context().catch(async (error: unknown) => {
+  await intakeRuntime.dispose();
+  throw error;
+});
 const starting = startServer({
   databasePath: paths.databasePath,
-  port: parsePort(process.env.HEX_PORT),
+  port,
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category }),
   },
   ...(chat ? { chat } : {}),
-}).then((server) => ({
-  ...server,
-  stop: () => closeInOrder([() => server.stop(), () => intakeRuntime.dispose()]),
-}));
+}).then(
+  (server) => ({
+    ...server,
+    stop: () => closeInOrder([() => server.stop(), () => intakeRuntime.dispose()]),
+  }),
+  async (error: unknown) => {
+    await intakeRuntime.dispose();
+    throw error;
+  },
+);
 // Registered before startup finishes, so a signal during startup still shuts down cleanly. A
 // signal that arrives while the modules are still loading gets the default (kill).
 const shutdown = shutdownOnce(starting, {

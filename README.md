@@ -69,10 +69,11 @@ bun run intake path/to/mail.eml
 
 runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
 Documents it filed (paths relative to the Outbox), that the Intake has no Documents, or that it
-was already processed. It exits with code 1 and a message on a file it can't read, a mail without
-Message-ID or without a usable date, a config it can't use, or a failed run. Run it from the
-repository root. The same workflow is registered with the server as `intake`
-(`workflows.start` with an Intake as `inputData`).
+was already processed. It exits with code 1 and a message on a file it can't read or that is no
+mail, an Intake without a Message-ID or without a usable received date, a config it can't use,
+or a failed run. Run it from the repository root. The same workflow is registered with the server
+as `intake` (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger
+at startup and fails to start when it can't.
 
 The workflow, in order:
 
@@ -81,35 +82,49 @@ The workflow, in order:
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
    `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
    TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
-   logos, whatever their Content-Disposition), images under 10 KiB (`MIN_IMAGE_DOCUMENT_BYTES`:
-   tracking pixels, icons; a PDF is never dropped for size), SVG, and every other type (`.ics`,
-   text, office files, attached mails). An unreferenced `inline` image or PDF counts, since Apple
-   Mail sends scans that way.
+   logos, whatever their Content-Disposition), images under 10 KiB of content
+   (`MIN_IMAGE_DOCUMENT_BYTES`: tracking pixels, icons; a PDF is never dropped for size), SVG,
+   and every other type (`.ics`, text, office files). An attached mail (`message/rfc822`) is
+   one non-Document attachment, never unpacked: the Documents inside it are not filed. An
+   unreferenced `inline` image or PDF counts, since Apple Mail sends scans that way.
 3. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by the Intake's received date
-   (the topmost `Received:` header, else `Date:`) as a calendar date in `Europe/Berlin`, under
-   the sender's file name, made safe: only its last path segment, without control and bidi
-   characters, leading dots or a `.partial` ending, at most 200 UTF-8 bytes with the extension
-   kept; nothing left gives `document-<n>.<ext>`. A name already taken becomes `name (1).pdf`,
-   `name (2).pdf`, …; nothing is ever overwritten. Each file is written as `<name>.<id>.partial`
-   in the target folder (hex-sync skips `*.partial`), flushed, then hard-linked into place, which
-   fails instead of replacing a file that appeared meanwhile.
+   as a calendar date in `Europe/Berlin`. The received date is the date after the last `;` of the
+   topmost `Received:` header, else the `Date:` header, each only when it is an RFC 5322
+   date-time with a zone, a year from 1000 to 9999 and a day that exists. The file name is the
+   sender's, made safe: only its last `/` or `\` segment; every control and format character
+   (`\p{Cc}`, `\p{Cf}`: NUL, line breaks, bidi overrides, zero-width characters) removed;
+   leading dots, surrounding whitespace and trailing `.partial` suffixes stripped; at most 200
+   UTF-8 bytes, keeping the extension unless it is over 32 bytes. Nothing left gives
+   `document-<n>.<ext>`, `<n>` being the 1-based position among all of the Intake's attachments.
+   A name already taken becomes `name (1).pdf`, `name (2).pdf`, …; nothing is ever overwritten.
+   Each file is written as `<name>.<id>.partial` in the target folder (hex-sync skips
+   `*.partial`), flushed, then hard-linked into place, which fails instead of replacing a file
+   that appeared meanwhile; the folder is flushed after the link. A failed write removes its
+   `.partial`; a crash or kill mid-write can leave one behind.
 4. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
    Documents.
 
-| Setting                        | Meaning                                                           |
-| ------------------------------ | ----------------------------------------------------------------- |
-| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                |
-| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                           |
-| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file |
+| Setting                        | Meaning                                                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------------------- |
+| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                        |
+| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                   |
+| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category` |
+
+The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
+required:
 
 ```json
-{ "chat": { "model": "…", "channels": {} }, "intake": { "category": "ER" } }
+{
+  "chat": { "model": "anthropic/claude-opus-5-5", "channels": {} },
+  "intake": { "category": "ER" }
+}
 ```
 
 The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use: one row per
 Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
-`{ "path": … }` per Document). An Intake whose run failed halfway is not recorded, so running it
-again files the Documents that already landed a second time, as `name (1).pdf`.
+`{ "index": …, "path": … }` per Document: its position among the attachments, 0-based, and where
+it landed). An Intake whose run failed halfway is not recorded, so running it again files the
+Documents that already landed a second time, as `name (1).pdf`.
 
 ## Chat (Slack, Signal)
 
