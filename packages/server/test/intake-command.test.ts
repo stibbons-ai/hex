@@ -33,8 +33,21 @@ const model = fakeOpenAI((request) =>
     : '{"year":null,"month":null,"day":null}',
 );
 
+/**
+ * The model every run here names: an `openai/` one, so it reaches the fake OpenAI (the default
+ * model is Anthropic's).
+ */
+const MODEL = "openai/gpt-5.4-mini";
+/** A config file naming only {@link MODEL}: what a run without its own config uses. */
+let modelConfig: string;
+
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "hex-intake-command-"));
+  modelConfig = join(directory, "model.json");
+  await writeFile(
+    modelConfig,
+    JSON.stringify({ chat: { model: "openai/gpt-5", channels: {} }, intake: { model: MODEL } }),
+  );
 });
 
 afterAll(async () => {
@@ -45,15 +58,17 @@ afterAll(async () => {
 const API_KEY = "sk-hex-walkthrough-0123456789";
 
 /**
- * `bun run intake <args>` from the repository root; HEX_* come only from `env`, and the model is
- * the fake OpenAI `openai`.
+ * `bun run intake <args>` from the repository root; HEX_* come only from `env`, the config file
+ * is {@link modelConfig} unless `env` names one, and the model is the fake OpenAI `openai`. The
+ * other providers' keys and Mastra's provider refresh are blanked, so a developer's real keys
+ * never reach a test; a test that needs one sets it in `env`.
  */
 async function intake(args: string[], env: Record<string, string>, openai: FakeOpenAI = model) {
   const child = Bun.spawn(["bun", "run", "--silent", "intake", ...args], {
     cwd: repository,
     env: {
       ...process.env,
-      HEX_CONFIG: "",
+      HEX_CONFIG: modelConfig,
       HEX_DATA_DIR: "",
       HEX_OUTBOX_DIR: "",
       HEX_SMTP_HOST: "",
@@ -63,6 +78,11 @@ async function intake(args: string[], env: Record<string, string>, openai: FakeO
       HEX_SMTP_PASSWORD: "",
       OPENAI_BASE_URL: openai.baseUrl,
       OPENAI_API_KEY: API_KEY,
+      ANTHROPIC_API_KEY: "",
+      GOOGLE_GENERATIVE_AI_API_KEY: "",
+      GEMINI_API_KEY: "",
+      MASTRA_AUTO_REFRESH_PROVIDERS: "",
+      MASTRA_DEV: "",
       ...env,
     },
     stdout: "pipe",
@@ -107,7 +127,7 @@ describe("bun run intake", () => {
       config,
       JSON.stringify({
         chat: { model: "openai/gpt-5", channels: {} },
-        intake: { category: "ER" },
+        intake: { category: "ER", model: MODEL },
       }),
     );
     const eml = await writeMail("invoice.eml", {
@@ -138,12 +158,9 @@ describe("bun run intake", () => {
         "",
       ].join("\n"),
     );
-    // Each Document went to the default model natively, as a PDF file part with its bytes.
+    // Each Document went to the configured model natively, as a PDF file part with its bytes.
     const requests = model.requests.slice(asked);
-    expect(requests.map(({ model: id }) => id)).toEqual([
-      "gpt-5.1-codex-mini",
-      "gpt-5.1-codex-mini",
-    ]);
+    expect(requests.map(({ model: id }) => id)).toEqual(["gpt-5.4-mini", "gpt-5.4-mini"]);
     expect(requests.map(inputFiles)).toEqual([[dataUrl(DATED_PDF)], [dataUrl(UNDATED_PDF)]]);
 
     expect(await readFile(join(outbox, "2026-09/ER/Rechnung 4711.pdf"))).toEqual(
@@ -325,6 +342,32 @@ describe("bun run intake", () => {
     }
   });
 
+  test("without a config file the Documents go to the default model, anthropic/claude-haiku-5-5", async () => {
+    const dataDirectory = join(directory, "no-config");
+    const outbox = join(directory, "no-config-outbox");
+    const eml = await writeMail("no-config.eml", {
+      messageId: "no-config@shop.example",
+      received: RECEIVED,
+      parts: [pdf("a.pdf", DATED_PDF)],
+    });
+    const asked = model.requests.length;
+    // No Anthropic key (the helper blanks it) and a base URL nobody listens on: the call fails
+    // before anything leaves the machine, naming the model it was for.
+    const run = await intake([eml], {
+      HEX_CONFIG: "",
+      HEX_DATA_DIR: dataDirectory,
+      HEX_OUTBOX_DIR: outbox,
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9/v1",
+    });
+    expect(run).toMatchObject({ code: 1, stdout: "" });
+    expect(run.stderr).toContain(
+      'hex intake: the Intake workflow did not finish: filing: reading the Document date of "a.pdf" with anthropic/claude-haiku-5-5 failed',
+    );
+    expect(model.requests.length).toBe(asked);
+    expect(await readdir(outbox).catch(() => [])).toEqual([]);
+    expect(await ledgerEntry(dataDirectory, "no-config@shop.example")).toBeUndefined();
+  });
+
   test("a Filing that fails mid-run exits 1 naming the Outbox failure, and records nothing", async () => {
     const dataDirectory = join(directory, "outbox-is-a-file");
     const outbox = join(directory, "not-a-folder");
@@ -358,6 +401,7 @@ describe("bun run intake", () => {
         path,
         JSON.stringify({
           chat: { model: "openai/gpt-5", channels: {} },
+          intake: { model: MODEL },
           forwarding: {
             from: "hex@example.com",
             targets: {

@@ -1,15 +1,19 @@
 /**
- * Seam test of the eval (issue #12): `runEval` on fixture folders with a scripted DateExtractor,
- * asserting the computed figures and the reports it writes.
+ * Seam test of the eval (issues #12, #13): `runEval` on fixture folders with scripted
+ * DateExtractors per model and a scripted price table, asserting the computed figures and the
+ * reports it writes.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DateExtractionError, DateExtractor } from "@hex/adapters";
+import type { TokenUsage } from "@hex/adapters";
 import { Effect, Layer, Schema } from "effect";
-import { Report, loadExpectedSet, runEval } from "../src/index.ts";
-import type { ExpectedSet } from "../src/index.ts";
+import { Report, decodePriceData, loadExpectedSet, runEval } from "../src/index.ts";
+import type { EvalOptions, ExpectedSet } from "../src/index.ts";
+import { modelReport } from "../src/report.ts";
+import type { IntakeRow } from "../src/report.ts";
 import { syntheticFolder } from "../src/synthetic/generate.ts";
 
 let directory: string;
@@ -31,8 +35,22 @@ function answer(date: string | null) {
   return { year, month, day };
 }
 
-/** A DateExtractor answering per file name: `script` if it has the name, else the label. */
-function scriptedExtractor(script: Readonly<Record<string, unknown>> = {}) {
+const USAGE: TokenUsage = { inputTokens: 1000, outputTokens: 50 };
+
+/** What a scripted call answers: the model's answer and the usage it reports, or a failure. */
+interface Reply {
+  answer: unknown;
+  usage?: TokenUsage | undefined;
+}
+
+/**
+ * A DateExtractor answering per file name: `script` if it has the name (a bare answer reports
+ * {@link USAGE}), else the label with {@link USAGE}; each call takes `delayMs` first.
+ */
+function scriptedExtractor(
+  script: Readonly<Record<string, unknown>> = {},
+  { delayMs = 0 }: { delayMs?: number } = {},
+) {
   const truth = new Map(
     labels.intakes.flatMap(({ documents }) =>
       documents.map(({ fileName, documentDate }) => [fileName, answer(documentDate)] as const),
@@ -42,12 +60,72 @@ function scriptedExtractor(script: Readonly<Record<string, unknown>> = {}) {
   const layer = Layer.succeed(DateExtractor, {
     extract: ({ fileName }) => {
       calls.push(fileName);
-      const reply = Object.hasOwn(script, fileName) ? script[fileName] : truth.get(fileName);
-      return reply instanceof DateExtractionError ? Effect.fail(reply) : Effect.succeed(reply);
+      const scripted = Object.hasOwn(script, fileName) ? script[fileName] : truth.get(fileName);
+      const result =
+        scripted instanceof DateExtractionError
+          ? Effect.fail(scripted)
+          : Effect.succeed(
+              scripted instanceof Object && "answer" in scripted
+                ? { usage: undefined, ...(scripted as Reply) }
+                : { answer: scripted, usage: USAGE },
+            );
+      return delayMs === 0 ? result : Effect.andThen(Effect.sleep(delayMs), result);
     },
   });
   return { layer, calls };
 }
+
+/** The scripted price table's URL; nothing listens there. */
+const PRICES_URL = "http://127.0.0.1:9/prices.json";
+
+/** LiteLLM's entries for the scripted models, an odd one and a malformed one among them. */
+const priceTable = {
+  sample_spec: { litellm_provider: "one of https://docs.litellm.ai/docs/providers", mode: "chat" },
+  "gpt-5-mini": {
+    litellm_provider: "openai",
+    input_cost_per_token: 2.5e-7,
+    output_cost_per_token: 2e-6,
+    supports_pdf_input: true,
+    max_tokens: 128000,
+  },
+  "claude-haiku-4-5": {
+    litellm_provider: "anthropic",
+    input_cost_per_token: 1e-6,
+    output_cost_per_token: 5e-6,
+    cache_read_input_token_cost: 1e-7,
+    supports_pdf_input: true,
+  },
+  // The Gemini API's entry, and Vertex AI's under the bare name at another price.
+  "gemini/gemini-2.5-flash": {
+    litellm_provider: "gemini",
+    input_cost_per_token: 3e-7,
+    output_cost_per_token: 2.5e-6,
+  },
+  "gemini-2.5-flash": {
+    litellm_provider: "vertex_ai-language-models",
+    input_cost_per_token: 9,
+    output_cost_per_token: 9,
+    supports_pdf_input: false,
+  },
+  // Excluded although a price is malformed: each field counts on its own.
+  "gpt-text-only": {
+    litellm_provider: "openai",
+    input_cost_per_token: 1e-7,
+    output_cost_per_token: "cheap",
+    supports_pdf_input: false,
+  },
+};
+const prices = decodePriceData(PRICES_URL, priceTable);
+
+/** No price data, as after a failed fetch. */
+const noPrices = { url: PRICES_URL, status: "unavailable", error: "HTTP 503" } as const;
+
+/** `runEval` with one scripted model, `scripted/model`, on `layer`, no price data by default. */
+const runOne = (
+  layer: Layer.Layer<DateExtractor>,
+  options: Pick<EvalOptions, "fixtures" | "resultsRoot"> & Partial<EvalOptions>,
+) =>
+  runEval({ models: ["scripted/model"], dateExtractor: () => layer, prices: noPrices, ...options });
 
 let folders = 0;
 /** A fresh, not yet created path under the temp directory. */
@@ -83,28 +161,26 @@ describe("runEval on the synthetic set", () => {
       "scan-0001.pdf": new DateExtractionError({ message: "provider down" }),
     });
     const resultsRoot = newFolder("results");
-    const { report, folder } = await runEval({
-      fixtures: syntheticFolder,
-      model: "scripted/model",
-      dateExtractor: layer,
-      resultsRoot,
-    });
+    const { report, folder } = await runOne(layer, { fixtures: syntheticFolder, resultsRoot });
 
     expect(calls).toHaveLength(14);
-    expect(report.detection).toEqual({
+    const { intakes: detectionRows, ...detection } = report.detection;
+    expect(detection).toEqual({
       truePositives: 14,
       falsePositives: 0,
       falseNegatives: 0,
       precision: { count: 14, total: 14, value: 1 },
       recall: { count: 14, total: 14, value: 1 },
     });
-    expect(report.extraction).toEqual({
+    const [model] = report.models;
+    expect(report.models).toHaveLength(1);
+    expect(model!.extraction).toEqual({
       exact: { count: 8, total: 14, value: 8 / 14 },
       month: { count: 9, total: 14, value: 9 / 14 },
       notSent: 0,
       failed: 1,
     });
-    const row = (file: string) => report.intakes.find((intake) => intake.file === file)!;
+    const row = (file: string) => model!.intakes.find((intake) => intake.file === file)!;
     expect(row("01-de-pdf-invoice.eml").documents).toEqual([
       {
         fileName: "Rechnung-RE-2026-1042.pdf",
@@ -113,6 +189,9 @@ describe("runEval on the synthetic set", () => {
         predicted: "2026-11-03",
         exact: false,
         month: true,
+        latencyMs: expect.any(Number),
+        tokens: { input: 1000, output: 50, cachedInput: null, reasoning: null },
+        costUsd: null,
       },
     ]);
     expect(row("07-en-scan-pdf.eml").documents).toEqual([
@@ -123,6 +202,7 @@ describe("runEval on the synthetic set", () => {
         error: "provider down",
         exact: false,
         month: false,
+        latencyMs: expect.any(Number),
       },
     ]);
     expect(row("14-de-undated-document.eml").documents[0]).toMatchObject({
@@ -137,12 +217,23 @@ describe("runEval on the synthetic set", () => {
       exact: false,
       month: false,
     });
-    expect(row("08-de-inline-logo.eml").detection).toEqual({
+    expect(detectionRows.find(({ file }) => file === "08-de-inline-logo.eml")).toEqual({
+      file: "08-de-inline-logo.eml",
       truePositives: ["Rechnung-RE-2026-1077.pdf"],
       falsePositives: [],
       falseNegatives: [],
     });
-    expect(report.intakes.map(({ file }) => file)).toEqual(labels.intakes.map(({ file }) => file));
+    const files = labels.intakes.map(({ file }) => file);
+    expect(detectionRows.map(({ file }) => file)).toEqual(files);
+    expect(model!.intakes.map(({ file }) => file)).toEqual(files);
+    // Without price data: unpriced with the reason, and nothing excluded.
+    expect(model).toMatchObject({
+      pdfInput: null,
+      priceEntry: null,
+      cost: { status: "unpriced", reason: "price data unavailable: HTTP 503" },
+    });
+    expect(report.prices).toEqual({ url: PRICES_URL, error: "HTTP 503" });
+    expect(report.excluded).toEqual([]);
 
     expect(await readdir(resultsRoot)).toEqual([folder.slice(resultsRoot.length + 1)]);
     expect(folder.slice(resultsRoot.length + 1)).toMatch(
@@ -154,12 +245,15 @@ describe("runEval on the synthetic set", () => {
     expect(json).toEqual(report);
     const markdown = await readFile(join(folder, "report.md"), "utf8");
     for (const line of [
+      `- Price data: ${PRICES_URL} (unavailable: HTTP 503)`,
+      "| scripted/model | 8/14 (57.1 %) | 9/14 (64.3 %) | 1 | unpriced | unpriced |",
+      "- scripted/model: unpriced, price data unavailable: HTTP 503",
       "| Precision | 14/14 (100.0 %) |",
       "| Recall | 14/14 (100.0 %) |",
       "| Exact (year-month-day) | 8/14 (57.1 %) |",
       "| Month (year-month) | 9/14 (64.3 %) |",
       "| Failed | 1 |",
-      "### 01-de-pdf-invoice.eml",
+      "### 01-de-pdf-invoice.eml (scripted/model)",
       "| Rechnung-RE-2026-1042.pdf | 2026-11-02 | 2026-11-03 | no | yes |",
       "| scan-0001.pdf | 2026-08-07 | error: provider down | no | no |",
       "| Kostenvoranschlag.pdf | none | 2026-06-01 | no | no |",
@@ -172,12 +266,309 @@ describe("runEval on the synthetic set", () => {
   test("never overwrites an earlier run's folder", async () => {
     setSystemTime(new Date("2026-11-05T15:00:00.000Z"));
     const resultsRoot = newFolder("results");
-    const options = { fixtures: syntheticFolder, model: "scripted/model", resultsRoot };
-    const first = await runEval({ ...options, dateExtractor: scriptedExtractor().layer });
-    const second = await runEval({ ...options, dateExtractor: scriptedExtractor().layer });
+    const options = { fixtures: syntheticFolder, resultsRoot };
+    const first = await runOne(scriptedExtractor().layer, options);
+    const second = await runOne(scriptedExtractor().layer, options);
     expect(first.folder).toBe(join(resultsRoot, "2026-11-05T15-00-00-000Z_scripted-model"));
     expect(second.folder).toBe(`${first.folder}-2`);
-    expect(await readdir(resultsRoot)).toHaveLength(2);
+    const matrix = await runEval({
+      ...options,
+      models: ["scripted/a", "scripted/b"],
+      dateExtractor: () => scriptedExtractor().layer,
+      prices: noPrices,
+    });
+    expect(matrix.folder).toBe(join(resultsRoot, "2026-11-05T15-00-00-000Z_matrix"));
+    expect(await readdir(resultsRoot)).toHaveLength(3);
+  });
+});
+
+describe("runEval on a model matrix", () => {
+  test("evaluates each model on the same Documents, prices each call, excludes a model without PDF input", async () => {
+    const mini = scriptedExtractor({}, { delayMs: 5 });
+    const haiku = scriptedExtractor(
+      Object.fromEntries(
+        labels.intakes.flatMap(({ documents }) =>
+          documents.map(({ fileName, documentDate }) => [
+            fileName,
+            {
+              answer: answer(documentDate),
+              usage: {
+                inputTokens: 1200,
+                outputTokens: 80,
+                cachedInputTokens: 1024,
+                reasoningTokens: 64,
+              },
+            },
+          ]),
+        ),
+      ),
+    );
+    const gemini = scriptedExtractor({
+      "PP-3301.pdf": { answer: answer("2026-09-30") }, // answered without reported usage
+      "scan-0001.pdf": new DateExtractionError({ message: "provider down" }),
+    });
+    const unknown = scriptedExtractor({ "Rechnung-RE-2026-1042.pdf": answer(null) });
+    const textOnly = scriptedExtractor();
+    const layers: Record<string, ReturnType<typeof scriptedExtractor>> = {
+      "openai/gpt-5-mini": mini,
+      "anthropic/claude-haiku-4-5": haiku,
+      "google/gemini-2.5-flash": gemini,
+      "openai/gpt-text-only": textOnly,
+      "openai/gpt-unlisted": unknown,
+    };
+    const models = [
+      "openai/gpt-5-mini",
+      "openai/gpt-text-only",
+      "anthropic/claude-haiku-4-5",
+      "google/gemini-2.5-flash",
+      "openai/gpt-unlisted",
+    ] as const;
+    const asked: string[] = [];
+    const { report, folder } = await runEval({
+      fixtures: syntheticFolder,
+      models,
+      dateExtractor: (model) => {
+        asked.push(model);
+        return layers[model]!.layer;
+      },
+      prices,
+      resultsRoot: newFolder("results"),
+    });
+
+    // Excluded before any call; every other model saw the same 14 Documents, one at a time.
+    expect(asked).not.toContain("openai/gpt-text-only");
+    expect(textOnly.calls).toEqual([]);
+    expect(report.excluded).toEqual([
+      {
+        model: "openai/gpt-text-only",
+        reason: "no PDF input (LiteLLM entry gpt-text-only: supports_pdf_input false)",
+      },
+    ]);
+    for (const { calls } of [mini, haiku, gemini, unknown]) expect(calls).toEqual(mini.calls);
+    expect(mini.calls).toHaveLength(14);
+    expect(report.models.map(({ model }) => model)).toEqual([
+      "openai/gpt-5-mini",
+      "anthropic/claude-haiku-4-5",
+      "google/gemini-2.5-flash",
+      "openai/gpt-unlisted",
+    ]);
+    // Detection once per run, not per model.
+    expect(report.detection.truePositives).toBe(14);
+    expect(report.models.every((model) => !("detection" in model))).toBe(true);
+
+    const [miniReport, haikuReport, geminiReport, unknownReport] = report.models;
+    // 1000 input tokens at $0.25/M and 50 output at $2/M per call, 14 calls.
+    expect(miniReport).toMatchObject({
+      pdfInput: true,
+      priceEntry: "gpt-5-mini",
+      extraction: { exact: { count: 14, total: 14 }, failed: 0 },
+      tokens: { input: 14_000, output: 700, cachedInput: null, reasoning: null },
+    });
+    expect(miniReport!.cost).toEqual({ status: "priced", usd: expect.closeTo(14 * 3.5e-4, 12) });
+    expect(miniReport!.costPerDocument).toEqual({
+      status: "priced",
+      usd: expect.closeTo(3.5e-4, 12),
+    });
+    // 176 uncached input tokens at $1/M, 1024 cached at $0.10/M, 80 output (64 reasoning) at $5/M.
+    const haikuCall = 176e-6 + 1024e-7 + 80 * 5e-6;
+    expect(haikuReport).toMatchObject({
+      priceEntry: "claude-haiku-4-5",
+      tokens: { input: 14 * 1200, output: 14 * 80, cachedInput: 14 * 1024, reasoning: 14 * 64 },
+    });
+    expect(haikuReport!.cost).toEqual({
+      status: "priced",
+      usd: expect.closeTo(14 * haikuCall, 12),
+    });
+    const haikuRow = haikuReport!.intakes[0]!.documents[0]!;
+    expect(haikuRow).toMatchObject({ status: "answered", costUsd: expect.closeTo(haikuCall, 12) });
+    // The Gemini API's entry, not Vertex AI's; PDF input unknown there, so it runs. A call
+    // without reported usage leaves the whole model unpriced; a failed call is no answered call.
+    expect(geminiReport).toMatchObject({
+      pdfInput: null,
+      priceEntry: "gemini/gemini-2.5-flash",
+      extraction: { exact: { count: 13, total: 14 }, failed: 1 },
+      cost: { status: "unpriced", reason: "1 answered call(s) reported no token usage" },
+      costPerDocument: { status: "unpriced", reason: "1 answered call(s) reported no token usage" },
+      tokens: { input: 12_000, output: 600 },
+      latency: { calls: 14 },
+    });
+    expect(unknownReport).toMatchObject({
+      pdfInput: null,
+      priceEntry: null,
+      extraction: { exact: { count: 13, total: 14 } },
+      cost: {
+        status: "unpriced",
+        reason:
+          "no LiteLLM entry (openai/gpt-unlisted or gpt-unlisted with litellm_provider openai)",
+      },
+    });
+    // Latency of every call made, failed ones included; the scripted delay shows in it.
+    for (const model of report.models) {
+      for (const row of model.intakes.flatMap(({ documents }) => documents)) {
+        if (row.status !== "not-sent") expect(row.latencyMs).toBeGreaterThanOrEqual(0);
+      }
+      expect(model.latency.calls).toBe(14);
+      expect(model.latency.maxMs).toBeGreaterThanOrEqual(model.latency.medianMs!);
+    }
+    expect(miniReport!.latency.medianMs).toBeGreaterThanOrEqual(4);
+
+    expect(folder).toEndWith("_matrix");
+    expect(
+      Schema.decodeUnknownSync(Report)(
+        JSON.parse(await readFile(join(folder, "report.json"), "utf8")),
+      ),
+    ).toEqual(report);
+    const markdown = await readFile(join(folder, "report.md"), "utf8");
+    const table = markdown.slice(
+      markdown.indexOf("## Models"),
+      markdown.indexOf("## Document detection"),
+    );
+    expect(table).toContain(
+      "| openai/gpt-5-mini | 14/14 (100.0 %) | 14/14 (100.0 %) | 0 | $0.004900 | $0.000350 |",
+    );
+    expect(table).toContain(" | yes |\n");
+    expect(table).toContain(
+      "| anthropic/claude-haiku-4-5 | 14/14 (100.0 %) | 14/14 (100.0 %) | 0 | $0.009498 | $0.000678 |",
+    );
+    expect(table).toContain(
+      "| google/gemini-2.5-flash | 13/14 (92.9 %) | 13/14 (92.9 %) | 1 | unpriced | unpriced |",
+    );
+    expect(table).toMatch(/\| openai\/gpt-unlisted \| .* \| PDF input unknown \|\n/);
+    expect(table).toContain(
+      "- google/gemini-2.5-flash: unpriced, 1 answered call(s) reported no token usage",
+    );
+    expect(table).toContain(
+      "- openai/gpt-text-only: no PDF input (LiteLLM entry gpt-text-only: supports_pdf_input false)",
+    );
+    expect(markdown).toContain("## Document dates by anthropic/claude-haiku-4-5");
+    expect(markdown).toContain("| Tokens | 16800 in (14336 cached), 1120 out (896 reasoning) |");
+    expect(markdown).toMatch(
+      /\| Rechnung-RE-2026-1042\.pdf \| 2026-11-02 \| 2026-11-02 \| yes \| yes \| \d+ ms \| 1200 in \(1024 cached\), 80 out \(64 reasoning\) \| \$0\.000678 \|/,
+    );
+    expect(markdown).toContain("| PP-3301.pdf | 2026-09-30 | 2026-09-30 | yes | yes |");
+    expect(markdown).toMatch(
+      /\| PP-3301\.pdf \| 2026-09-30 \| 2026-09-30 \| yes \| yes \| \d+ ms \| not reported \| unpriced \|/,
+    );
+  });
+
+  test("excludes every model without PDF input: no call, the reports list them", async () => {
+    const { layer, calls } = scriptedExtractor();
+    const { report, folder } = await runEval({
+      fixtures: syntheticFolder,
+      models: ["openai/gpt-text-only"],
+      dateExtractor: () => layer,
+      prices,
+      resultsRoot: newFolder("results"),
+    });
+    expect(calls).toEqual([]);
+    expect(report.models).toEqual([]);
+    expect(report.excluded.map(({ model }) => model)).toEqual(["openai/gpt-text-only"]);
+    expect(await readFile(join(folder, "report.md"), "utf8")).toContain(
+      "- openai/gpt-text-only: no PDF input",
+    );
+  });
+
+  test("a priced model's cost sums its answered calls only; failed and unsent Documents add nothing", async () => {
+    const multiple = label("13-de-multiple-documents.eml");
+    const fixtures = await fixtureFolder([
+      label("01-de-pdf-invoice.eml"),
+      {
+        ...multiple,
+        documents: [
+          ...multiple.documents.filter(({ fileName }) => fileName !== "Kassenbeleg.png"),
+          { fileName: "Hinweise.txt", documentDate: null },
+        ],
+      },
+      label("07-en-scan-pdf.eml"),
+    ]);
+    const usage = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
+    const { layer, calls } = scriptedExtractor({
+      "Rechnung-RE-2026-1042.pdf": { answer: answer("2026-11-02"), usage: usage(1000, 10) },
+      "Rechnung-RE-2026-0612.pdf": { answer: answer("2026-06-12"), usage: usage(2000, 20) },
+      "Gutschrift-GS-2026-0031.pdf": { answer: answer("2026-06-10"), usage: usage(3000, 30) },
+      "scan-0001.pdf": new DateExtractionError({ message: "provider down" }),
+    });
+    const { report, folder } = await runOne(layer, {
+      fixtures,
+      resultsRoot: newFolder("results"),
+      prices,
+      models: ["openai/gpt-5-mini"],
+    });
+    expect(calls).toHaveLength(4);
+    const [model] = report.models;
+    expect(model!.extraction).toMatchObject({ notSent: 1, failed: 1 });
+    // $0.25/M input, $2/M output: 6000 input and 60 output tokens over the three answered calls.
+    const total = 6000 * 2.5e-7 + 60 * 2e-6;
+    expect(model!.cost).toEqual({ status: "priced", usd: expect.closeTo(total, 15) });
+    expect(model!.costPerDocument).toEqual({
+      status: "priced",
+      usd: expect.closeTo(total / 3, 15),
+    });
+    expect(model!.tokens).toEqual({ input: 6000, output: 60, cachedInput: null, reasoning: null });
+    const markdown = await readFile(join(folder, "report.md"), "utf8");
+    expect(markdown).toContain("| 1 | $0.001620 (1 failed call not counted) | $0.000540 |");
+    expect(markdown).toContain("| Total cost | $0.001620 (1 failed call not counted) |");
+  });
+
+  test("calls run one at a time, model after model", async () => {
+    let inFlight = 0;
+    let most = 0;
+    const counting = Layer.succeed(DateExtractor, {
+      extract: () =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            most = Math.max(most, ++inFlight);
+          }),
+          () => Effect.as(Effect.sleep(2), { answer: answer(null), usage: USAGE }),
+          () => Effect.sync(() => void inFlight--),
+        ),
+    });
+    const { report } = await runEval({
+      fixtures: syntheticFolder,
+      models: ["scripted/a", "scripted/b"],
+      dateExtractor: () => counting,
+      prices: noPrices,
+      resultsRoot: newFolder("results"),
+    });
+    expect(report.models.map(({ latency }) => latency.calls)).toEqual([14, 14]);
+    expect(most).toBe(1);
+  });
+});
+
+describe("modelReport's latency figures", () => {
+  /** Rows of answered calls that took `latencies` ms each. */
+  const rows = (latencies: readonly number[]): IntakeRow[] => [
+    {
+      file: "x.eml",
+      documents: latencies.map((latencyMs, index) => ({
+        fileName: `${index}.pdf`,
+        expected: null,
+        exact: true,
+        month: true,
+        status: "answered" as const,
+        predicted: null,
+        latencyMs,
+        tokens: null,
+        costUsd: null,
+      })),
+    },
+  ];
+  const unpriced = {
+    entry: null,
+    pdfInput: null,
+    pricing: { status: "unpriced", reason: "x" },
+  } as const;
+
+  test.each([
+    ["an odd count: the middle one", [5, 1, 9], 5, 9],
+    ["an even count: the mean of the two middle ones", [4, 1, 10, 2], 3, 10],
+    ["one call", [7], 7, 7],
+  ])("%s", (_case, latencies, medianMs, maxMs) => {
+    expect(modelReport("scripted/model", unpriced, rows(latencies)).latency).toEqual({
+      calls: latencies.length,
+      medianMs,
+      maxMs,
+    });
   });
 });
 
@@ -196,40 +587,40 @@ describe("runEval on edited labels", () => {
       label("11-en-zero-documents-ics.eml"),
     ]);
     const { layer, calls } = scriptedExtractor();
-    const { report } = await runEval({
-      fixtures,
-      model: "scripted/model",
-      dateExtractor: layer,
-      resultsRoot: newFolder("results"),
-    });
-    expect(report.detection).toEqual({
+    const { report } = await runOne(layer, { fixtures, resultsRoot: newFolder("results") });
+    const { intakes: rows, ...detection } = report.detection;
+    expect(detection).toEqual({
       truePositives: 2,
       falsePositives: 2,
       falseNegatives: 1,
       precision: { count: 2, total: 4, value: 0.5 },
       recall: { count: 2, total: 3, value: 2 / 3 },
     });
-    expect(report.intakes[0]!.detection).toEqual({
+    expect(rows[0]).toEqual({
+      file: "13-de-multiple-documents.eml",
       truePositives: ["Rechnung-RE-2026-0612.pdf", "Gutschrift-GS-2026-0031.pdf"],
       falsePositives: ["Kassenbeleg.png"],
       falseNegatives: ["Hinweise.txt"],
     });
-    expect(report.intakes[1]!.detection.falsePositives).toEqual(["Rechnung-RE-2026-1077.pdf"]);
+    expect(rows[1]!.falsePositives).toEqual(["Rechnung-RE-2026-1077.pdf"]);
     // The undated .txt is never sent, so "no date" is right for it.
     expect(calls).toEqual(["Rechnung-RE-2026-0612.pdf", "Gutschrift-GS-2026-0031.pdf"]);
-    expect(report.intakes[0]!.documents[2]).toEqual({
+    const [model] = report.models;
+    expect(model!.intakes[0]!.documents[2]).toEqual({
       fileName: "Hinweise.txt",
       expected: null,
       status: "not-sent",
       exact: true,
       month: true,
     });
-    expect(report.extraction).toEqual({
+    expect(model!.extraction).toEqual({
       exact: { count: 3, total: 3, value: 1 },
       month: { count: 3, total: 3, value: 1 },
       notSent: 1,
       failed: 0,
     });
+    // A Document never sent takes no call, so no latency.
+    expect(model!.latency.calls).toBe(2);
   });
 
   test("reports figures without a denominator as not applicable", async () => {
@@ -237,17 +628,23 @@ describe("runEval on edited labels", () => {
       label("11-en-zero-documents-ics.eml"),
       label("12-de-zero-documents-plain.eml"),
     ]);
-    const { report, folder } = await runEval({
+    const { report, folder } = await runOne(scriptedExtractor().layer, {
       fixtures,
-      model: "scripted/model",
-      dateExtractor: scriptedExtractor().layer,
       resultsRoot: newFolder("results"),
+      prices,
+      models: ["openai/gpt-5-mini"],
     });
     const none = { count: 0, total: 0, value: null };
     expect(report.detection.precision).toEqual(none);
     expect(report.detection.recall).toEqual(none);
-    expect(report.extraction.exact).toEqual(none);
-    expect(report.extraction.month).toEqual(none);
+    const [model] = report.models;
+    expect(model!.extraction.exact).toEqual(none);
+    expect(model!.extraction.month).toEqual(none);
+    // No call: no latency, no tokens, and no cost: unpriced, never $0.
+    expect(model!.latency).toEqual({ calls: 0, medianMs: null, maxMs: null });
+    expect(model!.tokens).toBeNull();
+    expect(model!.cost).toEqual({ status: "unpriced", reason: "no answered call" });
+    expect(model!.costPerDocument).toEqual(model!.cost);
     const json = JSON.parse(await readFile(join(folder, "report.json"), "utf8"));
     expect(json.detection.precision.value).toBeNull();
     const markdown = await readFile(join(folder, "report.md"), "utf8");
@@ -272,7 +669,7 @@ describe("runEval on edited labels", () => {
     );
     const { layer, calls } = scriptedExtractor();
     const resultsRoot = newFolder("results");
-    const run = runEval({ fixtures, model: "scripted/model", dateExtractor: layer, resultsRoot });
+    const run = runOne(layer, { fixtures, resultsRoot });
     const message = await run.then(
       () => "resolved",
       (error: Error) => error.message,
@@ -297,28 +694,22 @@ describe("runEval on edited labels", () => {
       (_, mail) => mail.replaceAll(/; (?:file)?name="Rechnung-RE-2026-1042\.pdf"/g, ""),
     );
     const { layer, calls } = scriptedExtractor({ "document-1.pdf": answer("2026-11-02") });
-    const { report } = await runEval({
-      fixtures,
-      model: "scripted/model",
-      dateExtractor: layer,
-      resultsRoot: newFolder("results"),
-    });
+    const { report } = await runOne(layer, { fixtures, resultsRoot: newFolder("results") });
     expect(calls).toEqual(["document-1.pdf"]);
-    expect(report.intakes[0]!.detection.truePositives).toEqual(["document-1.pdf"]);
-    expect(report.intakes[0]!.documents[0]).toMatchObject({ status: "answered", exact: true });
+    expect(report.detection.intakes[0]!.truePositives).toEqual(["document-1.pdf"]);
+    expect(report.models[0]!.intakes[0]!.documents[0]).toMatchObject({
+      status: "answered",
+      exact: true,
+    });
   });
 
   test("a sent Document labelled undated is right when the model finds no date", async () => {
     const fixtures = await fixtureFolder([label("14-de-undated-document.eml")]);
     const { layer, calls } = scriptedExtractor({ "Kostenvoranschlag.pdf": answer(null) });
-    const { report } = await runEval({
-      fixtures,
-      model: "scripted/model",
-      dateExtractor: layer,
-      resultsRoot: newFolder("results"),
-    });
+    const { report } = await runOne(layer, { fixtures, resultsRoot: newFolder("results") });
     expect(calls).toEqual(["Kostenvoranschlag.pdf"]);
-    expect(report.intakes[0]!.documents).toEqual([
+    const [model] = report.models;
+    expect(model!.intakes[0]!.documents).toEqual([
       {
         fileName: "Kostenvoranschlag.pdf",
         expected: null,
@@ -326,22 +717,20 @@ describe("runEval on edited labels", () => {
         predicted: null,
         exact: true,
         month: true,
+        latencyMs: expect.any(Number),
+        tokens: { input: 1000, output: 50, cachedInput: null, reasoning: null },
+        costUsd: null,
       },
     ]);
-    expect(report.extraction.exact).toEqual({ count: 1, total: 1, value: 1 });
-    expect(report.extraction.month).toEqual({ count: 1, total: 1, value: 1 });
+    expect(model!.extraction.exact).toEqual({ count: 1, total: 1, value: 1 });
+    expect(model!.extraction.month).toEqual({ count: 1, total: 1, value: 1 });
   });
 
   test("fails before any model call when the results folder can't be created", async () => {
     const resultsRoot = newFolder("results-file");
     await writeFile(resultsRoot, "not a folder");
     const { layer, calls } = scriptedExtractor();
-    const run = runEval({
-      fixtures: syntheticFolder,
-      model: "scripted/model",
-      dateExtractor: layer,
-      resultsRoot,
-    });
+    const run = runOne(layer, { fixtures: syntheticFolder, resultsRoot });
     await expect(run).rejects.toThrow(
       `the results folder ${resultsRoot} can't be written to (EEXIST`,
     );
@@ -356,12 +745,7 @@ describe("runEval on edited labels", () => {
       const resultsRoot = newFolder("results-read-only");
       await mkdir(resultsRoot, { mode: 0o555 });
       const { layer, calls } = scriptedExtractor();
-      const run = runEval({
-        fixtures: syntheticFolder,
-        model: "scripted/model",
-        dateExtractor: layer,
-        resultsRoot,
-      });
+      const run = runOne(layer, { fixtures: syntheticFolder, resultsRoot });
       await expect(run).rejects.toThrow(
         `the results folder ${resultsRoot} can't be written to (EACCES`,
       );
@@ -372,10 +756,8 @@ describe("runEval on edited labels", () => {
 
   test("refuses a results folder inside the fixture folder", async () => {
     const fixtures = await fixtureFolder([label("11-en-zero-documents-ics.eml")]);
-    const run = runEval({
+    const run = runOne(scriptedExtractor().layer, {
       fixtures,
-      model: "scripted/model",
-      dateExtractor: scriptedExtractor().layer,
       resultsRoot: join(fixtures, "eval-results"),
     });
     await expect(run).rejects.toThrow("must not lie in the fixture folder");

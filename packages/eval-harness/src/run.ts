@@ -9,14 +9,23 @@ import {
   messageOf,
   readEml,
 } from "@hex/adapters";
-import type { IntakeAttachment } from "@hex/adapters";
+import type { DocumentFile, IntakeAttachment, TokenUsage } from "@hex/adapters";
 import { detectDocuments, documentMediaType, safeFileName } from "@hex/domain";
 import type { CalendarDate, DetectedDocument } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadExpectedSet } from "./expected.ts";
 import type { ExpectedIntake } from "./expected.ts";
-import { encodeReport, renderMarkdown, summarize } from "./report.ts";
-import type { DocumentRow, IntakeRow, Prediction, Report } from "./report.ts";
+import { callCost, modelPrices } from "./prices.ts";
+import type { PriceData, Rates } from "./prices.ts";
+import { detectionSummary, encodeReport, modelReport, renderMarkdown } from "./report.ts";
+import type {
+  DetectionRow,
+  DocumentRow,
+  IntakeRow,
+  ModelReport,
+  Prediction,
+  Report,
+} from "./report.ts";
 import {
   documentDateExactScorer,
   documentDateMonthScorer,
@@ -27,10 +36,12 @@ import type { DetectionVerdict } from "./scorers.ts";
 export interface EvalOptions {
   /** The fixture folder (`expected.json` and its `.eml` Intakes), absolute. */
   readonly fixtures: string;
-  /** The model that reads Document dates, `provider/model`; names the run and the report. */
-  readonly model: string;
-  /** The DateExtractor on `model` (`dateExtractorLayer`; tests pass a scripted one). */
-  readonly dateExtractor: Layer.Layer<DateExtractor>;
+  /** The models that read Document dates, `provider/model`, in report order; at least one. */
+  readonly models: readonly [string, ...string[]];
+  /** The DateExtractor on a model (`dateExtractorLayer`; tests pass scripted ones). */
+  readonly dateExtractor: (model: string) => Layer.Layer<DateExtractor>;
+  /** LiteLLM's price data, fetched once for the run (`fetchPriceData`). */
+  readonly prices: PriceData;
   /** The folder each run gets its own folder in, absolute; never inside `fixtures`. */
   readonly resultsRoot: string;
 }
@@ -44,12 +55,16 @@ export interface EvalRun {
 /** One labelled Intake, read and detected, its labels matched to attachments. */
 interface PreparedIntake {
   readonly label: ExpectedIntake;
-  readonly attachments: readonly IntakeAttachment[];
   readonly detected: readonly DetectedDocument[];
   /** Per attachment: the name labels and the report give it (see {@link labelName}). */
   readonly names: readonly string[];
   /** Per labelled Document, in label order: the index of its attachment. */
   readonly labelled: readonly number[];
+  /**
+   * Per labelled Document, in label order: what goes to the model, or undefined when its content
+   * `documentMediaType` rejects (never sent).
+   */
+  readonly sendable: readonly (Omit<DocumentFile, "fileName"> | undefined)[];
 }
 
 /** `YYYY-MM-DD`. */
@@ -98,51 +113,86 @@ async function prepare(fixtures: string): Promise<PreparedIntake[]> {
       );
       return [];
     });
+    const sendable = labelled.map((index) => {
+      const attachment = attachments[index]!;
+      const content = Buffer.from(attachment.content, "base64");
+      const mediaType = documentMediaType({ ...attachment, content });
+      return mediaType === undefined ? undefined : { content, mediaType };
+    });
     prepared.push({
       label,
-      attachments,
       detected: detectDocuments(facts, cidReferences),
       names,
       labelled,
+      sendable,
     });
   }
   if (problems.length > 0) throw new Error(`fixture errors:\n${problems.join("\n")}`);
   return prepared;
 }
 
+const tokensOf = ({
+  inputTokens,
+  outputTokens,
+  cachedInputTokens,
+  reasoningTokens,
+}: TokenUsage) => ({
+  input: inputTokens,
+  output: outputTokens,
+  cachedInput: cachedInputTokens ?? null,
+  reasoning: reasoningTokens ?? null,
+});
+
 /**
  * What the model predicts for each labelled Document, as the workflow's `extract-dates` step
  * asks it: a Document whose content `documentMediaType` rejects is never sent; a failed model
- * call is recorded on its Document and the run goes on.
+ * call is recorded on its Document and the run goes on. One call at a time, each timed from
+ * before the call to its answer or failure (retries included); priced at `rates` when the model
+ * is priced and the call reported its tokens.
  */
-function predict(intakes: readonly PreparedIntake[]) {
+function predict(intakes: readonly PreparedIntake[], rates: Rates | undefined) {
   return DateExtractor.use((extractor) =>
-    Effect.forEach(intakes, ({ label, attachments, labelled }) =>
+    Effect.forEach(intakes, ({ label, sendable }) =>
       Effect.forEach(label.documents, ({ fileName }, position): Effect.Effect<Prediction> => {
-        const attachment = attachments[labelled[position]!]!;
-        const content = Buffer.from(attachment.content, "base64");
-        const mediaType = documentMediaType({ ...attachment, content });
-        if (mediaType === undefined) return Effect.succeed({ status: "not-sent" });
-        return extractor.extract({ content, mediaType, fileName }).pipe(
-          Effect.map((answer): Prediction => {
-            const date = documentDateOf(answer);
-            return { status: "answered", predicted: date ? isoDate(date) : null };
-          }),
-          Effect.catchTag("DateExtractionError", ({ message }) =>
-            Effect.succeed<Prediction>({ status: "failed", error: message }),
-          ),
-        );
+        const document = sendable[position];
+        if (document === undefined) return Effect.succeed({ status: "not-sent" });
+        return Effect.suspend(() => {
+          const start = performance.now();
+          const elapsed = () => Math.round(performance.now() - start);
+          return extractor.extract({ ...document, fileName }).pipe(
+            Effect.map(({ answer, usage }): Prediction => {
+              const latencyMs = elapsed();
+              const date = documentDateOf(answer);
+              return {
+                status: "answered",
+                predicted: date ? isoDate(date) : null,
+                latencyMs,
+                tokens: usage ? tokensOf(usage) : null,
+                costUsd: usage && rates ? callCost(rates, usage) : null,
+              };
+            }),
+            Effect.catchTag("DateExtractionError", ({ message }) =>
+              Effect.succeed<Prediction>({
+                status: "failed",
+                error: message,
+                latencyMs: elapsed(),
+              }),
+            ),
+          );
+        });
       }),
     ),
   );
 }
 
-/** The verdicts on one Intake's attachments and labelled Documents, by the scorers. */
-async function score(
-  { label, detected, names, labelled }: PreparedIntake,
-  predictions: readonly Prediction[],
-): Promise<IntakeRow> {
-  const detection: Record<DetectionVerdict, string[]> = {
+/** Detection's verdicts on one Intake's attachments, by the scorer. */
+async function detectionRow({
+  label,
+  detected,
+  names,
+  labelled,
+}: PreparedIntake): Promise<DetectionRow> {
+  const verdicts: Record<DetectionVerdict, string[]> = {
     "true-positive": [],
     "false-positive": [],
     "false-negative": [],
@@ -153,8 +203,21 @@ async function score(
       output: detected.some((document) => document.index === index),
       groundTruth: labelled.includes(index),
     });
-    detection[analyzeStepResult!.verdict].push(names[index]!);
+    verdicts[analyzeStepResult!.verdict].push(names[index]!);
   }
+  return {
+    file: label.file,
+    truePositives: verdicts["true-positive"],
+    falsePositives: verdicts["false-positive"],
+    falseNegatives: verdicts["false-negative"],
+  };
+}
+
+/** The verdicts on one Intake's labelled Documents, by the scorers. */
+async function intakeRow(
+  { label }: PreparedIntake,
+  predictions: readonly Prediction[],
+): Promise<IntakeRow> {
   const documents: DocumentRow[] = [];
   for (const [position, { fileName, documentDate }] of label.documents.entries()) {
     const prediction = predictions[position]!;
@@ -171,23 +234,20 @@ async function score(
       ...prediction,
     });
   }
-  return {
-    file: label.file,
-    detection: {
-      truePositives: detection["true-positive"],
-      falsePositives: detection["false-positive"],
-      falseNegatives: detection["false-negative"],
-    },
-    documents,
-  };
+  return { file: label.file, documents };
 }
 
 /**
- * The run's own new folder under `root` (which exists): `<UTC time>_<model>`, suffixed `-2`,
- * `-3`… if taken.
+ * The run's own new folder under `root` (which exists): `<UTC time>_<model>` for one configured
+ * model, `<UTC time>_matrix` for several, suffixed `-2`, `-3`… if taken.
  */
-async function createRunFolder(root: string, startedAt: Date, model: string): Promise<string> {
-  const id = `${startedAt.toISOString().replace(/[:.]/g, "-")}_${model.replace(/[^\w.-]+/g, "-")}`;
+async function createRunFolder(
+  root: string,
+  startedAt: Date,
+  models: readonly string[],
+): Promise<string> {
+  const name = models.length === 1 ? models[0]!.replace(/[^\w.-]+/g, "-") : "matrix";
+  const id = `${startedAt.toISOString().replace(/[:.]/g, "-")}_${name}`;
   for (let attempt = 1; ; attempt++) {
     const folder = join(root, attempt === 1 ? id : `${id}-${attempt}`);
     try {
@@ -200,16 +260,18 @@ async function createRunFolder(root: string, startedAt: Date, model: string): Pr
 }
 
 /**
- * Runs the eval on `fixtures`: Document detection on every labelled Intake, then the Document
- * date of every labelled Document (ground truth, so detection errors don't reach extraction)
- * with `dateExtractor`, each verdict by a scorer. Writes `report.json` and `report.md` into a new
- * folder under `resultsRoot`, nothing elsewhere. Rejects on a fixture error before any model
- * call; a failed model call only marks its Document `failed`.
+ * Runs the eval on `fixtures`: Document detection on every labelled Intake, once, then for each
+ * model in turn the Document date of every labelled Document (ground truth, so detection errors
+ * don't reach extraction), each verdict by a scorer. A model whose LiteLLM entry says it takes no
+ * PDF input is excluded before any call. Writes `report.json` and `report.md` into a new folder
+ * under `resultsRoot`, nothing elsewhere. Rejects on a fixture error before any model call; a
+ * failed model call only marks its Document `failed`.
  */
 export async function runEval({
   fixtures,
-  model,
+  models,
   dateExtractor,
+  prices,
   resultsRoot,
 }: EvalOptions): Promise<EvalRun> {
   if (isWithin(fixtures, resultsRoot)) {
@@ -226,19 +288,35 @@ export async function runEval({
       cause: error,
     });
   }
-  const predictions = await Effect.runPromise(predict(intakes).pipe(Effect.provide(dateExtractor)));
-  const rows = await Promise.all(
-    intakes.map((intake, position) => score(intake, predictions[position]!)),
-  );
+  const detection = detectionSummary(await Promise.all(intakes.map(detectionRow)));
+  const excluded: Report["excluded"][number][] = [];
+  const evaluated: ModelReport[] = [];
+  for (const model of models) {
+    const found = modelPrices(prices, model);
+    if (found.pdfInput === false) {
+      const reason = `no PDF input (LiteLLM entry ${found.entry}: supports_pdf_input false)`;
+      excluded.push({ model, reason });
+      continue;
+    }
+    const rates = found.pricing.status === "priced" ? found.pricing.rates : undefined;
+    const predictions = await Effect.runPromise(
+      predict(intakes, rates).pipe(Effect.provide(dateExtractor(model))),
+    );
+    const rows = await Promise.all(
+      intakes.map((intake, position) => intakeRow(intake, predictions[position]!)),
+    );
+    evaluated.push(modelReport(model, found, rows));
+  }
   const report: Report = {
     fixtures,
-    model,
     startedAt: startedAt.toISOString(),
     durationMs: Date.now() - startedAt.getTime(),
-    ...summarize(rows),
-    intakes: rows,
+    prices: { url: prices.url, error: prices.status === "unavailable" ? prices.error : null },
+    detection,
+    models: evaluated,
+    excluded,
   };
-  const folder = await createRunFolder(resultsRoot, startedAt, model);
+  const folder = await createRunFolder(resultsRoot, startedAt, models);
   await writeFile(join(folder, "report.json"), encodeReport(report));
   await writeFile(join(folder, "report.md"), renderMarkdown(report));
   return { report, folder };

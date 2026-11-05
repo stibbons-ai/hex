@@ -343,7 +343,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
             // would send a placeholder instead) or OpenAI and Anthropic refuse its image type.
             if (mediaType === undefined) return Effect.succeed(document);
             return extractor.extract({ content, mediaType, fileName: document.fileName }).pipe(
-              Effect.map((answer) => {
+              Effect.map(({ answer }) => {
                 const documentDate = documentDateOf(answer);
                 return documentDate ? { ...document, documentDate } : document;
               }),

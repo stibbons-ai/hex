@@ -15,7 +15,7 @@ import { router } from "./router";
 
 export { contract } from "./contract";
 export type { ChatOptions } from "./chat";
-export { loadIntakeConfig } from "./config";
+export { loadEvalConfig } from "./config";
 
 export interface ServerOptions {
   /** LibSQL database file; its directory is created if missing. */
