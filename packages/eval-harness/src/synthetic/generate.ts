@@ -164,31 +164,33 @@ export function renderFixtureSet(): Map<string, Uint8Array> {
   return files;
 }
 
-/** Whether an `.eml`'s header block carries the generator's `Message-ID`. */
-function hasSyntheticMessageId(eml: string): boolean {
+/** The `Message-ID` header line every generated `.eml` carries. */
+const syntheticMessageId = new RegExp(
+  `^Message-ID: <synthetic-[^@>\\s]+@${syntheticDomain.replaceAll(".", "\\.")}>\\r?$`,
+  "im",
+);
+
+/**
+ * Why the `.eml` at `path` is not one this generator wrote, or `undefined` when it is (or is
+ * absent): it must be a regular file whose header block carries the synthetic `Message-ID`.
+ */
+async function emlRefusal(path: string): Promise<string | undefined> {
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined) return undefined;
+  if (!stats.isFile()) return "not a regular file";
+  const eml = await Bun.file(path).text();
   const end = eml.search(/\r?\n\r?\n/);
-  const headers = end === -1 ? eml : eml.slice(0, end);
-  return new RegExp(
-    `^Message-ID: <synthetic-[^@>\\s]+@${syntheticDomain.replaceAll(".", "\\.")}>\\r?$`,
-    "im",
-  ).test(headers);
+  return syntheticMessageId.test(end === -1 ? eml : eml.slice(0, end))
+    ? undefined
+    : `no Message-ID <synthetic-…@${syntheticDomain}>`;
 }
 
 /**
- * Why `name` in `folder` may not be replaced, or `undefined` when this generator wrote it: a
- * regular `.eml` file whose headers carry the synthetic `Message-ID`, or a regular `expected.json`
- * that decodes and whose listed files, where present, are such `.eml` files.
+ * Why the labels at `path` are not ones this generator wrote, or `undefined` when they are: a
+ * regular file that decodes and whose listed files in `folder`, where present, pass {@link emlRefusal}.
  */
-async function refusal(folder: string, name: string): Promise<string | undefined> {
-  const path = join(folder, name);
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) return undefined; // listed but absent: nothing to protect
-  if (!stats.isFile()) return "not a regular file";
-  if (name.toLowerCase() !== "expected.json") {
-    return hasSyntheticMessageId(await Bun.file(path).text())
-      ? undefined
-      : `no Message-ID <synthetic-…@${syntheticDomain}>`;
-  }
+async function labelsRefusal(folder: string, path: string): Promise<string | undefined> {
+  if (!(await lstat(path)).isFile()) return "not a regular file";
   let set: ExpectedSet;
   try {
     set = await readExpectedFile(path);
@@ -196,7 +198,7 @@ async function refusal(folder: string, name: string): Promise<string | undefined
     return error instanceof Error ? error.message : String(error);
   }
   for (const { file } of set.intakes) {
-    const reason = await refusal(folder, file);
+    const reason = await emlRefusal(join(folder, file));
     if (reason !== undefined) return `lists ${file}, which is ${reason}`;
   }
   return undefined;
@@ -216,7 +218,11 @@ export async function writeFixtureSet(folder: string): Promise<void> {
   );
   const refused: string[] = [];
   for (const name of replaced) {
-    const reason = await refusal(folder, name);
+    const path = join(folder, name);
+    const reason =
+      name.toLowerCase() === "expected.json"
+        ? await labelsRefusal(folder, path)
+        : await emlRefusal(path);
     if (reason !== undefined) refused.push(`${name} (${reason})`);
   }
   if (refused.length > 0) {

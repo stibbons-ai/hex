@@ -71,7 +71,9 @@ const decodeStrict = Schema.decodeUnknownResult(ExpectedSet, {
  * problem is reported at once. The duplicate `file` / `fileName` checks run only once every element
  * decodes. The options are fixed, so callers cannot loosen them.
  */
-export const decodeExpectedSet = (input: unknown) => decodeStrict(input);
+export function decodeExpectedSet(input: unknown): Result.Result<ExpectedSet, Schema.SchemaError> {
+  return decodeStrict(input);
+}
 
 /** Reads and decodes one labels file. Rejects, naming the file, when it is missing, is not JSON or does not decode. */
 export async function readExpectedFile(path: string): Promise<ExpectedSet> {
