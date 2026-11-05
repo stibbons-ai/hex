@@ -13,6 +13,7 @@ import { ThreadStateLibSQL } from "@mastra/libsql";
 import type { Adapter } from "chat";
 import { type RunningServer, type ServerOptions, startServer } from "../src";
 import { CHAT_AGENT_ID, CHAT_RESOURCE_ID } from "../src/chat";
+import { CHAT_STATE_TYPE } from "../src/chat-state";
 import { loadChatConfig } from "../src/config";
 import {
   BOT_ACCOUNT,
@@ -23,7 +24,7 @@ import {
 } from "./fake-signal-cli";
 import { DANIEL as DANIEL_SLACK, directMessage, fakeSlack, slackEnv } from "./fake-slack";
 import { REPLY, heldModel, mockModel, toolCallingModel } from "./mock-model";
-import { serverOptions, stored, storedChatState, warnings } from "./server-helpers";
+import { chatStateRows, serverOptions, stored, storedChatState, warnings } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
 const STRANGER = "5e5e5e5e-0000-4000-8000-00000000057a";
@@ -490,7 +491,8 @@ test("stop() closes the event stream at once and bounds the wait for a running r
 });
 
 // The adapter stores its receive cursor in the Chat state under this key, which hex persists in
-// its database: a restarted hex resumes the event stream after the last event it processed.
+// its database: a restarted hex resumes the event stream after the newest event that, with every
+// earlier one, it finished handling.
 const CURSOR_KEY = `signal:receive-cursor:${BOT_ACCOUNT}`;
 /** A second allowlisted sender, for a conversation of its own. */
 const OTHER = "07e07e07-0000-4000-8000-0000000000e1";
@@ -558,7 +560,8 @@ test("a Signal DM hex had not answered when it stopped is answered after a resta
     } finally {
       await before.stop();
     }
-    const after = await startServer({ ...first, chat: await chatFor(fake) });
+    // The default stop grace: the final cursor write lands before the store closes.
+    const after = await startServer(options("replay", { chat: await chatFor(fake) }));
     try {
       await fake.streamOpened(2);
       const [, replayed] = await fake.sends(2);
@@ -576,6 +579,29 @@ test("a Signal DM hex had not answered when it stopped is answered after a resta
       lastEventId: "run-2",
       processed: [],
     });
+  });
+});
+
+test("of the Chat state, only the Signal receive cursor reaches the database", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("persisted-keys", { chat: await chatFor(fake) });
+    const server = await startServer(settings);
+    try {
+      await fake.streamOpened();
+      fake.receive({ aci: DANIEL, text: "hello" });
+      await fake.sends(1);
+      // Keys the adapter (an edit's target) and Chat (a turn to cancel) set; nothing in a hex
+      // conversation sets them today, so they are set here.
+      const state = chatState(server);
+      await state.set(`signal:edit:${BOT_ACCOUNT}:1700000000001`, "1700000000000", 60_000);
+      await state.set(`active-turn:signal:dm:${DANIEL}`, "turn-1", 60_000);
+      expect(await state.get(`active-turn:signal:dm:${DANIEL}`)).toBe("turn-1");
+    } finally {
+      await server.stop();
+    }
+    expect(chatStateRows(settings.databasePath)).toEqual([
+      { threadId: CURSOR_KEY, type: CHAT_STATE_TYPE },
+    ]);
   });
 });
 
@@ -603,15 +629,20 @@ test("after a restart, a replayed Signal DM hex already answered is skipped", as
     } finally {
       await before.stop();
     }
-    const after = await startServer({ ...first, chat: await withOther() });
+    // The default stop grace: stopping waits for both replayed events (run-2, run-3) to be
+    // handled and their cursor written.
+    const after = await startServer(options("skip", { chat: await withOther() }));
     try {
       await fake.streamOpened(2);
-      // Written once both replayed events (run-2, run-3) were handled.
-      await cursorWrites(after)({ lastEventId: "run-3", processed: [] });
+      await fake.sends(3);
     } finally {
       await after.stop();
     }
     expect(fake.lastEventIds).toEqual([null, "run-1"]);
+    expect(await storedChatState(first.databasePath, CURSOR_KEY)).toEqual({
+      lastEventId: "run-3",
+      processed: [],
+    });
     // run-2 answered once, by the restarted hex; run-3 not again.
     const recipients = fake.calls
       .filter((call) => call.method === "send")
@@ -620,9 +651,35 @@ test("after a restart, a replayed Signal DM hex already answered is skipped", as
   });
 });
 
-test("a Signal conversation's subscription survives a restart", async () => {
+test("after a restart, a Signal DM that arrived while hex was gone is answered", async () => {
+  await withFake(fakeSignalCli(), async (fake) => {
+    const settings = options("away", {});
+    const before = await startServer({ ...settings, chat: await chatFor(fake) });
+    try {
+      await fake.streamOpened();
+      fake.receive({ aci: DANIEL, text: "hello" });
+      await fake.sends(1);
+    } finally {
+      await before.stop();
+    }
+    // No stream open: as a message signal-cli took off Signal before it noticed hex was gone.
+    expect(fake.receive({ aci: DANIEL, text: "still there?" })).toBe("run-2");
+    const after = await startServer({ ...settings, chat: await chatFor(fake) });
+    try {
+      await fake.streamOpened(2);
+      const [, answer] = await fake.sends(2);
+      expect(answer?.params["recipient"]).toEqual([DANIEL]);
+    } finally {
+      await after.stop();
+    }
+    expect(fake.lastEventIds).toEqual([null, "run-1"]);
+  });
+});
+
+test("a Signal conversation subscribed through hex's chat state is hex's and survives a restart", async () => {
   await withFake(fakeSignalCli(), async (fake) => {
     const settings = options("subscription", {});
+    const conversation = `signal:dm:${DANIEL}`;
     const run = async (use: (server: RunningServer) => Promise<void>) => {
       const server = await startServer({ ...settings, chat: await chatFor(fake) });
       try {
@@ -631,23 +688,28 @@ test("a Signal conversation's subscription survives a restart", async () => {
         await server.stop();
       }
     };
-    await run(async () => {
-      await fake.streamOpened();
-      fake.receive({ aci: DANIEL, text: "hello" });
-      await fake.sends(1);
-    });
-    const [thread] = (await stored(settings.databasePath)).threads;
-    const conversation = thread?.metadata?.["channel_externalThreadId"];
-    if (typeof conversation !== "string") throw new Error("no conversation thread");
     await run(async (server) => {
+      // A memory thread no agent has claimed yet: subscribing stamps the owner the state adapter
+      // was built with.
+      const store = await server.mastra.getStorage()?.getStore("memory");
+      const now = new Date();
+      await store?.saveThread({
+        thread: {
+          id: "dm-thread",
+          resourceId: CHAT_RESOURCE_ID,
+          title: "",
+          createdAt: now,
+          updatedAt: now,
+          metadata: { channel_platform: "signal", channel_externalThreadId: conversation },
+        },
+      });
       await chatState(server).subscribe(conversation);
     });
     await run(async (server) => {
       expect(await chatState(server).isSubscribed(conversation)).toBe(true);
     });
-    // Owned by hex's agent, as Mastra's own state adapter stamps it.
-    const [subscribed] = (await stored(settings.databasePath)).threads;
-    expect(subscribed?.metadata).toMatchObject({
+    const [thread] = (await stored(settings.databasePath)).threads;
+    expect(thread?.metadata).toMatchObject({
       channel_subscribed: "true",
       channel_ownerId: CHAT_AGENT_ID,
     });

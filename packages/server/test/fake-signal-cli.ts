@@ -2,7 +2,12 @@
 // loopback: JSON-RPC on `POST /api/v1/rpc`, receive events as server-sent events on
 // `GET /api/v1/events`, health on `GET /api/v1/check`. Never reaches Signal. Like signal-cli, it
 // numbers its events and keeps the last 1000 for replay: a stream opened with a `Last-Event-ID`
-// it holds gets the events after it, one with an ID it doesn't hold gets them all.
+// it holds gets the events after it, one with an ID it doesn't hold gets them all. Unlike
+// signal-cli 0.14.9 (no current test depends on these): it matches the ID exactly rather than
+// comparing sequence numbers; it buffers events from its start, signal-cli only once a client
+// first connected (here an event received while no stream is open stands for one signal-cli
+// took off Signal after hex was gone); it sends a keep-alive comment before the replay; and it
+// serves one account, so it doesn't filter events by account.
 import type { Server } from "bun";
 import { within } from "./timeouts";
 

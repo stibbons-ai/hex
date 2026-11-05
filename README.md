@@ -241,16 +241,21 @@ it.
   in hex's log. Under `concurrent`, a message joined the run in progress, but Mastra
   finished it in a run that a stop could cut off before it was saved, and two first messages of a
   new conversation could land in two memory threads.
-- hex keeps the adapter's receive cursor (the last event it finished handling) in its database,
-  so a restarted hex resumes the event stream there: signal-cli replays the messages hex had
-  received but not answered within the 5-second stop grace, or when it crashed, and those
-  signal-cli took off Signal after hex was gone (it notices only at its next keep-alive, within
-  about 15-30 s, longer when the host itself is gone). Messages sent while no event stream was
-  connected stay at Signal and arrive once hex connects (with `--receive-mode on-connection`).
-  What is still lost: everything signal-cli held for replay when signal-cli itself restarts (it
-  keeps its buffer in memory), and anything older than its last 1000 events. If only the event
-  stream reconnected (hex kept running), the Chat SDK's dedupe can skip a replayed message whose
-  answer a crash cut off, for as long as its dedupe entry lasts.
+- hex keeps the adapter's receive cursor in its database: the newest event that, with every
+  earlier one, hex has finished handling (later finished ones are stored too, to be skipped). A
+  restarted hex resumes the event stream there, so signal-cli replays the events whose handling
+  hadn't finished: a reply cut off by the 5-second stop grace or a crash, and messages signal-cli
+  took off Signal after hex was gone (it notices only at its next keep-alive, within about 15-30 s,
+  longer when the host itself is gone). Messages sent while no event stream was connected stay at
+  Signal and arrive once hex connects (with `--receive-mode on-connection`). Still lost:
+  - everything signal-cli held for replay when signal-cli itself restarts, and anything older than
+    its last 1000 events;
+  - a message waiting behind a reply in progress in the same conversation when hex stops or
+    crashes: its handling counts as finished once it is queued, and the queue lives in memory;
+  - on a fresh database, everything before the first event hex finished: there is no cursor yet;
+  - during shutdown ([#29](https://github.com/stibbons-ai/hex/issues/29)): a message arriving
+    after hex began stopping is dropped and the cursor moves past it; and if the last cursor write
+    misses the store closing, a message already answered is answered again after the restart.
 - If the event stream drops while hex runs, the adapter reconnects by itself, with backoff up to
   30 s and one warning per attempt, for as long as hex runs; `/health` stays `ok` meanwhile, as it
   does while Slack's socket reconnects.
