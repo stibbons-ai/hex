@@ -17,8 +17,9 @@ mempalace.yaml
 entities.json
 
 # Eval fixtures (issue #11): .eml Intakes (any case) and expected.json labels are ignored except
-# the lower-case .eml files and expected.json directly in the synthetic folder, so real fixtures
-# are not committed by accident; `git add -f` still can. Eval results stay local too.
+# the .eml files (lower case; on case-insensitive file systems any case) and expected.json directly
+# in the synthetic folder, so real fixtures are not committed by accident; `git add -f` still can.
+# Eval results stay local too.
 *.[eE][mM][lL]
 expected.json
 !/packages/eval-harness/fixtures/synthetic/*.eml

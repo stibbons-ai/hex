@@ -273,9 +273,9 @@ The evals run against folders of `.eml` Intakes, each labelled by one `expected.
 Intake, its Documents in MIME order with their Document dates (`null` when a Document carries
 none). `@hex/eval-harness` exports their types plus `decodeExpectedSet` and
 `loadExpectedSet(folder)`, which decode strictly: they reject malformed or impossible dates,
-duplicate `file` or `fileName` entries and unknown (mistyped) keys, report every problem inside the
-Intakes at once (the duplicate checks run once those decode), and `loadExpectedSet` names the file
-in its errors.
+duplicate `file` or `fileName` entries and unknown (mistyped) keys, report every problem at once
+(a duplicate `fileName` is checked per Intake, once that Intake decodes; a duplicate `file` only
+once every Intake decodes), and `loadExpectedSet` names the file in its errors.
 
 `packages/eval-harness/fixtures/synthetic/` is a committed, fully fictitious set, so the evals run
 without anyone's real mail. `packages/eval-harness/src/synthetic/` generates it without
@@ -289,13 +289,15 @@ bun run fixtures:generate             # rewrites packages/eval-harness/fixtures/
 bun run fixtures:generate new-set     # or a missing or empty folder, relative to your directory
 ```
 
-Run it from the repo root or a folder below it outside the workspace packages. Before touching
-anything it checks the target and accepts exactly two kinds: a missing or empty folder, which it
-fills, and the committed folder, which it replaces in place. There it overwrites `expected.json`
-(tracked by git) and deletes an `.eml` only if it is a regular file whose header block carries
-the generator's `Message-ID <synthetic-…@hex-fixtures.example>`; any other entry makes it refuse.
-Every other target (a non-empty folder elsewhere, a file) is refused with a message naming the
-folder and why, so real fixtures are never overwritten.
+Run it from the repo root or a folder below it outside the workspace packages. A relative folder
+resolves against your directory (`INIT_CWD` under npm, `npm_config_local_prefix` under bun; an
+`INIT_CWD` inherited from a parent npm process wins under `bun run`). Before touching anything it
+checks the target and accepts exactly two kinds: a missing or empty folder, which it fills, and
+the committed folder, which it replaces in place. There it overwrites `expected.json` (generated
+output; git restores only its last committed state) and deletes an `.eml` only if it is a regular
+file whose header block carries the generator's `Message-ID <synthetic-…@hex-fixtures.example>`;
+any other entry makes it refuse. Every other target (a non-empty folder elsewhere, a file) is
+refused with a message naming the folder and why, so real fixtures elsewhere are not overwritten.
 
 | Intake                       | Covers                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
@@ -316,18 +318,19 @@ folder and why, so real fixtures are never overwritten.
 
 Real fixtures (exported mail with its labels) live outside the repo; point the evals at their
 folder. The root `.gitignore` guards against committing them by accident (`git add -f` still
-can): it ignores every `.eml` (any letter case) and `expected.json` except the lower-case `.eml`
-files and `expected.json` directly in the synthetic folder, any `fixtures/real/` and
+can): it ignores every `.eml` (any letter case) and `expected.json` except the `.eml` files
+(lower case; on case-insensitive file systems any case) and `expected.json` directly in the
+synthetic folder, any `fixtures/real/` and
 `fixtures/private/` folder, and eval results in any `eval-results/` folder.
 
 ## Packages
 
-| Package             | Holds                                                                          |
-| ------------------- | ------------------------------------------------------------------------------ |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect` |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage     |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels |
-| `@hex/eval-harness` | `expected.json` schema and loader; synthetic fixture set and its generator     |
+| Package             | Holds                                                                              |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`     |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage         |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`) and chat channels     |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags

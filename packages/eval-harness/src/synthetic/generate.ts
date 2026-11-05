@@ -191,7 +191,7 @@ async function committedEntryRefusal(folder: string, name: string): Promise<stri
   const path = join(folder, name);
   try {
     if (!(await lstat(path)).isFile()) return "not a regular file";
-    // expected.json is tracked by git, so overwriting it is recoverable.
+    // expected.json is generated output tracked by git; git restores only its last committed state.
     return isEml ? emlRefusal(await Bun.file(path).text()) : undefined;
   } catch (error) {
     return message(error);
@@ -236,7 +236,7 @@ async function replaceableEntries(folder: string, committed: string): Promise<st
  * before touching anything:
  * - a missing or empty folder, which it creates and fills;
  * - the committed folder (`committed`, by default {@link syntheticFolder}), which it replaces in
- *   place: it overwrites `expected.json` (tracked by git) and deletes an `.eml` only when it is a
+ *   place: it overwrites `expected.json` (generated, tracked by git) and deletes an `.eml` only when it is a
  *   regular file this generator wrote ({@link emlRefusal}); any other entry there is refused.
  *
  * Anything else, a non-empty folder elsewhere or a path that is not a folder, is refused with one

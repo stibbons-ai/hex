@@ -70,9 +70,10 @@ const decodeStrict = Schema.decodeUnknownResult(ExpectedSet, {
 });
 
 /**
- * Decodes hand-written labels strictly: unknown (mistyped) keys fail, and every problem inside the
- * elements is reported at once. The duplicate `file` / `fileName` checks run only once every
- * element decodes. The options are fixed, so callers cannot loosen them.
+ * Decodes hand-written labels strictly: unknown (mistyped) keys fail, and every problem is reported
+ * at once. A duplicate `fileName` is checked per Intake once that Intake decodes, so it can appear
+ * beside other Intakes' errors; a duplicate `file` is checked only once every Intake decodes. The
+ * options are fixed, so callers cannot loosen them.
  */
 export function decodeExpectedSet(input: unknown): Result.Result<ExpectedSet, Schema.SchemaError> {
   return decodeStrict(input);
