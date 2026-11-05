@@ -66,13 +66,25 @@ const litellm = {
     output_cost_per_token: 2e-7,
     supports_pdf_input: "true",
   },
+  "gpt-free-input": {
+    litellm_provider: "openai",
+    input_cost_per_token: 0,
+    output_cost_per_token: 2e-7,
+  },
+  // Its provider doesn't decode, so its PDF flag can't be trusted to be this model's.
+  "gpt-odd-provider": {
+    litellm_provider: 42,
+    input_cost_per_token: 1e-7,
+    output_cost_per_token: 2e-7,
+    supports_pdf_input: false,
+  },
   "not-an-entry": [1, 2, 3],
 };
 
 describe("decodePriceData", () => {
   const prices = decodePriceData(URL, litellm);
 
-  test("keeps every entry that decodes, ignoring fields the eval doesn't read", () => {
+  test("reads the fields the eval uses, ignoring every other field", () => {
     expect(prices.status).toBe("available");
     expect(modelPrices(prices, "openai/gpt-5.4-mini")).toEqual({
       entry: "gpt-5.4-mini",
@@ -184,6 +196,24 @@ describe("modelPrices: provider/model to a LiteLLM entry", () => {
     expect(modelPrices(prices, "openai/gpt-free").pricing).toEqual({
       status: "unpriced",
       reason: "zero prices in LiteLLM entry gpt-free",
+    });
+  });
+
+  test("a zero input price beside a real output price stays priced", () => {
+    expect(modelPrices(prices, "openai/gpt-free-input").pricing).toEqual({
+      status: "priced",
+      rates: { input: 0, output: 2e-7, cachedInput: null },
+    });
+  });
+
+  test("an entry whose litellm_provider is malformed is named, unpriced, PDF input unknown", () => {
+    expect(modelPrices(prices, "openai/gpt-odd-provider")).toEqual({
+      entry: "gpt-odd-provider",
+      pdfInput: null,
+      pricing: {
+        status: "unpriced",
+        reason: "LiteLLM entry gpt-odd-provider has a malformed litellm_provider",
+      },
     });
   });
 

@@ -133,8 +133,11 @@ describe("DateExtractor (live layer on a mock model)", () => {
       });
     });
 
-    test("none when the provider reported input tokens but no output count", async () => {
-      const { model } = usageModel({ inputTokens: 1200 }, reply);
+    test.each([
+      ["input tokens but no output count", { inputTokens: 1200 }],
+      ["output tokens but no input count", { outputTokens: 80 }],
+    ])("none when the provider reported %s", async (_case, usage) => {
+      const { model } = usageModel(usage, reply);
       expect(success(await extract(model, pdfDocument)).usage).toBeUndefined();
     });
 

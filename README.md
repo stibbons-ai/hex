@@ -338,7 +338,9 @@ The development shell exports the API keys (see
 startup that the model's key is set: without it every Intake with a Document hex sends to the
 model fails until it is.
 
-Only OpenAI models are exercised (by the tests' fake OpenAI). The answer schema goes to the
+The tests answer as OpenAI does (a fake OpenAI on loopback) or refuse the default model before
+any call (no Anthropic key); the default, `anthropic/claude-haiku-5-5`, was checked against the
+real provider by the eval's run of 2026-11-05 (see [Evals](#evals)). The answer schema goes to the
 provider as JSON Schema with `additionalProperties: true` and safe-integer bounds (±(2^53−1)); a provider
 that insists on strict JSON Schema (e.g. some OpenAI-compatible ones) may reject it, which fails
 every run until `intake.model` names another model.
@@ -716,32 +718,36 @@ What it measures, per attachment matched to the labels by its file name:
   `output_cost_per_reasoning_token`, which some entries have, is ignored); cache writes are priced
   as input, tiered (long-context) prices are not applied. The total is the sum over the answered
   calls, the cost per Document the total / answered calls. A failed call reports no tokens and
-  adds nothing, so a priced total says how many failed calls it leaves out
-  (`$0.001620 (1 failed call not counted)`). A model is **unpriced**, with the reason, and still
-  runs, never costs 0, when the price data couldn't be fetched (`price data unavailable: <error>`),
-  has no entry for it (`no LiteLLM entry`), when its entry lacks `input_cost_per_token` or
-  `output_cost_per_token` (naming which), has one of the three prices malformed (naming it), or
-  prices both input and output at zero, when one of its answered calls reported no token usage,
-  or when no call answered.
+  adds nothing, so in `report.md` a priced total says how many failed calls it leaves out
+  (`$0.001620 (1 failed call not counted)`; `report.json` has the total and the failed count). A
+  model is **unpriced**, with the reason, and still runs, never costs 0, when the price data
+  couldn't be fetched (`price data unavailable: <error>`), has no entry for it
+  (`no LiteLLM entry`) or only one whose `litellm_provider` is malformed, when its entry lacks
+  `input_cost_per_token` or `output_cost_per_token` (naming which), has one of the three prices
+  malformed (naming it), or prices both input and output at zero, when one of its answered calls
+  reported no token usage, or when no call answered.
 - **Latency**, per call: the wall-clock time of the DateExtractor call, from sending to the
   answer or the failure, retries and their waits included; per model the median and the maximum
   over its calls (answered and failed).
 
 LiteLLM's price data is fetched once per run, before the first model call, and decoded as
-untrusted input, field by field: a field the eval reads that doesn't decode (a price that is no
-non-negative number, a `supports_pdf_input` that is no boolean) counts as absent and is named,
-while the entry's other fields still apply; an entry that is no object is left out, never the
-whole file; a fetch that fails, answers no 2xx, isn't JSON or takes over 30 s leaves every model
-unpriced and the run goes on. A model id `provider/model` maps to the first of the entries
-`<provider>/<model>` and `<model>` whose `litellm_provider` is the provider, where `google` is
-LiteLLM's `gemini` (the Gemini API; as of 2026-11-05 the bare `gemini-…` entries are Vertex AI's):
-`openai/gpt-5.4-mini` is `gpt-5.4-mini`, `anthropic/claude-haiku-4-5` is `claude-haiku-4-5`,
-`google/gemini-2.5-flash-lite` is `gemini/gemini-2.5-flash-lite`.
+untrusted input, field by field; a field that doesn't decode is named, never trusted: a
+malformed price (no non-negative number) makes the model unpriced, a malformed
+`supports_pdf_input` (no boolean) leaves PDF input unknown while the prices still count, and an
+entry whose `litellm_provider` is malformed is named and leaves the model unpriced with PDF input
+unknown. An entry that is no object is left out, never the whole file; a fetch that fails,
+answers no 2xx, isn't JSON or takes over 30 s leaves every model unpriced and the run goes on. A
+model id `provider/model` maps to the first of the entries `<provider>/<model>` and `<model>`
+whose `litellm_provider` is the provider, where `google` is LiteLLM's `gemini` (the Gemini API;
+as of 2026-11-05 the bare `gemini-…` entries are Vertex AI's): `openai/gpt-5.4-mini` is
+`gpt-5.4-mini`, `anthropic/claude-haiku-4-5` is `claude-haiku-4-5`,
+`google/gemini-3.5-flash-lite` is `gemini/gemini-3.5-flash-lite`.
 
 **PDF input**: the same entry's `supports_pdf_input` decides whether a model can read the
 Documents. A model whose entry says `false` is excluded before any call, even when the entry's
 prices are malformed, and listed in both reports with the reason. A model without an entry or
-the flag (or with a malformed one), or a run without price data, is not excluded: its row says
+the flag (or with a malformed flag, or only an entry whose `litellm_provider` is malformed), or a
+run without price data, is not excluded: its row says
 "PDF input unknown". The eval doesn't use Mastra's own model data: as of `@mastra/core` 1.80.0
 its `capabilities/<provider>.json` has only a generic attachment list, not PDF input.
 

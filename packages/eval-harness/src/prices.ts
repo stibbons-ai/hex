@@ -1,8 +1,10 @@
 /**
  * LiteLLM's model price data (`model_prices_and_context_window.json`): per-token prices and the
  * PDF-input flag of each model, fetched once per eval run. Untrusted input: each field the eval
- * reads is decoded on its own, so a malformed field never costs the rest of its entry, and an
- * entry that is no object never costs the rest of the file.
+ * reads is decoded on its own, and a field that doesn't decode is named, never trusted: a
+ * malformed price makes its model unpriced, a malformed `supports_pdf_input` leaves PDF input
+ * unknown, a malformed `litellm_provider` matches no model. An entry that is no object is left
+ * out, never the rest of the file.
  */
 import type { TokenUsage } from "@hex/adapters";
 import { messageOf } from "@hex/adapters";
@@ -15,18 +17,25 @@ export const LITELLM_PRICES_URL =
 /** How long the fetch may take before the run goes on without prices. */
 const FETCH_TIMEOUT_MS = 30_000;
 
+/** USD per token. */
+const Price = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
+
 /** The fields of a LiteLLM entry the eval reads, each with its schema; the rest are ignored. */
 const FIELDS = {
   litellm_provider: Schema.String,
-  input_cost_per_token: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
-  output_cost_per_token: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
-  cache_read_input_token_cost: Schema.Number.check(
-    Schema.isFinite(),
-    Schema.isGreaterThanOrEqualTo(0),
-  ),
+  input_cost_per_token: Price,
+  output_cost_per_token: Price,
+  cache_read_input_token_cost: Price,
   supports_pdf_input: Schema.Boolean,
 } as const;
 type Field = keyof typeof FIELDS;
+
+/** The fields that price a model: a malformed one leaves it unpriced. */
+const PRICE_FIELDS: readonly Field[] = [
+  "input_cost_per_token",
+  "output_cost_per_token",
+  "cache_read_input_token_cost",
+];
 
 /**
  * One LiteLLM entry as far as the eval reads it: each field's value when it decodes; absent when
@@ -114,8 +123,8 @@ export interface ModelPrices {
 
 /**
  * The LiteLLM provider of a model-router provider: Google's Gemini API is LiteLLM's `gemini`
- * (its unprefixed `vertex_ai-language-models` entries are Vertex AI's); every other provider
- * keeps its name.
+ * (as of 2026-11-05 its unprefixed `vertex_ai-language-models` entries are Vertex AI's); every
+ * other provider keeps its name.
  */
 const litellmProvider = (provider: string) => (provider === "google" ? "gemini" : provider);
 
@@ -142,6 +151,15 @@ export function modelPrices(prices: PriceData, model: string): ModelPrices {
     (candidate) => prices.entries.get(candidate)?.litellm_provider === provider,
   );
   if (key === undefined) {
+    // An entry under one of the keys whose provider doesn't decode may well be this model's: say
+    // so rather than "no entry", and don't exclude it on its PDF flag, which is a guess then.
+    const unreadable = keys.find((candidate) =>
+      prices.entries.get(candidate)?.malformed.includes("litellm_provider"),
+    );
+    if (unreadable !== undefined) {
+      const reason = `LiteLLM entry ${unreadable} has a malformed litellm_provider`;
+      return { entry: unreadable, pdfInput: null, pricing: { status: "unpriced", reason } };
+    }
     return unpriced(`no LiteLLM entry (${keys.join(" or ")} with litellm_provider ${provider})`);
   }
   const entry = prices.entries.get(key)!;
@@ -150,7 +168,7 @@ export function modelPrices(prices: PriceData, model: string): ModelPrices {
     pdfInput: entry.supports_pdf_input ?? null,
     pricing,
   });
-  const malformedPrices = entry.malformed.filter((field) => field !== "supports_pdf_input");
+  const malformedPrices = entry.malformed.filter((field) => PRICE_FIELDS.includes(field));
   if (malformedPrices.length > 0) {
     const reason = `LiteLLM entry ${key} has a malformed ${malformedPrices.join(" and ")}`;
     return found({ status: "unpriced", reason });
