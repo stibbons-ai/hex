@@ -2,7 +2,7 @@
 // that reading the config file (Mastra Studio does) never loads an adapter package.
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
-import { Schema } from "effect";
+import { Config, ConfigProvider, Effect, Redacted, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
 import { type Env, chatModel, configError, decodeOrThrow, readConfigFile } from "./config";
 
@@ -32,8 +32,13 @@ function requireEnv(
   return value;
 }
 
-function requireToken(env: Env, name: string, prefix: string): string {
-  return requireEnv(env, name, `start with "${prefix}"`, (value) => value.startsWith(prefix));
+/**
+ * A Slack token from `env`, checked like {@link requireEnv} and read as Effect `Config.Redacted`
+ * (it prints as `<redacted>`), unwrapped only where the adapter takes it.
+ */
+function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted<string> {
+  requireEnv(env, name, `start with "${prefix}"`, (value) => value.startsWith(prefix));
+  return Effect.runSync(Config.Redacted(name).parse(ConfigProvider.fromEnvRecord({ ...env })));
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
@@ -87,8 +92,8 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
     const apiUrl = env["SLACK_API_URL"];
     const adapter = createSlackAdapter({
       mode,
-      appToken: requireToken(env, "SLACK_APP_TOKEN", "xapp-"),
-      botToken: requireToken(env, "SLACK_BOT_TOKEN", "xoxb-"),
+      appToken: Redacted.value(requireToken(env, "SLACK_APP_TOKEN", "xapp-")),
+      botToken: Redacted.value(requireToken(env, "SLACK_BOT_TOKEN", "xoxb-")),
       // Optional: another Slack Web API base URL (tests point it at a fake Slack).
       ...(apiUrl ? { apiUrl } : {}),
     });
