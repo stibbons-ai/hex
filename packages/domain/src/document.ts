@@ -52,7 +52,7 @@ function imageExtension(mimeType: string): string | undefined {
   return Object.hasOwn(IMAGE_EXTENSIONS, type) ? IMAGE_EXTENSIONS[type] : undefined;
 }
 
-function isPdf({ mimeType, fileName }: AttachmentFacts): boolean {
+function isPdf({ mimeType, fileName }: Pick<AttachmentFacts, "mimeType" | "fileName">): boolean {
   const type = baseMimeType(mimeType);
   if (type === "application/pdf") return true;
   return type === "application/octet-stream" && /\.pdf$/i.test(fileName?.trim() ?? "");
@@ -76,6 +76,33 @@ export function isDocument(attachment: AttachmentFacts): boolean {
 /** The extension (with its dot) a Document of this MIME type is filed with when it has no name. */
 export function documentExtension(mimeType: string): string {
   return imageExtension(mimeType) ?? ".pdf";
+}
+
+/**
+ * Image types a model reads natively (the ones OpenAI, Anthropic and Google all accept), by the
+ * types a Document may come as; the rest (HEIC, HEIF, TIFF, BMP) a provider may reject.
+ */
+const MODEL_IMAGE_TYPES: Readonly<Record<string, string>> = {
+  "image/jpeg": "image/jpeg",
+  "image/jpg": "image/jpeg",
+  "image/pjpeg": "image/jpeg",
+  "image/png": "image/png",
+  "image/gif": "image/gif",
+  "image/webp": "image/webp",
+};
+
+/**
+ * The media type to hand a Document to a model as, so it can read the Document date: PDFs
+ * (`application/octet-stream` named `*.pdf` too) as `application/pdf`, images as their canonical
+ * type. Undefined for an image type models don't commonly take (HEIC, HEIF, TIFF, BMP) or a type
+ * that is no Document: such a Document is filed by its received date.
+ */
+export function documentMediaType(
+  attachment: Pick<AttachmentFacts, "mimeType" | "fileName">,
+): string | undefined {
+  if (isPdf(attachment)) return "application/pdf";
+  const type = baseMimeType(attachment.mimeType);
+  return Object.hasOwn(MODEL_IMAGE_TYPES, type) ? MODEL_IMAGE_TYPES[type] : undefined;
 }
 
 /** A Content-ID as compared with `cid:` references: no angle brackets, trimmed, lowercase. */

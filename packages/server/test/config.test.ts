@@ -249,28 +249,40 @@ describe("loadChatConfig", () => {
 });
 
 describe("loadIntakeConfig", () => {
-  test("without a config file the Category is ER", async () => {
-    expect(await loadIntakeConfig(undefined)).toEqual({ category: "ER" });
+  const defaults = { category: "ER", model: "openai/gpt-5.1-codex-mini" } as const;
+
+  test("without a config file: Category ER, model openai/gpt-5.1-codex-mini", async () => {
+    expect(await loadIntakeConfig(undefined)).toEqual(defaults);
   });
 
   test.each([
     ["no intake section", valid],
-    ["no category", { ...valid, intake: {} }],
+    ["no category or model", { ...valid, intake: {} }],
     ["category ER", { ...valid, intake: { category: "ER" } }],
-  ])("%s files under ER", async (_case, content) => {
-    expect(await loadIntakeConfig(await configFile(content))).toEqual({ category: "ER" });
+  ])("%s: the defaults", async (_case, content) => {
+    expect(await loadIntakeConfig(await configFile(content))).toEqual(defaults);
   });
 
   test("reads the intake section without the chat secrets", async () => {
     // Slack tokens are missing from the environment; only the chat config would need them.
-    const path = await configFile({ ...valid, intake: { category: "ER" } });
-    expect(await loadIntakeConfig(path)).toEqual({ category: "ER" });
+    const path = await configFile({
+      ...valid,
+      intake: { category: "ER", model: "anthropic/claude-haiku-4-5" },
+    });
+    expect(await loadIntakeConfig(path)).toEqual({
+      category: "ER",
+      model: "anthropic/claude-haiku-4-5",
+    });
   });
 
   test.each([
     ["another Category", { category: "AR" }, '["intake"]["category"]'],
     ["a lowercase er", { category: "er" }, '["intake"]["category"]'],
     ["an unknown intake key", { category: "ER", folder: "x" }, '["intake"]["folder"]'],
+    ["a model without provider", { model: "gpt-5.1-codex-mini" }, '["intake"]["model"]'],
+    ["a model with whitespace", { model: "openai/gpt 5" }, '["intake"]["model"]'],
+    ["an empty provider", { model: "/gpt-5" }, '["intake"]["model"]'],
+    ["a model that is no string", { model: 5 }, '["intake"]["model"]'],
   ])("%s fails, naming the file and the key", async (_case, intake, at) => {
     const path = await configFile({ ...valid, intake });
     const loading = loadIntakeConfig(path);

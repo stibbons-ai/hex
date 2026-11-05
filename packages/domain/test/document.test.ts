@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   MIN_IMAGE_DOCUMENT_BYTES,
   contentIdReferences,
+  documentMediaType,
   isDocument,
   normalizeContentId,
 } from "../src";
@@ -53,6 +54,29 @@ describe("isDocument", () => {
       expect(isDocument({ mimeType, disposition, referencedByCid, size, fileName })).toBe(expected);
     },
   );
+});
+
+describe("documentMediaType", () => {
+  // [MIME type as sent, file name, media type the model gets]
+  test.each([
+    ["application/pdf", "r.pdf", "application/pdf"],
+    ['Application/PDF; name="r.pdf"', "r.pdf", "application/pdf"],
+    ["application/octet-stream", "Scan.PDF", "application/pdf"],
+    ["image/jpeg", "scan.jpg", "image/jpeg"],
+    ["image/jpg", "scan.jpg", "image/jpeg"],
+    ["image/pjpeg", "scan.jpg", "image/jpeg"],
+    ["IMAGE/PNG", undefined, "image/png"],
+    ["image/gif", "scan.gif", "image/gif"],
+    ["image/webp", "scan.webp", "image/webp"],
+    // Images models don't commonly take: never sent, filed by the received date
+    ["image/heic", "IMG_0001.HEIC", undefined],
+    ["image/heif", "IMG_0001.HEIF", undefined],
+    ["image/tiff", "scan.tif", undefined],
+    ["image/bmp", "scan.bmp", undefined],
+    ["application/octet-stream", "scan.bin", undefined],
+  ] as const)("%s named %s → %p", (mimeType, fileName, expected) => {
+    expect(documentMediaType({ mimeType, fileName })).toBe(expected);
+  });
 });
 
 describe("contentIdReferences", () => {

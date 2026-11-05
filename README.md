@@ -68,12 +68,13 @@ bun run intake path/to/mail.eml
 ```
 
 runs the Intake workflow once, in process, on one `.eml` Intake and prints what it did: the
-Documents it filed (paths relative to the Outbox), that the Intake has no Documents, or that it
-was already processed. It exits with code 1 and a message on a file it can't read or that is no
-mail, an Intake without a Message-ID or without a usable received date, a config it can't use,
-or a failed run. Run it from the repository root. The same workflow is registered with the server
-as `intake` (`workflows.start` with an Intake as `inputData`); the server opens the Intake ledger
-at startup and fails to start when it can't.
+Documents it filed (paths relative to the Outbox; a Document filed by its received date is
+marked `(no Document date found; filed by received date)`), that the Intake has no Documents, or
+that it was already processed. It exits with code 1 and a message on a file it can't read or
+that is no mail, an Intake without a Message-ID or without a usable received date, a config it
+can't use, or a failed run. Run it from the repository root. The same workflow is registered
+with the server as `intake` (`workflows.start` with an Intake as `inputData`); the server opens
+the Intake ledger at startup and fails to start when it can't.
 
 The workflow, in order:
 
@@ -87,9 +88,24 @@ The workflow, in order:
    and every other type (`.ics`, text, office files). An attached mail (`message/rfc822`) is
    one non-Document attachment, never unpacked: the Documents inside it are not filed. An
    unreferenced `inline` image or PDF counts, since Apple Mail sends scans that way.
-3. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by the Intake's received date
-   as a calendar date in `Europe/Berlin`. The received date is the date after the last `;` of the
-   topmost `Received:` header, else the `Date:` header, each only in the form
+3. **Document dates** (`packages/adapters/src/date-extractor.ts`): a model reads each
+   Document's Document date from the Document itself, handed over natively through Mastra's
+   model router (PDFs as `application/pdf` file parts, JPEG, PNG, GIF and WebP images as image
+   file parts; hex does no OCR or text extraction and the model never sees the file name). The
+   Document date is the date it was issued (invoice date, Rechnungsdatum, Belegdatum, receipt
+   date), never a due date, delivery or service period, order date or the date it was printed
+   or sent. The model answers `{ year, month, day }` as structured output (an Effect Schema,
+   decoded again in the step), all `null` when the Document shows no date. HEIC, HEIF, TIFF
+   and BMP images are not sent (providers don't commonly take them). A model call that fails
+   (network, missing or wrong API key, rate limit, provider error) fails the run before
+   anything is filed or recorded, so running the Intake again retries it; the error names the
+   Document and the model.
+4. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
+   the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
+   date, an answer that doesn't match the schema, 30 February, month 13, a two-digit year, a
+   type not sent) it falls back to the Intake's received date as a calendar date in
+   `Europe/Berlin`, and the Filing records that. The received date is the date after the last
+   `;` of the topmost `Received:` header, else the `Date:` header, each only in the form
    `[Day,] D Mon YYYY HH:MM[:SS] zone` (four-digit year, two-digit hours, comments such as
    `(CET)` ignored), a header year of 1000 or later, a valid time (a leap second `:60` is read
    as `:59`) and a day that exists. The zone is `±HHMM` (up to 23:59) or
@@ -108,14 +124,16 @@ The workflow, in order:
    the Document is filed: a failed flush or a `.partial` that can't be removed only logs a
    warning. A failed write removes its `.partial` (logging a warning if it can't); a crash or
    kill mid-write can leave one behind.
-4. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
+5. **Ledger**: the Intake is recorded as processed with its Filings, also when it had no
    Documents.
 
-| Setting                        | Meaning                                                                                   |
-| ------------------------------ | ----------------------------------------------------------------------------------------- |
-| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                        |
-| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                   |
-| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category` |
+| Setting                        | Meaning                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `HEX_DATA_DIR`                 | Data directory with `mastra.db`, as for the server                                                                  |
+| `HEX_OUTBOX_DIR`               | The Outbox; default `<data dir>/outbox`                                                                             |
+| `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                           |
+| `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `openai/gpt-5.1-codex-mini`            |
+| `OPENAI_API_KEY`               | API key for the default model; another provider takes its own variable (e.g. `ANTHROPIC_API_KEY`), never the config |
 
 The config file is the one described under [Chat](#chat-slack-signal), so its `chat` section is
 required:
@@ -123,15 +141,22 @@ required:
 ```json
 {
   "chat": { "model": "anthropic/claude-opus-5-5", "channels": {} },
-  "intake": { "category": "ER" }
+  "intake": { "category": "ER", "model": "openai/gpt-5.1-codex-mini" }
 }
 ```
 
+hex doesn't check at startup that the model's API key is set: without it every Intake with
+Documents fails until it is.
+
 The ledger is the table `hex_intake_ledger` in `mastra.db`, created on first use: one row per
 Intake with `message_id` (the key), `processed_at`, `document_count` and `filings` (JSON, one
-`{ "index": …, "path": … }` per Document: its position among the attachments, 0-based, and where
-it landed). An Intake whose run failed halfway is not recorded, so running it again files the
-Documents that already landed a second time, as `name (1).pdf`.
+`{ "index": …, "path": …, "fellBack": … }` per Document: its position among the attachments,
+0-based, where it landed, and `true` when it was filed by the received date because no usable
+Document date came back). Entries recorded before Document dates were read have no `fellBack`:
+they read back without it, claiming nothing either way. The workflow's result (`IntakeResult`)
+carries the same Filings, also for an Intake already processed. An Intake whose run failed
+halfway is not recorded, so running it again files the Documents that already landed a second
+time, as `name (1).pdf`.
 
 ## Chat (Slack, Signal)
 
@@ -344,12 +369,12 @@ bun run test          # bun test
 
 ## Packages
 
-| Package             | Holds                                                                                                                                         |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger                              |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                         |
-| `@hex/eval-harness` | Empty until the evaluation slice                                                                                                              |
+| Package             | Holds                                                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names  |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router) |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                          |
+| `@hex/eval-harness` | Empty until the evaluation slice                                                                                                               |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags

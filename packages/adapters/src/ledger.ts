@@ -4,11 +4,19 @@ import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import { messageOf } from "./errors";
 import { localDatabaseUrl } from "./storage";
 
-/** One Document's Filing: which attachment it was and where it landed, relative to the Outbox. */
+/**
+ * One Document's Filing: which attachment it was, where it landed, relative to the Outbox, and
+ * whether it was filed by the received date because no usable Document date came back.
+ */
 export const Filing = Schema.Struct({
   /** The Document's 0-based index among the Intake's attachments. */
   index: Schema.Int,
   path: Schema.String,
+  /**
+   * True: filed by the received date, as no usable Document date came back (`FilingPlan.fellBack`).
+   * Absent on entries recorded before Document dates were read: nothing is known either way.
+   */
+  fellBack: Schema.optionalKey(Schema.Boolean),
 });
 export type Filing = typeof Filing.Type;
 
