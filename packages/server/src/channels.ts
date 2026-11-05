@@ -2,9 +2,16 @@
 // that reading the config file (Mastra Studio does) never loads an adapter package.
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
-import { Config, ConfigProvider, Effect, Redacted, Schema } from "effect";
+import { Config, Redacted, Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
-import { type Env, chatModel, configError, decodeOrThrow, readConfigFile } from "./config";
+import {
+  type Env,
+  chatModel,
+  configError,
+  decodeOrThrow,
+  readConfigFile,
+  readEnvConfig,
+} from "./config";
 
 /**
  * Builds one platform's channel from its config `options`; secrets come from `env` only. An
@@ -33,12 +40,19 @@ function requireEnv(
 }
 
 /**
- * A Slack token from `env`, checked like {@link requireEnv} and read as Effect `Config.Redacted`
- * (it prints as `<redacted>`), unwrapped only where the adapter takes it.
+ * A Slack token from `env`, read once as Effect `Config.Redacted` (it prints as `<redacted>`) and
+ * checked on the redacted value; unwrapped only where the adapter takes it. Throws naming the
+ * variable and the prefix it must have, never the value.
  */
 function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted<string> {
-  requireEnv(env, name, `start with "${prefix}"`, (value) => value.startsWith(prefix));
-  return Effect.runSync(Config.Redacted(name).parse(ConfigProvider.fromEnvRecord({ ...env })));
+  const read = readEnvConfig(Config.Redacted(name), env);
+  if (Result.isFailure(read) || Redacted.value(read.success) === "") {
+    throw new Error(`environment variable ${name} is not set`);
+  }
+  if (!Redacted.value(read.success).startsWith(prefix)) {
+    throw new Error(`environment variable ${name} must start with "${prefix}"`);
+  }
+  return read.success;
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.

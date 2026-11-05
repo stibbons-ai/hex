@@ -90,16 +90,33 @@ export function externalsManifest(
     packages[key] = lock.packages[key]!;
     const required = Object.keys(metadata?.dependencies ?? {});
     const optional = Object.keys(metadata?.optionalDependencies ?? {});
+    // Optional dependencies limited to some platforms are a native package's per-platform
+    // bindings (`@libsql/linux-arm64-gnu`, `@duckdb/node-bindings-linux-arm64`): at least one
+    // has to fit, or the install would succeed and the addon fail to load at startup.
+    let platformBindings = 0;
+    let fittingBindings = 0;
     for (const name of [...required, ...optional]) {
       const resolved = resolve(key, name);
       if (resolved === undefined) {
         // Bun locks optional dependencies for every platform, so a missing one is a lock fault too.
         throw new Error(`${key} depends on ${name}, which is not in bun.lock`);
       }
-      if (fits(resolved)) queue.push(resolved);
-      else if (required.includes(name)) {
-        throw new Error(`${key} needs ${name}, which doesn't support ${describe(target)}`);
+      const fitsTarget = fits(resolved);
+      if (fitsTarget) queue.push(resolved);
+      if (required.includes(name)) {
+        if (!fitsTarget) {
+          throw new Error(`${key} needs ${name}, which doesn't support ${describe(target)}`);
+        }
+        continue;
       }
+      const { metadata: binding } = registryEntry(resolved);
+      if (binding?.os !== undefined || binding?.cpu !== undefined) {
+        platformBindings++;
+        if (fitsTarget) fittingBindings++;
+      }
+    }
+    if (platformBindings > 0 && fittingBindings === 0) {
+      throw new Error(`${key} has no native binding for ${describe(target)}`);
     }
   }
   const name = "hex-server-externals";

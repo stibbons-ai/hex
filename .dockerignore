@@ -1,4 +1,5 @@
 # Only sources and manifests reach the build; never keys, databases, Intakes or local state.
+# Adapted from stibbons-ai/iconograph's .dockerignore (MIT).
 **/node_modules
 .data
 .mastra

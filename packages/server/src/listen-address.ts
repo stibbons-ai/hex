@@ -29,13 +29,16 @@ export function listenAddress(env: Readonly<Record<string, string | undefined>> 
   if (!/^\d+$/.test(portText) || port > 65535) {
     throw new Error(`HEX_PORT must be an integer from 0 to 65535, got ${JSON.stringify(portText)}`);
   }
-  const hostname = env["HEX_HOST"] || DEFAULT_HOST;
+  const given = env["HEX_HOST"] || DEFAULT_HOST;
   // A name could resolve to any interface, or to another machine's address.
-  if (isIP(hostname) === 0) {
+  if (isIP(given) === 0) {
     throw new Error(
-      `HEX_HOST must be an IP address (127.0.0.1, or 0.0.0.0 inside a container), got ${JSON.stringify(hostname)}`,
+      `HEX_HOST must be an IP address (127.0.0.1, or 0.0.0.0 inside a container), got ${JSON.stringify(given)}`,
     );
   }
+  // In the form clients send in their Host header (`0:0:0:0:0:0:0:1` → `::1`), so the allow-list
+  // and the wildcard check match it.
+  const hostname = new URL(`http://${urlHost(given)}/`).hostname.replace(/^\[(.*)\]$/, "$1");
   return { hostname, port };
 }
 

@@ -1,5 +1,6 @@
 # One service, one data volume, the Outbox bind-mounted from the host (ADR 0005). Copy
-# .env.example to .env and set HEX_OUTBOX_HOST_DIR first. Built locally; never pushed.
+# .env.example to .env and set HEX_OUTBOX_HOST_DIR first. Built locally; never pushed. Adapted
+# from stibbons-ai/iconograph's compose.yaml (MIT).
 name: hex
 services:
   hex:
@@ -10,10 +11,13 @@ services:
     # below.
     env_file: .env
     environment:
-      # Pinned (the image sets the same): HEX_HOST/PORT must match the published port below and
-      # the paths the mounts, or the container would be unreachable or lose its data. The server
-      # listens on every interface inside the container; the port is published on the host's
-      # loopback only, so nothing else on the network can reach it (ADR 0005).
+      # Pinned (the image sets the same). HEX_HOST must be the wildcard: a loopback bind inside the
+      # container is unreachable through a published port. HEX_PORT must match the container port
+      # published below, and the paths the mounts, or the container would be unreachable or lose
+      # its data. The port is published on the host's loopback only, so the LAN can't reach it;
+      # the Mac itself (through the container's IP) and other containers on this compose network
+      # reach port 4111 directly, where only the Host check stands, which browsers can't forge
+      # (ADR 0005).
       HEX_HOST: 0.0.0.0
       HEX_PORT: "4111"
       HEX_DATA_DIR: /data

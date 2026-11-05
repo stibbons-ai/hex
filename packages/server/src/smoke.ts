@@ -13,6 +13,27 @@ import { DuckDBStore } from "@mastra/duckdb";
 
 const directory = await mkdtemp(join(tmpdir(), "hex-smoke-"));
 
+/**
+ * `use(store)`, then the store closed. When `use` fails, its error is the one thrown; a close
+ * failing after it is logged, so it can't hide the cause.
+ */
+async function thenClose<S extends { close(): Promise<void> }, T>(
+  store: S,
+  use: (store: S) => Promise<T>,
+): Promise<T> {
+  let result: T;
+  try {
+    result = await use(store);
+  } catch (error) {
+    await store.close().catch((closeError: unknown) => {
+      console.error("closing the store after the failure also failed:", closeError);
+    });
+    throw error;
+  }
+  await store.close();
+  return result;
+}
+
 const checks: Record<string, () => Promise<object>> = {
   // Mastra reads these from JSON beside its package.json, which bundling breaks silently.
   "mastra-capabilities": async () => {
@@ -23,26 +44,18 @@ const checks: Record<string, () => Promise<object>> = {
     return { "openai/gpt-4.1": { structuredOutput: supported } };
   },
   // LibSQL's native addon: the store creates its tables in a new file.
-  "libsql-opens": async () => {
-    const store = await createLocalStore(join(directory, "mastra.db"));
-    try {
+  "libsql-opens": async () =>
+    thenClose(await createLocalStore(join(directory, "mastra.db")), async (store) => {
       await store.init();
-    } finally {
-      await store.close();
-    }
-    return {};
-  },
+      return {};
+    }),
   // DuckDB's native addon: the observability tables are created and read back.
-  "duckdb-opens": async () => {
-    const store = new DuckDBStore({ path: join(directory, "observability.duckdb") });
-    try {
+  "duckdb-opens": () =>
+    thenClose(new DuckDBStore({ path: join(directory, "observability.duckdb") }), async (store) => {
       await store.init();
       const { spans } = await store.observability.listTraces({});
       return { traces: spans.length };
-    } finally {
-      await store.close();
-    }
-  },
+    }),
 };
 
 let failed = false;

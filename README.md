@@ -173,7 +173,10 @@ docker compose down             # stops it; the data volume stays
   (`127.0.0.1:4111:4111`). Never publish it as `-p 4111:4111` or `"4111:4111"` without
   `127.0.0.1:`: that hands the unauthenticated server, your Documents and your model keys to the
   network. Keep the host port equal to the container's 4111 too: the `Host` header check only
-  allows `127.0.0.1:4111` and `localhost:4111`, so another host port answers 403.
+  allows `127.0.0.1:4111` and `localhost:4111`, so another host port answers 403. The loopback
+  publish keeps the LAN out; the Mac itself (through the container's IP) and other containers on
+  the compose network still reach port 4111 directly, with only the `Host` check in the way, which
+  browsers can't forge (ADR 0005).
 
 ## Traces and Studio
 

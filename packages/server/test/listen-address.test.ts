@@ -22,6 +22,14 @@ describe("listenAddress", () => {
     });
   });
 
+  test.each([
+    ["0:0:0:0:0:0:0:1", "::1"],
+    ["0:0:0:0:0:0:0:0", "::"],
+    ["::FFFF:127.0.0.1", "::ffff:7f00:1"],
+  ])("normalises HEX_HOST=%j to %j, the form clients send", (host, normal) => {
+    expect(listenAddress({ HEX_HOST: host }).hostname).toBe(normal);
+  });
+
   test.each(["localhost", "example.com", "0.0.0.0:4111", "[::1]", " 127.0.0.1"])(
     "rejects HEX_HOST=%j: an IP address only, never a name",
     (host) => {
