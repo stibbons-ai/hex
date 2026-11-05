@@ -17,7 +17,8 @@ const root = process.env.MASTRA_PROJECT_ROOT || process.cwd();
 const configPath = process.env.HEX_CONFIG ? resolve(root, process.env.HEX_CONFIG) : undefined;
 const { category, model } = await loadIntakeConfig(configPath);
 const paths = dataPaths(process.env, root);
-// Visible proof of the root: run any other way, the paths fall back to `.mastra/output`.
+// Visible proof of the root: without MASTRA_PROJECT_ROOT the paths fall back to the working
+// directory (`.mastra/output` under `mastra start`'s layout).
 console.log(`hex studio: data in ${paths.databasePath} and ${paths.observabilityPath}`);
 const chatAgent = configPath ? createStudioChatAgent(await loadChatModel(configPath)) : undefined;
 
