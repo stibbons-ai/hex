@@ -64,7 +64,7 @@ jobs:
           outbox="$(mktemp -d)"
           printf '%s\n' "HEX_OUTBOX_HOST_DIR=$outbox" HEX_HOST=1.2.3.4 HEX_PORT=9999 \
             HEX_DATA_DIR=/tmp HEX_OUTBOX_DIR=/tmp MASTRA_TELEMETRY_DISABLED=0 DO_NOT_TRACK=0 > .env
-          compose config --format json | jq -e --arg outbox "$outbox" '
+          compose --profile '*' config --format json | jq -e --arg outbox "$outbox" '
             (.services | keys) == ["hex"]
             and (.volumes["hex-data"] | (.driver // null) == null and (.driver_opts // null) == null
               and (.external // false) == false)

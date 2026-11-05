@@ -52,7 +52,7 @@ export function externalsManifest(
   lock: BunLock,
   externals: readonly string[],
   target: Target,
-  natives: readonly string[] = [],
+  natives: readonly string[],
 ): ExternalsManifest {
   assertLockVersion(lock);
   /** The registry entry at `key`: its platform and dependencies are read from its metadata. */

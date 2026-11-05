@@ -46,10 +46,11 @@ function requireEnv(
 function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted<string> {
   const read = readEnvConfig(Config.Redacted(name), env);
   const value = Result.isSuccess(read) ? Redacted.value(read.success) : undefined;
-  requireEnv({ [name]: value }, name, `start with "${prefix}"`, (token) =>
-    token.startsWith(prefix),
+  return Redacted.make(
+    requireEnv({ [name]: value }, name, `start with "${prefix}"`, (token) =>
+      token.startsWith(prefix),
+    ),
   );
-  return Redacted.make(value!);
 }
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.

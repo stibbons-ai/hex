@@ -82,6 +82,7 @@ describe("externalsManifest", () => {
       lock,
       ["libsql", "@duckdb/node-api"],
       linuxArm64Glibc,
+      ["libsql", "@duckdb/node-bindings"],
     );
     expect(packageJson.dependencies).toEqual({
       libsql: "0.5.29",
@@ -111,15 +112,17 @@ describe("externalsManifest", () => {
   });
 
   test("picks musl packages by name or by their libc field, and x64 by cpu", () => {
-    const musl = externalsManifest(lock, ["libsql", "@duckdb/node-api"], {
-      ...linuxArm64Glibc,
-      libc: "musl",
-    });
+    const musl = externalsManifest(
+      lock,
+      ["libsql", "@duckdb/node-api"],
+      { ...linuxArm64Glibc, libc: "musl" },
+      ["libsql", "@duckdb/node-bindings"],
+    );
     expect(Object.keys(musl.lock.packages).filter((key) => /linux/.test(key))).toEqual([
       "@duckdb/node-bindings-linux-arm64-musl",
       "@libsql/linux-arm64-musl",
     ]);
-    const x64 = externalsManifest(lock, ["libsql"], { ...linuxArm64Glibc, cpu: "x64" });
+    const x64 = externalsManifest(lock, ["libsql"], { ...linuxArm64Glibc, cpu: "x64" }, ["libsql"]);
     expect(Object.keys(x64.lock.packages)).toEqual([
       "@libsql/linux-x64-gnu",
       "@neon-rs/load",
@@ -130,14 +133,14 @@ describe("externalsManifest", () => {
 
   test("fails on an external the target can't run or a dependency the lock lacks", () => {
     expect(() =>
-      externalsManifest(lock, ["libsql"], { os: "freebsd", cpu: "x64", libc: "glibc" }),
+      externalsManifest(lock, ["libsql"], { os: "freebsd", cpu: "x64", libc: "glibc" }, []),
     ).toThrow("External libsql doesn't support freebsd-x64-glibc");
-    expect(() => externalsManifest(lock, ["sharp"], linuxArm64Glibc)).toThrow(
+    expect(() => externalsManifest(lock, ["sharp"], linuxArm64Glibc, [])).toThrow(
       "External sharp is not in bun.lock",
     );
     const { "@neon-rs/load": _, ...withoutLoad } = lock.packages;
     expect(() =>
-      externalsManifest({ ...lock, packages: withoutLoad }, ["libsql"], linuxArm64Glibc),
+      externalsManifest({ ...lock, packages: withoutLoad }, ["libsql"], linuxArm64Glibc, []),
     ).toThrow("libsql depends on @neon-rs/load, which is not in bun.lock");
     // Platform and dependency metadata are only read from registry entries.
     expect(() =>
@@ -152,6 +155,7 @@ describe("externalsManifest", () => {
         },
         ["libsql"],
         linuxArm64Glibc,
+        [],
       ),
     ).toThrow(
       "@neon-rs/load (@neon-rs/load@git+ssh://git@host/load.git#abc) isn't a registry package",
@@ -179,7 +183,7 @@ describe("externalsManifest", () => {
       },
     };
     expect(
-      Object.keys(externalsManifest(watcher, ["watcher"], linuxArm64Glibc).lock.packages),
+      Object.keys(externalsManifest(watcher, ["watcher"], linuxArm64Glibc, []).lock.packages),
     ).toEqual(["watcher"]);
   });
 
