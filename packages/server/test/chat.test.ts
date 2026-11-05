@@ -637,24 +637,64 @@ describe("chat channel lifecycle", () => {
   test("stop() waits a second grace period for a channel still disconnecting, then cuts it off", async () => {
     const adapter = new FakeChatAdapter();
     adapter.disconnect = () => new Promise(() => {});
-    const server = await startServer(serverOptions(chatOptions(adapter), { stopGraceMs: 50 }));
-    const order: string[] = [];
+    const server = await startServer(serverOptions(chatOptions(adapter), { stopGraceMs: 300 }));
+    let shutdownAfter = Number.NaN;
+    let started = 0;
     const shutdown = server.mastra.shutdown.bind(server.mastra);
     server.mastra.shutdown = async () => {
-      order.push("mastra");
+      shutdownAfter = performance.now() - started;
       await shutdown();
     };
     const warnings = await logged(server, "warn", async () => {
+      started = performance.now();
       await within(server.stop(), "stop()");
-      order.push("stopped");
     });
     expect(warnings).toEqual([
-      ["hex: stop: chat channels did not disconnect within 50 ms"],
+      ["hex: stop: chat channels did not disconnect within 300 ms"],
       [
-        "hex: stop: requests and chat replies still running after 50 ms were cut off, with the chat channels still disconnecting",
+        "hex: stop: requests and chat replies still running after 300 ms were cut off, with the chat channels still disconnecting",
       ],
     ]);
-    expect(order).toEqual(["mastra", "stopped"]);
+    // Both grace periods, and no more: Mastra shuts down after 2 × 300 ms (timers may run late).
+    expect(shutdownAfter).toBeGreaterThanOrEqual(590);
+    expect(shutdownAfter).toBeLessThan(750);
+  });
+
+  test("a channel that finishes disconnecting in stop()'s second grace period isn't reported cut off", async () => {
+    const entered = Promise.withResolvers<void>();
+    // The run never finishes, so stop()'s second grace period runs out.
+    const model = mockModel({
+      before: async () => {
+        entered.resolve();
+        await new Promise(() => {});
+      },
+    });
+    const adapter = new FakeChatAdapter();
+    const disconnected = Promise.withResolvers<void>();
+    adapter.disconnect = () => disconnected.promise;
+    const server = await startServer(
+      serverOptions(chatOptions(adapter, model), { stopGraceMs: 200 }),
+    );
+    void adapter.receive({ conversation: "dm-daniel", sender: DANIEL, text: "hi" });
+    await within(entered.promise, "the run to start");
+    const warn = spyOn(server.mastra.getLogger(), "warn");
+    warn.mockImplementation((...args) => {
+      // stop() gave up on the disconnect in its first step: it finishes in the second.
+      if (args[0] === "hex: stop: chat channels did not disconnect within 200 ms") {
+        disconnected.resolve();
+      }
+    });
+    try {
+      await within(server.stop(), "stop()");
+      expect(warn.mock.calls).toEqual([
+        ["hex: stop: chat channels did not disconnect within 200 ms"],
+        [
+          "hex: stop: requests and chat replies still running after 200 ms were cut off (1 chat replies)",
+        ],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("a channel disconnect failing while stop() waits for a reply is logged once; the reply finishes", async () => {

@@ -500,12 +500,12 @@ test("a reply stop() waits for past the channels' grace still has its receive cu
     },
   });
   await withFake(fakeSignalCli(), async (fake) => {
-    const settings = options("late-cursor", { chat: await chatFor(fake, model), stopGraceMs: 250 });
+    const settings = options("late-cursor", { chat: await chatFor(fake, model), stopGraceMs: 500 });
     const server = await startServer(settings);
     await fake.streamOpened();
     expect(fake.receive({ aci: DANIEL, text: "think a while" })).toBe("run-1");
     await within(entered.promise, "the run to start");
-    const gaveUp = warnings(server, "hex: stop: chat channels did not disconnect within 250 ms");
+    const gaveUp = warnings(server, "hex: stop: chat channels did not disconnect within 500 ms");
     const stopping = server.stop();
     // The run finishes only once stop() has stopped waiting for the channels to disconnect: in
     // the adapter's drain window, but after stop()'s first grace period.
