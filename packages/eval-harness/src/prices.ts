@@ -102,13 +102,12 @@ const litellmProvider = (provider: string) => (provider === "google" ? "gemini" 
  * `gemini/gemini-2.5-flash`. Priced when that entry has an input and an output price.
  */
 export function modelPrices(prices: PriceData, model: string): ModelPrices {
-  if (prices.status === "unavailable") {
-    return {
-      entry: null,
-      pdfInput: null,
-      pricing: { status: "unpriced", reason: `price data unavailable: ${prices.error}` },
-    };
-  }
+  const unpriced = (reason: string): ModelPrices => ({
+    entry: null,
+    pdfInput: null,
+    pricing: { status: "unpriced", reason },
+  });
+  if (prices.status === "unavailable") return unpriced(`price data unavailable: ${prices.error}`);
   const slash = model.indexOf("/");
   const provider = litellmProvider(model.slice(0, slash));
   const name = model.slice(slash + 1);
@@ -117,29 +116,18 @@ export function modelPrices(prices: PriceData, model: string): ModelPrices {
     (candidate) => prices.entries.get(candidate)?.litellm_provider === provider,
   );
   if (key === undefined) {
-    return {
-      entry: null,
-      pdfInput: null,
-      pricing: {
-        status: "unpriced",
-        reason: `no LiteLLM entry (${keys.join(" or ")} with litellm_provider ${provider})`,
-      },
-    };
+    return unpriced(`no LiteLLM entry (${keys.join(" or ")} with litellm_provider ${provider})`);
   }
   const entry = prices.entries.get(key)!;
+  const pdfInput = entry.supports_pdf_input ?? null;
   const input = entry.input_cost_per_token ?? undefined;
   const output = entry.output_cost_per_token ?? undefined;
-  return {
-    entry: key,
-    pdfInput: entry.supports_pdf_input ?? null,
-    pricing:
-      input === undefined || output === undefined
-        ? { status: "unpriced", reason: `LiteLLM entry ${key} has no input and output price` }
-        : {
-            status: "priced",
-            rates: { input, output, cachedInput: entry.cache_read_input_token_cost ?? null },
-          },
-  };
+  if (input === undefined || output === undefined) {
+    const reason = `LiteLLM entry ${key} has no input and output price`;
+    return { entry: key, pdfInput, pricing: { status: "unpriced", reason } };
+  }
+  const rates = { input, output, cachedInput: entry.cache_read_input_token_cost ?? null };
+  return { entry: key, pdfInput, pricing: { status: "priced", rates } };
 }
 
 /**

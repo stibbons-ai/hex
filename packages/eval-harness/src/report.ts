@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { ModelPrices } from "./prices.ts";
 
 /** `count` of `total`; `value` is `count / total`, `null` (not applicable) when `total` is 0. */
 export const Ratio = Schema.Struct({
@@ -8,7 +9,7 @@ export const Ratio = Schema.Struct({
 });
 export type Ratio = typeof Ratio.Type;
 
-export function ratio(count: number, total: number): Ratio {
+function ratio(count: number, total: number): Ratio {
   return { count, total, value: total === 0 ? null : count / total };
 }
 
@@ -19,6 +20,9 @@ export function formatRatio({ count, total, value }: Ratio): string {
 
 /** `$0.001234`: USD to six decimals, a millionth of a dollar. */
 export const formatUsd = (usd: number) => `$${usd.toFixed(6)}`;
+
+/** `120 ms`: milliseconds, rounded. */
+export const formatMs = (ms: number) => `${Math.round(ms)} ms`;
 
 /** The provider-reported tokens of one call, or their sum (see `TokenUsage`). */
 export const Tokens = Schema.Struct({
@@ -172,6 +176,108 @@ export const Report = Schema.Struct({
 });
 export type Report = typeof Report.Type;
 
+/** The set-level detection figures of `rows`. */
+export function detectionSummary(rows: readonly DetectionRow[]): Report["detection"] {
+  const count = (pick: (row: DetectionRow) => readonly string[]) =>
+    rows.reduce((sum, row) => sum + pick(row).length, 0);
+  const truePositives = count((row) => row.truePositives);
+  const falsePositives = count((row) => row.falsePositives);
+  const falseNegatives = count((row) => row.falseNegatives);
+  return {
+    truePositives,
+    falsePositives,
+    falseNegatives,
+    precision: ratio(truePositives, truePositives + falsePositives),
+    recall: ratio(truePositives, truePositives + falseNegatives),
+    intakes: rows,
+  };
+}
+
+/** The sum of `values`; `null` when all are (none was reported). */
+function sumReported(values: readonly (number | null)[]): number | null {
+  let sum: number | null = null;
+  for (const value of values) if (value !== null) sum = (sum ?? 0) + value;
+  return sum;
+}
+
+/** The sum of `all`; a detail (cached, reasoning) is `null` when no call reported it. */
+function sumTokens(all: readonly Tokens[]): Tokens | null {
+  if (all.length === 0) return null;
+  return {
+    input: sumReported(all.map(({ input }) => input))!,
+    output: sumReported(all.map(({ output }) => output))!,
+    cachedInput: sumReported(all.map(({ cachedInput }) => cachedInput)),
+    reasoning: sumReported(all.map(({ reasoning }) => reasoning)),
+  };
+}
+
+/** The middle of `values` (the mean of the two middle ones for an even count); `null` if none. */
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+type Answered = Extract<DocumentRow, { status: "answered" }>;
+
+/**
+ * The total cost of `answered`: unpriced when `pricing` is, when nothing answered, or when an
+ * answered call reported no tokens (never a silent undercount).
+ */
+function totalCost(
+  pricing: ModelPrices["pricing"],
+  answered: readonly Answered[],
+): ModelReport["cost"] {
+  if (pricing.status === "unpriced") return { status: "unpriced", reason: pricing.reason };
+  if (answered.length === 0) return { status: "unpriced", reason: "no answered call" };
+  const unreported = answered.filter(({ tokens }) => tokens === null).length;
+  if (unreported > 0) {
+    return { status: "unpriced", reason: `${unreported} answered call(s) reported no token usage` };
+  }
+  return { status: "priced", usd: answered.reduce((sum, { costUsd }) => sum + costUsd!, 0) };
+}
+
+/** One evaluated model's figures from its `rows`, priced as `prices` says. */
+export function modelReport(
+  model: string,
+  { entry, pdfInput, pricing }: ModelPrices,
+  rows: readonly IntakeRow[],
+): ModelReport {
+  const documents = rows.flatMap((row) => row.documents);
+  const counted = (keep: (row: DocumentRow) => boolean) => documents.filter(keep).length;
+  const answered = documents.filter((row): row is Answered => row.status === "answered");
+  const latencies = documents.flatMap((row) => (row.status === "not-sent" ? [] : [row.latencyMs]));
+  const cost = totalCost(pricing, answered);
+  return {
+    model,
+    pdfInput: pdfInput === true ? true : null,
+    priceEntry: entry,
+    extraction: {
+      exact: ratio(
+        counted((row) => row.exact),
+        documents.length,
+      ),
+      month: ratio(
+        counted((row) => row.month),
+        documents.length,
+      ),
+      notSent: counted((row) => row.status === "not-sent"),
+      failed: counted((row) => row.status === "failed"),
+    },
+    tokens: sumTokens(answered.flatMap(({ tokens }) => (tokens === null ? [] : [tokens]))),
+    cost,
+    costPerDocument:
+      cost.status === "unpriced" ? cost : { status: "priced", usd: cost.usd / answered.length },
+    latency: {
+      calls: latencies.length,
+      medianMs: median(latencies),
+      maxMs: latencies.length === 0 ? null : Math.max(...latencies),
+    },
+    intakes: rows,
+  };
+}
+
 /** `report` as `report.json`. */
 export function encodeReport(report: Report): string {
   return `${JSON.stringify(Schema.encodeUnknownSync(Report)(report), null, 2)}\n`;
@@ -195,7 +301,7 @@ function predictedCell(row: DocumentRow): string {
 const costCell = (cost: ModelReport["cost"]) =>
   cost.status === "priced" ? formatUsd(cost.usd) : "unpriced";
 
-const msCell = (ms: number | null) => (ms === null ? "n/a" : `${Math.round(ms)} ms`);
+const msCell = (ms: number | null) => (ms === null ? "n/a" : formatMs(ms));
 
 /** `1200 in (1024 cached), 80 out (64 reasoning)`. */
 export function formatTokens({ input, output, cachedInput, reasoning }: Tokens): string {
@@ -204,6 +310,9 @@ export function formatTokens({ input, output, cachedInput, reasoning }: Tokens):
     `${output} out${reasoning === null ? "" : ` (${reasoning} reasoning)`}`,
   ].join(", ");
 }
+
+const tokensCell = (tokens: Tokens | null) =>
+  tokens === null ? "not reported" : formatTokens(tokens);
 
 function documentLine(document: DocumentRow): string {
   const answered = document.status === "answered" ? document : undefined;
@@ -214,8 +323,8 @@ function documentLine(document: DocumentRow): string {
     document.exact ? "yes" : "no",
     document.month ? "yes" : "no",
     document.status === "not-sent" ? "n/a" : msCell(document.latencyMs),
-    !answered ? "n/a" : answered.tokens === null ? "not reported" : formatTokens(answered.tokens),
-    !answered ? "n/a" : answered.costUsd === null ? "unpriced" : formatUsd(answered.costUsd),
+    answered ? tokensCell(answered.tokens) : "n/a",
+    answered ? (answered.costUsd === null ? "unpriced" : formatUsd(answered.costUsd)) : "n/a",
   ]);
 }
 
@@ -292,7 +401,7 @@ export function renderMarkdown(report: Report): string {
       `| Month (year-month) | ${formatRatio(extraction.month)} |`,
       `| Not sent | ${extraction.notSent} |`,
       `| Failed | ${extraction.failed} |`,
-      `| Tokens | ${model.tokens === null ? "not reported" : formatTokens(model.tokens)} |`,
+      `| Tokens | ${tokensCell(model.tokens)} |`,
       `| Total cost | ${model.cost.status === "priced" ? formatUsd(model.cost.usd) : `unpriced (${cell(model.cost.reason)})`} |`,
       `| Cost per Document | ${costCell(model.costPerDocument)} |`,
       `| Price entry (LiteLLM) | ${model.priceEntry ?? "none"} |`,

@@ -9,15 +9,15 @@ import {
   messageOf,
   readEml,
 } from "@hex/adapters";
-import type { IntakeAttachment, TokenUsage } from "@hex/adapters";
+import type { DocumentFile, IntakeAttachment, TokenUsage } from "@hex/adapters";
 import { detectDocuments, documentMediaType, safeFileName } from "@hex/domain";
 import type { CalendarDate, DetectedDocument } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadExpectedSet } from "./expected.ts";
 import type { ExpectedIntake } from "./expected.ts";
 import { callCost, modelPrices } from "./prices.ts";
-import type { ModelPrices, PriceData, Rates } from "./prices.ts";
-import { encodeReport, ratio, renderMarkdown } from "./report.ts";
+import type { PriceData, Rates } from "./prices.ts";
+import { detectionSummary, encodeReport, modelReport, renderMarkdown } from "./report.ts";
 import type {
   DetectionRow,
   DocumentRow,
@@ -25,7 +25,6 @@ import type {
   ModelReport,
   Prediction,
   Report,
-  Tokens,
 } from "./report.ts";
 import {
   documentDateExactScorer,
@@ -56,12 +55,16 @@ export interface EvalRun {
 /** One labelled Intake, read and detected, its labels matched to attachments. */
 interface PreparedIntake {
   readonly label: ExpectedIntake;
-  readonly attachments: readonly IntakeAttachment[];
   readonly detected: readonly DetectedDocument[];
   /** Per attachment: the name labels and the report give it (see {@link labelName}). */
   readonly names: readonly string[];
   /** Per labelled Document, in label order: the index of its attachment. */
   readonly labelled: readonly number[];
+  /**
+   * Per labelled Document, in label order: what goes to the model, or undefined when its content
+   * `documentMediaType` rejects (never sent).
+   */
+  readonly sendable: readonly (Omit<DocumentFile, "fileName"> | undefined)[];
 }
 
 /** `YYYY-MM-DD`. */
@@ -110,12 +113,18 @@ async function prepare(fixtures: string): Promise<PreparedIntake[]> {
       );
       return [];
     });
+    const sendable = labelled.map((index) => {
+      const attachment = attachments[index]!;
+      const content = Buffer.from(attachment.content, "base64");
+      const mediaType = documentMediaType({ ...attachment, content });
+      return mediaType === undefined ? undefined : { content, mediaType };
+    });
     prepared.push({
       label,
-      attachments,
       detected: detectDocuments(facts, cidReferences),
       names,
       labelled,
+      sendable,
     });
   }
   if (problems.length > 0) throw new Error(`fixture errors:\n${problems.join("\n")}`);
@@ -143,16 +152,14 @@ const tokensOf = ({
  */
 function predict(intakes: readonly PreparedIntake[], rates: Rates | undefined) {
   return DateExtractor.use((extractor) =>
-    Effect.forEach(intakes, ({ label, attachments, labelled }) =>
+    Effect.forEach(intakes, ({ label, sendable }) =>
       Effect.forEach(label.documents, ({ fileName }, position): Effect.Effect<Prediction> => {
-        const attachment = attachments[labelled[position]!]!;
-        const content = Buffer.from(attachment.content, "base64");
-        const mediaType = documentMediaType({ ...attachment, content });
-        if (mediaType === undefined) return Effect.succeed({ status: "not-sent" });
+        const document = sendable[position];
+        if (document === undefined) return Effect.succeed({ status: "not-sent" });
         return Effect.suspend(() => {
           const start = performance.now();
           const elapsed = () => Math.round(performance.now() - start);
-          return extractor.extract({ content, mediaType, fileName }).pipe(
+          return extractor.extract({ ...document, fileName }).pipe(
             Effect.map(({ answer, usage }): Prediction => {
               const latencyMs = elapsed();
               const date = documentDateOf(answer);
@@ -230,92 +237,6 @@ async function intakeRow(
   return { file: label.file, documents };
 }
 
-/** The set-level detection figures of `rows`. */
-function detectionSummary(rows: readonly DetectionRow[]): Report["detection"] {
-  const truePositives = rows.flatMap((row) => row.truePositives).length;
-  const falsePositives = rows.flatMap((row) => row.falsePositives).length;
-  const falseNegatives = rows.flatMap((row) => row.falseNegatives).length;
-  return {
-    truePositives,
-    falsePositives,
-    falseNegatives,
-    precision: ratio(truePositives, truePositives + falsePositives),
-    recall: ratio(truePositives, truePositives + falseNegatives),
-    intakes: rows,
-  };
-}
-
-/** The sum of `all`; a detail (cached, reasoning) is `null` when no call reported it. */
-function sumTokens(all: readonly Tokens[]): Tokens | null {
-  if (all.length === 0) return null;
-  const detail = (pick: (tokens: Tokens) => number | null) => {
-    const reported = all.flatMap((tokens) => (pick(tokens) === null ? [] : [pick(tokens)!]));
-    return reported.length === 0 ? null : reported.reduce((sum, count) => sum + count, 0);
-  };
-  return {
-    input: all.reduce((sum, { input }) => sum + input, 0),
-    output: all.reduce((sum, { output }) => sum + output, 0),
-    cachedInput: detail(({ cachedInput }) => cachedInput),
-    reasoning: detail(({ reasoning }) => reasoning),
-  };
-}
-
-/** The middle of `values` (the mean of the two middle ones for an even count); `null` if none. */
-function median(values: readonly number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
-}
-
-/** One evaluated model's figures from its `rows`. */
-function modelReport(
-  model: string,
-  { entry, pdfInput, pricing }: ModelPrices,
-  rows: readonly IntakeRow[],
-): ModelReport {
-  const documents = rows.flatMap((row) => row.documents);
-  const counted = (keep: (row: DocumentRow) => boolean) => documents.filter(keep).length;
-  const answered = documents.flatMap((row) => (row.status === "answered" ? [row] : []));
-  const latencies = documents.flatMap((row) => (row.status === "not-sent" ? [] : [row.latencyMs]));
-  const unreported = answered.filter(({ tokens }) => tokens === null).length;
-  const cost: ModelReport["cost"] =
-    pricing.status === "unpriced"
-      ? { status: "unpriced", reason: pricing.reason }
-      : answered.length === 0
-        ? { status: "unpriced", reason: "no answered call" }
-        : unreported > 0
-          ? { status: "unpriced", reason: `${unreported} answered call(s) reported no token usage` }
-          : { status: "priced", usd: answered.reduce((sum, { costUsd }) => sum + costUsd!, 0) };
-  return {
-    model,
-    pdfInput: pdfInput === true ? true : null,
-    priceEntry: entry,
-    extraction: {
-      exact: ratio(
-        counted((row) => row.exact),
-        documents.length,
-      ),
-      month: ratio(
-        counted((row) => row.month),
-        documents.length,
-      ),
-      notSent: counted((row) => row.status === "not-sent"),
-      failed: counted((row) => row.status === "failed"),
-    },
-    tokens: sumTokens(answered.flatMap(({ tokens }) => (tokens === null ? [] : [tokens]))),
-    cost,
-    costPerDocument:
-      cost.status === "unpriced" ? cost : { status: "priced", usd: cost.usd / answered.length },
-    latency: {
-      calls: latencies.length,
-      medianMs: median(latencies),
-      maxMs: latencies.length === 0 ? null : Math.max(...latencies),
-    },
-    intakes: rows,
-  };
-}
-
 /**
  * The run's own new folder under `root` (which exists): `<UTC time>_<model>` for one configured
  * model, `<UTC time>_matrix` for several, suffixed `-2`, `-3`… if taken.
@@ -368,15 +289,15 @@ export async function runEval({
     });
   }
   const detection = detectionSummary(await Promise.all(intakes.map(detectionRow)));
-  const looked = models.map((model) => ({ model, prices: modelPrices(prices, model) }));
-  const excluded = looked.flatMap(({ model, prices: { entry, pdfInput } }) =>
-    pdfInput === false
-      ? [{ model, reason: `no PDF input (LiteLLM entry ${entry}: supports_pdf_input false)` }]
-      : [],
-  );
+  const excluded: Report["excluded"][number][] = [];
   const evaluated: ModelReport[] = [];
-  for (const { model, prices: found } of looked) {
-    if (found.pdfInput === false) continue;
+  for (const model of models) {
+    const found = modelPrices(prices, model);
+    if (found.pdfInput === false) {
+      const reason = `no PDF input (LiteLLM entry ${found.entry}: supports_pdf_input false)`;
+      excluded.push({ model, reason });
+      continue;
+    }
     const rates = found.pricing.status === "priced" ? found.pricing.rates : undefined;
     const predictions = await Effect.runPromise(
       predict(intakes, rates).pipe(Effect.provide(dateExtractor(model))),

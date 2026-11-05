@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dateExtractorLayer, messageOf } from "@hex/adapters";
 import { loadEvalConfig } from "@hex/server";
 import { LITELLM_PRICES_URL, fetchPriceData } from "./prices.ts";
-import { formatRatio, formatUsd } from "./report.ts";
+import { formatMs, formatRatio, formatUsd } from "./report.ts";
 import type { ModelReport } from "./report.ts";
 import { runEval } from "./run.ts";
 import { syntheticFolder } from "./synthetic/generate.ts";
@@ -26,9 +26,9 @@ function modelLine({ model, extraction, cost, latency }: ModelReport): string {
   const costText =
     cost.status === "priced" ? `cost ${formatUsd(cost.usd)}` : `unpriced (${cost.reason})`;
   const latencyText =
-    latency.medianMs === null
+    latency.medianMs === null || latency.maxMs === null
       ? "no calls"
-      : `latency median ${Math.round(latency.medianMs)} ms, max ${latency.maxMs} ms`;
+      : `latency median ${formatMs(latency.medianMs)}, max ${formatMs(latency.maxMs)}`;
   return `  ${model}: exact ${formatRatio(extraction.exact)}, month ${formatRatio(extraction.month)}; not sent ${extraction.notSent}, failed ${extraction.failed}; ${costText}; ${latencyText}`;
 }
 
@@ -51,7 +51,7 @@ async function main(): Promise<number> {
   const { report, folder } = await runEval({
     fixtures,
     models,
-    dateExtractor: (model) => dateExtractorLayer(model),
+    dateExtractor: dateExtractorLayer,
     prices,
     resultsRoot,
   });
