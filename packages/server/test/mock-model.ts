@@ -93,3 +93,23 @@ export function numberedModel({ before }: { before?: Before } = {}): MastraModel
   withBefore(model, before);
   return model as MastraModelConfig;
 }
+
+/**
+ * A {@link numberedModel} that records every call's prompt and holds call `held` (from 1) until
+ * `release()`; `busy` resolves once that call has started.
+ */
+export function heldModel(held = 1) {
+  const busy = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const prompts: string[] = [];
+  const model = numberedModel({
+    before: async (call) => {
+      prompts.push(JSON.stringify(call));
+      if (prompts.length === held) {
+        busy.resolve();
+        await release.promise;
+      }
+    },
+  });
+  return { model, prompts, busy: busy.promise, release: () => release.resolve() };
+}

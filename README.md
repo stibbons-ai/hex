@@ -232,12 +232,15 @@ it.
   would go to all of them. No typing indicator is shown (hex turns Mastra's typing status off on
   every channel). Messages the adapter doesn't support (stickers, view-once messages) are ignored
   and logged only at debug level.
-- Messages sent in a row are not dropped. Mastra creates the Chat SDK instance for all channels
-  with `concurrency: { strategy: "concurrent" }`, not Chat's default `"drop"`, against which the
-  adapter warns: a message that arrives while hex is still answering the same conversation goes
-  into that run, whose next model call sees it, and one answer covers both. A `"queue"` would be
-  possible through `channels.chatOptions`, but it is one setting for the whole Chat instance and so
-  would change Slack too; hex keeps Mastra's default.
+- Messages sent in a row are answered one after another, on every channel: hex sets the Chat SDK's
+  `queue` strategy (Mastra's default is `concurrent`). A message that arrives while hex is still
+  answering the same conversation waits; once the run is done, consecutive waiting messages from
+  one sender are answered together in one turn. At most 10 wait per conversation, anyone's
+  counting (in a Slack channel thread, others' messages too); beyond that the oldest is dropped,
+  and a message still waiting after 90 s is dropped too, both without an answer and without a line
+  in hex's log. Under `concurrent`, a message joined the run in progress, but Mastra
+  finished it in a run that a stop could cut off before it was saved, and two first messages of a
+  new conversation could land in two memory threads.
 - The adapter's receive cursor lives in memory only (Mastra's state adapter persists just
   subscriptions), so a restart starts at live events. Lost are messages hex had received but not
   answered within the 5-second stop grace, or when it crashed, and messages signal-cli took off
