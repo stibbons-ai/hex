@@ -1509,6 +1509,23 @@ describe("Intake workflow", () => {
       ]);
     });
 
+    test("a Document without a detected date written but not recorded is named as filed by received date", async () => {
+      const hex = freshHex();
+      hex.failing.filingRecords = 1;
+      await hex.process(pdfMail("undated-unrecorded@shop.example")).catch(() => {});
+      expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Rechnung.pdf"]);
+      expect(hex.mainChannel.posted).toEqual([
+        [
+          failedHead,
+          "Failed: filing: `Intake ledger: disk I/O error`",
+          "Done nonetheless:",
+          "1 without a detected date, filed by received date: `Rechnung.pdf`",
+          "Filed, but recording it failed, so running this Intake again files it again: 2026-11/ER/`Rechnung.pdf`",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
+        ].join("\n"),
+      ]);
+    });
+
     test("of two Documents, the recorded one is counted under its folder, the unrecorded one named", async () => {
       const hex = freshHex(dated);
       hex.failing.filingRecordsAfter = 1;

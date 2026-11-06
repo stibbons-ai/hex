@@ -186,12 +186,11 @@ function listBounded(items: readonly string[]): string {
 }
 
 /**
- * The Filings: how many went into each folder, in order of first appearance, e.g. "3 Documents
- * filed under 2026-10/ER, 1 under 2026-09/ER" (at most {@link MAX_LISTED} folders, then "and N
- * more in M folders"); then those filed by the received date, each named (at most
- * {@link MAX_LISTED}, then "and N more").
+ * The recorded Filings: how many went into each folder, in order of first appearance, e.g. "3
+ * Documents filed under 2026-10/ER, 1 under 2026-09/ER" (at most {@link MAX_LISTED} folders, then
+ * "and N more in M folders").
  */
-function filingLines(filings: readonly ReportFiling[]): string[] {
+function folderLines(filings: readonly ReportFiling[]): string[] {
   if (filings.length === 0) return [];
   const counts = new Map<string, number>();
   for (const { path } of filings) {
@@ -211,13 +210,18 @@ function filingLines(filings: readonly ReportFiling[]): string[] {
     const more = rest.reduce((sum, [, count]) => sum + count, 0);
     listed.push(`and ${more} more in ${rest.length === 1 ? "1 folder" : `${rest.length} folders`}`);
   }
-  const lines = [listed.join(", ")];
+  return [listed.join(", ")];
+}
+
+/**
+ * The Documents filed by the received date, recorded or not, each named (at most
+ * {@link MAX_LISTED}, then "and N more").
+ */
+function fallbackLines(filings: readonly ReportFiling[]): string[] {
   const fellBack = filings.filter((filing) => filing.fellBack);
-  if (fellBack.length > 0) {
-    const names = listBounded(fellBack.map(({ path }) => quote(splitPath(path).fileName)));
-    lines.push(`${fellBack.length} without a detected date, filed by received date: ${names}`);
-  }
-  return lines;
+  if (fellBack.length === 0) return [];
+  const names = listBounded(fellBack.map(({ path }) => quote(splitPath(path).fileName)));
+  return [`${fellBack.length} without a detected date, filed by received date: ${names}`];
 }
 
 /**
@@ -261,12 +265,12 @@ function consequenceLine(consequence: ReportConsequence): string {
 
 /**
  * The Intake report for one run, as plain text: the Intake by its subject and sender (else its
- * Message-ID), then what was filed and where, each Document filed by the received date named,
- * and the targets forwarded to. A failed run is marked FAILED, names each failed branch, what was
- * done nonetheless (a Document written but not recorded among it), and what comes next: a retry,
- * or the Intake failed permanently. Earlier runs' work that could not be read is said so, never
- * told as nothing done. Every value from the mail or a server is quoted as a code span (see
- * {@link quote}).
+ * Message-ID), then what was filed and where, each Document filed by the received date named
+ * (also one written but not recorded), and the targets forwarded to. A failed run is marked
+ * FAILED, names each failed branch, what was done nonetheless (a Document written but not
+ * recorded among it), and what comes next: a retry, or the Intake failed permanently. Earlier
+ * runs' work that could not be read is said so, never told as nothing done. Every value from the
+ * mail or a server is quoted as a code span (see {@link quote}).
  *
  * The report stays short whatever the Intake: each quoted value is cut at {@link MAX_QUOTED}
  * characters, each list at {@link MAX_LISTED} entries, and the failure and Forwarding lines grow
@@ -283,7 +287,8 @@ export function renderIntakeReport({
   outcome,
 }: IntakeReportInput): string {
   const done = [
-    ...filingLines(filings),
+    ...folderLines(filings),
+    ...fallbackLines([...filings, ...unrecordedFilings]),
     ...unrecordedLines(unrecordedFilings),
     ...forwardingLines(forwardings),
   ];

@@ -234,6 +234,38 @@ describe("renderIntakeReport", () => {
     ]);
   });
 
+  test("a Document without a date written but not recorded is named as filed by received date", () => {
+    const report = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 }),
+      filings: [],
+      forwardings: [],
+      unrecordedFilings: [{ path: "2026-11/ER/Rechnung.pdf", fellBack: true }],
+    }).split("\n");
+    expect(report.slice(-4, -1)).toEqual([
+      "Done nonetheless:",
+      "1 without a detected date, filed by received date: `Rechnung.pdf`",
+      "Filed, but recording it failed, so running this Intake again files it again: 2026-11/ER/`Rechnung.pdf`",
+    ]);
+  });
+
+  test("recorded and unrecorded Documents without a date are counted once each", () => {
+    const report = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 }),
+      filings: [
+        { path: "2026-11/ER/a.pdf", fellBack: true },
+        { path: "2026-10/ER/b.pdf", fellBack: false },
+      ],
+      forwardings: [],
+      unrecordedFilings: [{ path: "2026-11/ER/c.pdf", fellBack: true }],
+    }).split("\n");
+    expect(report.slice(-5, -1)).toEqual([
+      "Done nonetheless:",
+      "1 Document filed under 2026-11/ER, 1 under 2026-10/ER",
+      "2 without a detected date, filed by received date: `a.pdf`, `c.pdf`",
+      "Filed, but recording it failed, so running this Intake again files it again: 2026-11/ER/`c.pdf`",
+    ]);
+  });
+
   test("a bulk Intake's report stays short: lists are bounded, the consequence comes last", () => {
     // 230 Documents without a date, each with a long name, across 23 folders of 10.
     const filings = Array.from({ length: 230 }, (_, n) => ({

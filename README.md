@@ -665,7 +665,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   first post, with a warning. The
   report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
   folder (at most 10 folders, then `and N more in M folders`), names each one filed by the
-  received date (at most 10, then `and N more`), lists the Forwarding targets, and for a failed
+  received date, also one whose record failed (at most 10, then `and N more`), lists the
+  Forwarding targets, and for a failed
   run each failed branch, what was done nonetheless and what comes next (`Failed run n of 5`,
   counted as the mailbox watcher does, with the failed runs it held back in memory; at 5 failed
   permanently, with what became of the mail: moved to `hex/failed`, not found by its Message-ID,
