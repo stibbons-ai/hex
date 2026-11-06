@@ -55,7 +55,7 @@ export const postReport = (
     Effect.catchDefect((defect) =>
       Effect.succeed<ReportFate>({
         status: "not-sent",
-        reason: `posting it failed unexpectedly: ${messageOf(defect)}`,
+        reason: `rendering or posting it failed unexpectedly: ${messageOf(defect)}`,
       }),
     ),
   );

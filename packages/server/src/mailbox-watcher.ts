@@ -371,7 +371,6 @@ export function watchMailbox({
       const result = started.success;
       if (result.status === "success" && "result" in result) {
         const { status, mail, report } = result.result;
-        warnUnreported(messageId, report);
         yield* settleLogged(
           messageId,
           uid,
@@ -379,6 +378,8 @@ export function watchMailbox({
           (settled, options) =>
             `hex: Intake ${messageId}: ${status}; ${describeMove(settled, options)}`,
         );
+        // After the settle, so a logger that throws can't keep the mail from it.
+        warnUnreported(messageId, report);
         return;
       }
       // Mastra's failed result carries the step's error as it serialised it, `message` included.

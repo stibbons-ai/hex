@@ -136,7 +136,7 @@ describe("renderIntakeReport", () => {
     [
       "uncounted",
       { status: "uncounted", reason: "database is locked" },
-      "Counting the failed run failed (`database is locked`); see the hex log.",
+      "Recording the failed run failed (`database is locked`); see the hex log.",
     ],
   ])(
     "a failed run %s: each failure, what was done, the consequence",

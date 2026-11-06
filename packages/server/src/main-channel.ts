@@ -1,5 +1,5 @@
-// The Main channel: the one conversation where hex reaches Daniel unprompted (a Slack DM now,
-// Signal later), on the chat adapter the server connects.
+// The Main channel: the one conversation where hex reaches Daniel unprompted (a DM on Slack or
+// Signal), on the chat adapter the server connects.
 import { messageOf } from "@hex/adapters";
 import type { Adapter, AdapterPostableMessage } from "chat";
 import { Context, Data, Duration, Effect, Layer } from "effect";

@@ -451,7 +451,8 @@ folder and the number of copies, `not-in-mailbox`, or `not-moved` with the reaso
 run's `IntakeRunError` says it too (`kept-for-retry` when the Intake has runs left), unless the
 run ended before step 7 or the ledger couldn't record the failed run in step 8. Both also say
 what became of the run's Intake report (`report`: `sent`, `off`, or `not-sent` with the reason;
-none for an Intake already processed). Each branch is
+none for an Intake already processed or a run that ended before step 7: an unreadable ledger, a
+defect). Each branch is
 recorded as it succeeds, before the Intake is
 processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`target`,
 `forwarded_at`; one row per target) and `hex_intake_filings` (`document_index`, `path`,
@@ -668,7 +669,9 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   failed permanently with the mail in `hex/failed`). Text from the mail goes in code spans,
   escaped for Slack, so it forms no mention or link. A report that can't be posted is logged as a
   warning and changes nothing about the Intake; one the platform hasn't confirmed within 30
-  seconds counts as not posted, though it may still arrive. No report goes out for an Intake
+  seconds counts as not posted, though it may still arrive. A run whose result Mastra loses after
+  every step ran is settled by the watcher as processed without that warning. No report goes out
+  for an Intake
   already processed, for a run that ends before step 7 of the [Intake workflow](#intake-dev-command)
   (an unreadable ledger, a defect), or for mail that never becomes an Intake (an unreadable
   `.eml`, moved to `hex/failed` by the watcher). `bun run intake` posts no report.

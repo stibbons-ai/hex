@@ -46,7 +46,7 @@ export type ReportConsequence =
       readonly maxFailedRuns: number;
       readonly mail: ReportFailedMail;
     }
-  /** The failed run could not be counted. */
+  /** The failed run could not be recorded (counted, or its Intake failed permanently). */
   | { readonly status: "uncounted"; readonly reason: string };
 
 /** One Intake run's outcome, as the Intake report tells it. */
@@ -57,7 +57,7 @@ export interface IntakeReportInput {
     readonly subject?: string | undefined;
     readonly sender?: string | undefined;
   };
-  /** Processed: every Filing of the Intake. Failed: the ones this run made before it failed. */
+  /** Every Filing of the Intake so far, also those an earlier run made. */
   readonly filings: readonly ReportFiling[];
   /** The targets that have the Documents. */
   readonly forwardings: readonly ReportForwarding[];
@@ -81,8 +81,9 @@ const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 
 /**
  * `text` as a code span: on one line, without backticks (so it can't end the span early), cut to
- * {@link MAX_QUOTED} characters. Every value that comes from the mail or a server goes in one, so
- * a chat platform shows it literally: no mention, link or formatting forms from it.
+ * {@link MAX_QUOTED} characters. Every value that comes from the mail or a server goes in one; the
+ * code span plus the channel's own escaping (`plainText` in `packages/server/src/channels.ts`)
+ * keep it literal: no mention, link or formatting forms from it.
  */
 function quote(text: string): string {
   const flat = text.replace(UNPRINTABLE, " ").replaceAll("`", "'").replace(/\s+/g, " ").trim();
@@ -167,7 +168,7 @@ function consequenceLine(consequence: ReportConsequence): string {
       return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${failedMailLine(mail)}.`;
     }
     case "uncounted":
-      return `Counting the failed run failed (${quote(consequence.reason)}); see the hex log.`;
+      return `Recording the failed run failed (${quote(consequence.reason)}); see the hex log.`;
   }
 }
 

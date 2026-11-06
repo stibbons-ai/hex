@@ -240,6 +240,7 @@ describe("bun packages/server/src/main.ts", () => {
       });
       expect(started).toMatchObject({ status: "success", result: { report: { status: "sent" } } });
       const post = await slack.posted();
+      expect(slack.opened).toEqual([DANIEL]);
       expect(post.get("channel")).toBe(DM_CHANNEL);
       expect(post.get("text")).toBe(
         "Intake processed: `Rechnung` from `billing@shop.example`\nNo Documents; nothing filed.",

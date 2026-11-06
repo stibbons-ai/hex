@@ -22,7 +22,7 @@ import {
   normalizeMessageId,
   planFiling,
 } from "@hex/domain";
-import type { Category, ReportFailure, ReportForwarding } from "@hex/domain";
+import type { Category, ReportFailure, ReportFiling, ReportForwarding } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
@@ -291,6 +291,14 @@ const reportedForwardings = (attempts: readonly ForwardingAttempt[]): ReportForw
       ? [{ target, earlier: status === "forwarded-earlier" }]
       : [],
   );
+
+/** Filings as the Intake report tells them, from the ledger or this run. */
+const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
+  filings.map(({ path, fellBack }) => ({
+    path,
+    // Absent on ledger entries from before #7, which filed by the received date.
+    fellBack: fellBack !== false,
+  }));
 
 /**
  * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed or
@@ -579,8 +587,13 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
                 }),
               ),
             );
+            // Every Filing so far, also an earlier run's; this run's alone if the ledger fails.
+            const filings = yield* IntakeLedger.use((ledger) => ledger.branches(messageId)).pipe(
+              Effect.map((branches) => reportedFilings(branches.filings)),
+              Effect.catchTag("LedgerError", () => Effect.succeed(reportedFilings(filed.filings))),
+            );
             const report = yield* postReport(intake, {
-              filings: filed.filings,
+              filings,
               forwardings: reportedForwardings(attempts),
               outcome: {
                 status: "failed",
@@ -599,11 +612,7 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           // Spec order: the Intake report, then the IMAP move. A run resumed in this step posts
           // its report again, as it repeats its move.
           const report = yield* postReport(intake, {
-            filings: inputData.filings.map(({ path, fellBack }) => ({
-              path,
-              // Absent on ledger entries from before #7, which filed by the received date.
-              fellBack: fellBack !== false,
-            })),
+            filings: reportedFilings(inputData.filings),
             forwardings: reportedForwardings(inputData.forwardings),
             outcome: { status: "processed" },
           });

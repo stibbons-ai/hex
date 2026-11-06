@@ -1087,7 +1087,7 @@ describe("Intake workflow", () => {
           "Intake FAILED: `Rechnung` from `billing@shop.example`",
           "Failed: filing: `reading the Document date failed: 429`",
           "Nothing filed or forwarded.",
-          "Counting the failed run failed (`Intake ledger: database is locked`); see the hex log.",
+          "Recording the failed run failed (`Intake ledger: database is locked`); see the hex log.",
         ].join("\n"),
       ]);
     });
@@ -1285,6 +1285,24 @@ describe("Intake workflow", () => {
       ]);
     });
 
+    test("a failed run that files nothing new still reports the Documents an earlier run filed", async () => {
+      const hex = freshHex(dated, both);
+      hex.mailer.failNext(PAPERLESS, 2);
+      const mail = pdfMail("refiled@shop.example");
+      for (let run = 1; run <= 2; run++) await hex.process(mail).catch(() => {});
+      const reason = `sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later`;
+      expect(hex.mainChannel.posted[1]).toBe(
+        [
+          failedHead,
+          `Failed: forwarding to paperless: \`${reason}\``,
+          "Done nonetheless:",
+          "1 Document filed under 2026-10/ER",
+          "Forwarded to sevdesk (earlier run)",
+          "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+        ].join("\n"),
+      );
+    });
+
     test("the 5th failed run's report says the Intake failed permanently, its mail in hex/failed", async () => {
       const hex = freshHex(failing);
       const mail = pdfMail("permanent@shop.example");
@@ -1347,7 +1365,7 @@ describe("Intake workflow", () => {
 
     const DIED = {
       status: "not-sent",
-      reason: "posting it failed unexpectedly: adapter.postMessage is not a function",
+      reason: "rendering or posting it failed unexpectedly: adapter.postMessage is not a function",
     } as const;
 
     test("a report whose post dies leaves the processed Intake and its move as they are", async () => {
