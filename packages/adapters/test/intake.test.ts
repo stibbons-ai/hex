@@ -272,7 +272,7 @@ describe("readEml", () => {
       eml(...headers.filter((line) => !line.startsWith("Message-ID")), "", "body"),
       "/mail/no-id.eml",
     );
-    expect(message).toContain("/mail/no-id.eml: no Message-ID");
+    expect(message).toContain("/mail/no-id.eml: no usable Message-ID (missing or blank)");
   });
 
   test("bytes that are no mail fail as not an email, naming the file", async () => {

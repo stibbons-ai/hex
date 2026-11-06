@@ -2,8 +2,8 @@
 // in-memory Mailbox (a real one needs an IMAP server) seeded with the `.eml` files named in argv,
 // in the data directory argv[2]. The model is `openai/…` (point OPENAI_BASE_URL at a fake);
 // Forwarding goes to one target through the SMTP server on 127.0.0.1 at HEX_SMTP_PORT. Mastra's
-// console logger logs at debug (warnings to stderr, the rest to stdout), the watcher's lines
-// among them. Prints `booted` once the boot sweep settled (the watcher starts alongside it), and
+// console logger logs at debug (warnings and errors to stderr, the rest to stdout), the
+// watcher's lines among them. Prints `booted` once the boot sweep settled (the watcher starts alongside it), and
 // `moved <n> <Message-ID> to <folder>` for each move, so the test can follow from outside;
 // SIGTERM stops it.
 import { readFile } from "node:fs/promises";

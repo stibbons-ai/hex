@@ -238,6 +238,24 @@ describe("bun packages/server/src/main.ts", () => {
       });
     }
 
+    test("a mailbox it can open is watched, saying so on stdout", async () => {
+      const imap = fakeImap();
+      try {
+        const child = await spawnWithMailbox("watching", imap.port);
+        try {
+          const { output } = await listeningUrl(child.stdout);
+          expect(output).toContain(
+            `hex: mailbox on: watching INBOX on 127.0.0.1:${imap.port}, looking again 60 s after a look without news`,
+          );
+        } finally {
+          child.kill("SIGTERM");
+        }
+        expect(await child.exited).toBe(0);
+      } finally {
+        imap.server.stop(true);
+      }
+    });
+
     test("an IMAP server that refuses the login fails startup, never showing the credentials", async () => {
       const imap = fakeImap({ refuseLogin: true });
       try {

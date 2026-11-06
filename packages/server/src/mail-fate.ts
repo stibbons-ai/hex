@@ -58,6 +58,14 @@ export const MAX_FAILED_RUNS = 5;
  */
 export const retryDelayMs = (failedRuns: number) => 5 * 60_000 * 2 ** (failedRuns - 1);
 
+/** A move that took `copies` copies of the mail to `to`'s folder. */
+export const moved = <To extends MailOutcome>(to: To, copies: number) =>
+  ({ status: "moved", to, copies }) as MoveFate<To>;
+
+/** A move to `to`'s folder that found no copy in the watched folder. */
+export const notInMailbox = <To extends MailOutcome>(to: To) =>
+  ({ status: "not-in-mailbox", to }) as MoveFate<To>;
+
 /** A move to `to`'s folder that failed for `reason`. */
 export const notMoved = <To extends MailOutcome>(to: To, reason: string) =>
   ({ status: "not-moved", to, reason }) as MoveFate<To>;
@@ -68,12 +76,7 @@ export const notMoved = <To extends MailOutcome>(to: To, reason: string) =>
  */
 export const moveMail = <To extends MailOutcome>(messageId: string, to: To) =>
   Mailbox.use((mailbox) => mailbox.moveMessageId(messageId, to)).pipe(
-    Effect.map(
-      (copies) =>
-        (copies > 0
-          ? { status: "moved", to, copies }
-          : { status: "not-in-mailbox", to }) as MoveFate<To>,
-    ),
+    Effect.map((copies) => (copies > 0 ? moved(to, copies) : notInMailbox(to))),
     Effect.catchTag("MailboxError", ({ message }) => Effect.succeed(notMoved(to, message))),
   );
 
@@ -106,16 +109,26 @@ export const recordFailedRun = (messageId: string, runId: string) =>
     return { failedRuns: Math.max(count, MAX_FAILED_RUNS), mail } satisfies FailedRun;
   });
 
-/**
- * Where the mail went, as the end of a sentence about the Intake. `retryPending`: said by the
- * run, before the watcher (if it started the run) tries a failed move to `hex/failed` once more.
- */
-export function describeMove(mail: MailFate, { retryPending = false } = {}): string {
+/** How a move is told. */
+export interface DescribeOptions {
+  /** Said by the run, before the watcher (if it started the run) tries a failed move to `hex/failed` once more. */
+  readonly retryPending?: boolean;
+  /** Said after a failed move, which may have gone through all the same. */
+  readonly afterFailedMove?: boolean;
+}
+
+/** Where the mail went, as the end of a sentence about the Intake. */
+export function describeMove(
+  mail: MailFate,
+  { retryPending = false, afterFailedMove = false }: DescribeOptions = {},
+): string {
   switch (mail.status) {
     case "moved":
       return `its mail was moved to ${outcomeFolder(mail.to)}`;
     case "not-in-mailbox":
-      return "no mail of it was in the watched folder";
+      return afterFailedMove
+        ? `no mail of it was left in the watched folder (the failed move likely went through; see ${outcomeFolder(mail.to)})`
+        : "no mail of it was in the watched folder";
     case "not-moved":
       if (mail.to === "processed")
         return `moving its mail to hex/processed failed (${mail.reason})`;
@@ -127,13 +140,10 @@ export function describeMove(mail: MailFate, { retryPending = false } = {}): str
   }
 }
 
-/**
- * A failed run's consequence for the Intake, as Daniel reads it after the failure;
- * `retryPending` as for {@link describeMove}.
- */
+/** A failed run's consequence for the Intake, as Daniel reads it after the failure. */
 export function describeFailedRun(
   { failedRuns, mail }: FailedRun,
-  options: { retryPending?: boolean } = {},
+  options: DescribeOptions = {},
 ): string {
   if (mail.status !== "kept-for-retry") {
     return `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, so the Intake failed permanently: ${describeMove(mail, options)}`;

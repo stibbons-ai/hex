@@ -2,10 +2,16 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IntakeLedger, createLocalStore, readEml } from "@hex/adapters";
+import {
+  IntakeLedger,
+  LedgerError,
+  createLocalStore,
+  intakeLedgerLayer,
+  readEml,
+} from "@hex/adapters";
 import type { Intake } from "@hex/adapters";
 import { Mastra } from "@mastra/core/mastra";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import { closeInOrder } from "../src/close";
 import {
   INTAKE_WORKFLOW_ID,
@@ -96,10 +102,32 @@ async function freshWatcher({
   const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
   const mailbox = memoryMailbox({ idle });
+  /** Set `failing` to fail every ledger write, as a full volume would; reads still work. */
+  const ledgerWrites = { failing: false };
+  const failingWhen =
+    <A extends unknown[], R>(write: (...args: A) => Effect.Effect<R, LedgerError>) =>
+    (...args: A) =>
+      Effect.suspend(() =>
+        ledgerWrites.failing
+          ? Effect.fail(new LedgerError({ message: "Intake ledger: disk full" }))
+          : write(...args),
+      );
+  const ledger = Layer.effect(
+    IntakeLedger,
+    Effect.map(IntakeLedger, (real) => ({
+      ...real,
+      record: failingWhen(real.record),
+      recordForwarding: failingWhen(real.recordForwarding),
+      recordFiling: failingWhen(real.recordFiling),
+      recordFailedRun: failingWhen(real.recordFailedRun),
+      endFailedRuns: failingWhen(real.endFailedRuns),
+    })),
+  ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
   const runtime = createIntakeRuntime(paths, {
     dateExtractor,
     mailer: mailer.layer,
     mailbox: mailbox.layer,
+    ledger,
   });
   const storage = await createLocalStore(paths.databasePath);
   await storage.init();
@@ -151,6 +179,7 @@ async function freshWatcher({
     mailbox,
     clock,
     failing,
+    ledgerWrites,
     starts,
     timers,
     workflow: registered,
@@ -283,10 +312,10 @@ describe("watchMailbox", () => {
     expect(hex.asked).toEqual([]);
     expect(await hex.runs()).toEqual([]);
     expect(hex.log()).toContain(
-      "warn: hex: mailbox: INBOX UID 1: no Message-ID, so the Intake can't be processed exactly once; moving it to hex/failed",
+      "warn: hex: mailbox: INBOX UID 1: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once; moving it to hex/failed",
     );
     expect(hex.log()).toContain(
-      "warn: hex: mailbox: INBOX UID 3: no Message-ID, so the Intake can't be processed exactly once; moving it to hex/failed",
+      "warn: hex: mailbox: INBOX UID 3: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once; moving it to hex/failed",
     );
   });
 
@@ -549,7 +578,7 @@ describe("watchMailbox", () => {
     return hex;
   }
 
-  test("a failed move to hex/failed is tried once more by UID", async () => {
+  test("a failed move to hex/failed is tried once more", async () => {
     const hex = await toFifthFailure("move-once@shop.example", (mailbox) =>
       mailbox.refuse("moving mail to hex/failed"),
     );
@@ -565,9 +594,10 @@ describe("watchMailbox", () => {
     );
   });
 
-  test("a move to hex/failed failing twice says the Intake is run afresh at the next look", async () => {
+  test("a move to hex/failed failing every retry says the Intake is run afresh at the next look", async () => {
+    // The run's move, then the watcher's by Message-ID and by UID.
     const hex = await toFifthFailure("move-never@shop.example", (mailbox) =>
-      mailbox.refuse("moving mail to hex/failed", 2),
+      mailbox.refuse("moving mail to hex/failed", 3),
     );
     expect(hex.mailbox.messageIds()).toEqual(["move-never@shop.example"]);
     expect(hex.log()).toContainEqual(
@@ -586,11 +616,85 @@ describe("watchMailbox", () => {
     );
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["move-lost@shop.example"]);
     expect(hex.log().at(-1)).toBe(
-      "warn: hex: Intake move-lost@shop.example: failed permanently; no mail of it was in the watched folder",
+      "warn: hex: Intake move-lost@shop.example: failed permanently; no mail of it was left in the watched folder (the failed move likely went through; see hex/failed)",
     );
     hex.mailbox.tick();
     await hex.scanned();
     expect(hex.asked).toHaveLength(5);
+  });
+
+  test("a move to hex/failed that found the mail gone already gets no second line", async () => {
+    let calls = 0;
+    let atFifth = () => {};
+    const hex = await freshWatcher({
+      script: () => {
+        if (++calls === 5) atFifth();
+        return new Error("rate limited (429)");
+      },
+    });
+    // A person deletes the mail while the 5th run reads its Document date.
+    atFifth = () => hex.mailbox.discard(1);
+    hex.mailbox.deliver(emlOf("gone@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.asked).toHaveLength(5);
+    const permanent = hex.log().filter((line) => line.includes("failed permanently"));
+    expect(permanent).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake gone@shop\.example: the run failed: .*no mail of it was in the watched folder$/s,
+      ),
+    ]);
+  });
+
+  test("after a permanent failure, a copy the server reads differently goes to hex/failed too", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    // First the copy only hex reads as the Intake, so its UID is the one looked at.
+    hex.mailbox.deliver(emlOf("two-views@shop.example"), {
+      serverMessageId: "server-view@shop.example",
+    });
+    hex.mailbox.deliver(emlOf("two-views@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([
+      "two-views@shop.example",
+      "server-view@shop.example",
+    ]);
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(5);
+  });
+
+  test("a failed run the ledger can't count is held back in memory, an error, not run on every look", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("uncountable@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(1);
+    expect(hex.log()).toContain(
+      "error: hex: Intake uncountable@shop.example: its failed run could not be counted (Intake ledger: disk full); held back 5 min in memory",
+    );
+    // A poll later: held back.
+    hex.clock.advance(60_000);
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(1);
+    // Past the first retry delay: run again.
+    hex.clock.advance(5 * 60_000);
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(2);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {

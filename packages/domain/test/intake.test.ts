@@ -13,9 +13,21 @@ describe("normalizeMessageId", () => {
     ["<<a@b>>", "a@b"],
     ["< <x> >", "x"],
     ["<<<a@b>>>", "a@b"],
+    ["<a@b", "<a@b"],
+    ["a@b>", "a@b>"],
+    ["<", "<"],
   ])("%j → %j, a key that normalises to itself", (raw, expected) => {
     expect(normalizeMessageId(raw)).toBe(expected);
     expect(normalizeMessageId(normalizeMessageId(raw))).toBe(expected);
+  });
+
+  test("100,000 layers of brackets, as any sender can write, take linear time", () => {
+    const layers = 100_000;
+    const raw = `${"< ".repeat(layers)}deep@x${" >".repeat(layers)}`;
+    const started = performance.now();
+    expect(normalizeMessageId(raw)).toBe("deep@x");
+    // Quadratic peeling took about 0.7 s for half as many layers.
+    expect(performance.now() - started).toBeLessThan(50);
   });
 });
 

@@ -95,9 +95,11 @@ process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
 const server = await starting;
-console.log(`hex listening on ${server.url}`);
 // Printed, not logged: Mastra's logger drops info lines in production, as the "off" line would be.
 if (mailbox) {
   const { host, port: imapPort, folder } = mailbox.imap;
-  console.log(`hex: mailbox on: watching ${folder} on ${host}:${imapPort}`);
+  console.log(
+    `hex: mailbox on: watching ${folder} on ${host}:${imapPort}, looking again ${mailbox.pollMs / 1000} s after a look without news`,
+  );
 }
+console.log(`hex listening on ${server.url}`);

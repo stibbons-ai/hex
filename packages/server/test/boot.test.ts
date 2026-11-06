@@ -42,7 +42,7 @@ afterAll(async () => {
 
 /**
  * hex on the data in `data` with `eml` in its mailbox, a killed run's ownership lease lapsing
- * after `leaseMs`; its stdout and stderr (Mastra's warnings), read as they come.
+ * after `leaseMs`; its stdout and stderr (Mastra's warnings and errors), read as they come.
  */
 function startHex(data: string, eml: string, leaseMs: number) {
   const child = Bun.spawn(["bun", entry, data, eml], {
@@ -87,10 +87,12 @@ function startHex(data: string, eml: string, leaseMs: number) {
 }
 
 test.each([
+  // Restarted by the sweep, or (when the second hex boots within the 1 s) at Mastra's re-check.
   ["restarted by the boot sweep or once the lease lapsed", 1000, "after-restart", false],
-  // The second hex starts well within 4 s of the kill: the sweep skips the run, still owned by
-  // the killed process, and Mastra restarts it once the lease lapsed.
-  ["skipped for the killed process's live lease, restarted later", 4000, "after-lease", true],
+  // The second hex starts well within 10 s of the kill (Mastra renews every third of it, so 6.7 s
+  // at least are left): the sweep skips the run, still owned by the killed process, and Mastra
+  // restarts it once the lease lapsed.
+  ["skipped for the killed process's live lease, restarted later", 10_000, "after-lease", true],
 ] as const)(
   "a run cut off by a kill (%s) resumes at the next start, moves its mail, forwards once; the watcher leaves it alone",
   async (_path, leaseMs, name, leaseSkip) => {
@@ -140,18 +142,28 @@ test.each([
       second.child.kill("SIGTERM");
     }
     expect(await second.child.exited).toBe(0);
-    // One run in all, the first one, finished by the second hex: none started anew.
-    const database = new Database(join(data, "mastra.db"), { readonly: true });
+    // One run in all, the first one, finished by the second hex: none started anew. Opened
+    // read-write: a read-only open fails when hex's exit left `-shm` without `-wal`.
+    const statuses = () => {
+      const database = new Database(join(data, "mastra.db"));
+      try {
+        return database
+          .query(
+            "SELECT json_extract(snapshot, '$.status') AS status FROM mastra_workflow_snapshot WHERE workflow_name = 'intake'",
+          )
+          .all();
+      } finally {
+        database.close();
+      }
+    };
+    let runs: unknown[];
     try {
-      const runs = database
-        .query(
-          "SELECT json_extract(snapshot, '$.status') AS status FROM mastra_workflow_snapshot WHERE workflow_name = 'intake'",
-        )
-        .all();
-      expect(runs).toEqual([{ status: "success" }]);
-    } finally {
-      database.close();
+      runs = statuses();
+    } catch (error) {
+      const files = (await readdir(data)).filter((file) => file.startsWith("mastra.db"));
+      throw new Error(`reading mastra.db failed; its files: ${files.join(", ")}`, { cause: error });
     }
+    expect(runs).toEqual([{ status: "success" }]);
   },
   60_000,
 );

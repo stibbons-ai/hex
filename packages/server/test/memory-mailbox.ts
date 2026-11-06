@@ -66,7 +66,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
       message: `127.0.0.1:993, folder ${folder}: ${what} failed: ${detail}`,
       reason,
     });
-  /** Fails `what` while the server is unreachable, refuses it or is closed, else runs `run`. */
+  /**
+   * Fails `what` while the server is unreachable, refuses it or is closed; runs `run` and then
+   * fails it as `connection-lost` when its answer is to be lost; else runs `run`.
+   */
   const operation = <A>(what: string, run: () => A) =>
     Effect.suspend(() => {
       operations.push(what);
@@ -232,6 +235,13 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     /** Gives the folder a new UIDVALIDITY right after the next listing, before anything else. */
     renumberAfterNextListing() {
       renumberAfterListing = true;
+    },
+    /** The mail at `uid` leaves the watched folder, as when a person deletes it. */
+    discard(uid: number) {
+      folders.set(
+        folder,
+        watched().filter((mail) => mail.uid !== uid),
+      );
     },
     /** The server refuses the next `times` operations whose name starts with `prefix`. */
     refuse(prefix: string, times = 1) {

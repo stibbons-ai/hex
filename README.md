@@ -459,6 +459,13 @@ after a restart, still fails the Intake permanently instead of counting 1. When 
 fails an Intake permanently itself (5 failed runs counted, the process gone before it ended
 them), no row is kept.
 
+Since #9, a Message-ID is keyed without every layer of `<>` (`<<a@b>>` is `a@b`), where before
+only one layer came off; Content-IDs are compared the same way. Mail read from a file or the
+mailbox was already keyed without both layers, so only a ledger row of an Intake given with
+three or more layers, or with two through `workflows.start` or Studio, keeps its old key and
+no longer matches; such an Intake would run again. None is known to exist (no such Message-ID is
+valid), so the rows aren't rewritten.
+
 ### Mailbox
 
 With a `mailbox` section in the config file, the server watches one folder of an IMAP mailbox
@@ -472,16 +479,16 @@ in it, an Intake being one incoming mail:
 }
 ```
 
-| Setting                            | Meaning                                                                                                                             |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `HEX_CONFIG` `mailbox`             | The intake mailbox; without it there is no watcher (`hex: mailbox off: …` at startup) and no IMAP setting is needed                 |
-| `HEX_CONFIG` `mailbox.folder`      | The watched folder; default `INBOX`                                                                                                 |
-| `HEX_CONFIG` `mailbox.pollSeconds` | How long hex waits after a look without news before looking again, 1 to 3600 seconds; default 60                                    |
-| `HEX_IMAP_HOST`                    | IMAP server; required (as are user and password) with a `mailbox` section                                                           |
-| `HEX_IMAP_PORT`                    | IMAP port; default 993                                                                                                              |
-| `HEX_IMAP_SECURITY`                | `tls`, `starttls` (required, never LOGIN in plaintext) or `plain` (loopback IP address only); default `tls` on 993, else `starttls` |
-| `HEX_IMAP_USER`                    | IMAP login, read as a redacted secret                                                                                               |
-| `HEX_IMAP_PASSWORD`                | IMAP password, read as a redacted secret: never in the config, an error, a log or a result                                          |
+| Setting                            | Meaning                                                                                                                                                    |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HEX_CONFIG` `mailbox`             | The intake mailbox; without it there is no watcher (`hex: mailbox off: …` at startup, `hex: mailbox on: watching …` with it) and no IMAP setting is needed |
+| `HEX_CONFIG` `mailbox.folder`      | The watched folder; default `INBOX`                                                                                                                        |
+| `HEX_CONFIG` `mailbox.pollSeconds` | How long hex waits after a look without news before looking again, 1 to 3600 seconds; default 60                                                           |
+| `HEX_IMAP_HOST`                    | IMAP server; required (as are user and password) with a `mailbox` section                                                                                  |
+| `HEX_IMAP_PORT`                    | IMAP port; default 993                                                                                                                                     |
+| `HEX_IMAP_SECURITY`                | `tls`, `starttls` (required, never LOGIN in plaintext) or `plain` (loopback IP address only); default `tls` on 993, else `starttls`                        |
+| `HEX_IMAP_USER`                    | IMAP login, read as a redacted secret                                                                                                                      |
+| `HEX_IMAP_PASSWORD`                | IMAP password, read as a redacted secret: never in the config, an error, a log or a result                                                                 |
 
 A setting missing or unusable fails startup, naming the variable (never its value), as for SMTP;
 plaintext IMAP is refused for anything but a loopback IP address, for the same reason. The folder
@@ -504,7 +511,8 @@ long as they do, so looks can be further apart than `pollSeconds`. Every mail in
 counts, read or not; hex fetches mail with `BODY.PEEK`, so it never marks one read, and never
 sets or reads flags. Each look goes through the folder's mail in order, one run at a time:
 
-- a mail that can't become an Intake (no Message-ID, no usable received date, not a mail) goes
+- a mail that can't become an Intake (no usable Message-ID: missing, or blank without its
+  brackets; no usable received date; not a mail) goes
   to `hex/failed` at once, without a run, the reason logged;
 - an Intake already processed (in the ledger) only has its mail moved to `hex/processed`;
 - an Intake with a run active in `mastra.db` (one resumed after a restart, say) is left alone,
@@ -527,11 +535,15 @@ or anything unexpected (at error) ends the look; hex tries again after 1 s, doub
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
 is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
 consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. For a run of
-the watcher's own, a move to `hex/failed` that fails is tried once more by UID; when that fails
-too (or the run was one resumed at boot, which the watcher doesn't follow), the Intake's count is
-ended already, so the next look runs it afresh, a new series of 5 runs, as the warning says. A
-move whose answer was lost although it went through reads as no mail in the folder, not as a
-fresh series.
+the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
+by UID, and after one that went through, the mail the watcher looked at goes too if still there
+(a copy whose Message-ID the server reads differently). When the retries fail too (or the run
+was one resumed at boot, which the watcher doesn't follow), the Intake's count is ended already,
+so the next look runs it afresh, a new series of 5 runs, as the warning says. When the watcher's
+retry finds the mail gone, the first move's answer was likely lost although it went through: the
+line says so, pointing at `hex/failed`, instead of a fresh series. A failed run the ledger can't
+count (its writes failing while reads work) is an error, and the watcher holds the Intake back in
+memory for 5 minutes, the first retry delay, instead of running it on every look.
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after
