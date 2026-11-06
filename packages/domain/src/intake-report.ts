@@ -3,7 +3,10 @@
 
 /** One Filing as the report tells it: where the Document went, and whether it fell back. */
 export interface ReportFiling {
-  /** Relative to the Outbox: `YYYY-MM/<Category>/<file name>`. */
+  /**
+   * Relative to the Outbox: `YYYY-MM/<Category>/<file name>`. The folder part is trusted (composed
+   * by hex, its Category from config), shown as is; the file name is untrusted, quoted.
+   */
   readonly path: string;
   /** Filed by the received date, since no usable Document date was detected. */
   readonly fellBack: boolean;
@@ -11,13 +14,16 @@ export interface ReportFiling {
 
 /** One target the Intake's Documents went to: by this run, or by an earlier one. */
 export interface ReportForwarding {
+  /** The target's name from config; trusted, shown as is. */
   readonly target: string;
   readonly earlier: boolean;
 }
 
 /** One branch that failed the run: which (e.g. `filing`, `forwarding to sevdesk`), and why. */
 export interface ReportFailure {
+  /** Which branch, composed by hex from config (target names); trusted, shown as is. */
   readonly branch: string;
+  /** Untrusted (from the mail or a server), quoted. */
   readonly reason: string;
 }
 
@@ -25,7 +31,11 @@ export interface ReportFailure {
 export type ReportFailedMail =
   | { readonly status: "moved" }
   | { readonly status: "not-in-mailbox" }
-  | { readonly status: "not-moved"; readonly reason: string };
+  | {
+      readonly status: "not-moved";
+      /** Untrusted (from a server), quoted. */
+      readonly reason: string;
+    };
 
 /** What a failed run means for the Intake. */
 export type ReportConsequence =
@@ -47,7 +57,11 @@ export type ReportConsequence =
       readonly mail: ReportFailedMail;
     }
   /** The failed run could not be recorded (counted, or its Intake failed permanently). */
-  | { readonly status: "uncounted"; readonly reason: string };
+  | {
+      readonly status: "uncounted";
+      /** Untrusted (from a server), quoted. */
+      readonly reason: string;
+    };
 
 /** One Intake run's outcome, as the Intake report tells it. */
 export interface IntakeReportInput {
@@ -57,7 +71,10 @@ export interface IntakeReportInput {
     readonly subject?: string | undefined;
     readonly sender?: string | undefined;
   };
-  /** Every Filing of the Intake so far, also those an earlier run made. */
+  /**
+   * Every Filing of the Intake so far, also those an earlier run made (only this run's when the
+   * ledger can't be read).
+   */
   readonly filings: readonly ReportFiling[];
   /** The targets that have the Documents. */
   readonly forwardings: readonly ReportForwarding[];

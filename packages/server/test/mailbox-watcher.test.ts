@@ -526,6 +526,24 @@ describe("watchMailbox", () => {
       expect(hex.asked).toHaveLength(1);
     });
 
+    test("a report that can't be posted is still a warning when the move by UID ends the look", async () => {
+      const model = blockingModel();
+      const hex = await freshWatcher({ script: model.script });
+      hex.mainChannel.failNext();
+      hex.mailbox.deliver(emlOf("diverging-unreported@shop.example"), SERVER_VIEW);
+      hex.start();
+      await within(model.reading, "the run reading its Document date");
+      hex.mailbox.renumber();
+      model.release();
+      await hex.scanned();
+      expect(hex.log()).toContainEqual(
+        expect.stringMatching(/^warn: hex: mailbox: UID 1 .*UIDVALIDITY.*\(attempt 1\)$/),
+      );
+      expect(hex.log()).toContain(
+        "warn: hex: Intake diverging-unreported@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
+      );
+    });
+
     test("its 5th failed run moves it to hex/failed by UID; no 6th run", async () => {
       const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
       hex.mailbox.deliver(emlOf("diverging-failing@shop.example"), SERVER_VIEW);

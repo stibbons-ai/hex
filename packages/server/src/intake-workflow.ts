@@ -296,7 +296,8 @@ const reportedForwardings = (attempts: readonly ForwardingAttempt[]): ReportForw
 const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
   filings.map(({ path, fellBack }) => ({
     path,
-    // Absent on ledger entries from before #7, which filed by the received date.
+    // Optional only in `Filing`'s type: these come from `hex_intake_filings` or this run, which
+    // always set it.
     fellBack: fellBack !== false,
   }));
 

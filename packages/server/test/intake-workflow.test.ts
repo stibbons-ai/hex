@@ -54,7 +54,9 @@ const FIRST_FAILED_RUN =
  * recording Mailer forwarding as `forwarding` says (off when absent), an in-memory Mailbox
  * watching INBOX, and a recording Main channel. The real ledger records Forwardings, except that
  * the next `failing.forwardingRecords` attempts fail, as a ledger that can't write would; so do
- * the next `failing.failedRunRecords` calls counting a failed run.
+ * the next `failing.failedRunRecords` calls counting a failed run. With
+ * `failing.branchesAfterFailedRun` set, reading the Intake's branches fails once a failed run
+ * has been counted, as a ledger that locks up then would.
  */
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
@@ -63,7 +65,8 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
   const mailer = recordingMailer();
   const mainChannel = recordingMainChannel();
   const mailbox = memoryMailbox();
-  const failing = { forwardingRecords: 0, failedRunRecords: 0 };
+  const failing = { forwardingRecords: 0, failedRunRecords: 0, branchesAfterFailedRun: false };
+  let failedRunCounted = false;
   const ledger = Layer.effect(
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
@@ -76,10 +79,19 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
         }),
       recordFailedRun: (messageId: string, runId: string) =>
         Effect.suspend(() => {
-          if (failing.failedRunRecords <= 0) return real.recordFailedRun(messageId, runId);
+          if (failing.failedRunRecords <= 0)
+            return real
+              .recordFailedRun(messageId, runId)
+              .pipe(Effect.tap(() => Effect.sync(() => (failedRunCounted = true))));
           failing.failedRunRecords--;
           return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
         }),
+      branches: (messageId: string) =>
+        Effect.suspend(() =>
+          failing.branchesAfterFailedRun && failedRunCounted
+            ? Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }))
+            : real.branches(messageId),
+        ),
     })),
   ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
   /** The Forwarding the next run uses, and its Main channel (none: off); tests may change them. */
@@ -1301,6 +1313,31 @@ describe("Intake workflow", () => {
           "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
         ].join("\n"),
       );
+    });
+
+    test("a failed run whose Filings can't be read back reports this run's Filings, its error unchanged", async () => {
+      const hex = freshHex(dated, both);
+      hex.mailer.failNext(PAPERLESS);
+      hex.failing.branchesAfterFailedRun = true;
+      const mail = pdfMail("unread@shop.example");
+      hex.deliver(mail);
+      const failed = (await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError;
+      const reason = `sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later`;
+      expect(failed.message).toBe(
+        `the Intake workflow did not finish: forwarding to paperless: ${reason}${FIRST_FAILED_RUN}`,
+      );
+      expect(failed.mail).toEqual({ status: "kept-for-retry" });
+      expect(failed.report).toEqual(SENT);
+      expect(hex.mainChannel.posted).toEqual([
+        [
+          failedHead,
+          `Failed: forwarding to paperless: \`${reason}\``,
+          "Done nonetheless:",
+          "1 Document filed under 2026-10/ER",
+          "Forwarded to sevdesk",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+        ].join("\n"),
+      ]);
     });
 
     test("the 5th failed run's report says the Intake failed permanently, its mail in hex/failed", async () => {

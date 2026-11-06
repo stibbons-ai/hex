@@ -371,21 +371,23 @@ export function watchMailbox({
       const result = started.success;
       if (result.status === "success" && "result" in result) {
         const { status, mail, report } = result.result;
+        // After the settle, so a logger that throws can't keep the mail from it; as a finalizer,
+        // so a settle that ends the look still logs the report it didn't post.
         yield* settleLogged(
           messageId,
           uid,
           mail,
           (settled, options) =>
             `hex: Intake ${messageId}: ${status}; ${describeMove(settled, options)}`,
-        );
-        // After the settle, so a logger that throws can't keep the mail from it.
-        warnUnreported(messageId, report);
+        ).pipe(Effect.ensuring(Effect.sync(() => warnUnreported(messageId, report))));
         return;
       }
       // Mastra's failed result carries the step's error as it serialised it, `message` included.
       const error = "error" in result ? result.error : undefined;
       const reason = error ? error.message : `the run ended ${result.status}`;
       log.warn(`hex: Intake ${messageId}: the run failed: ${reason}`);
+      // Before the settle: the unguarded line above already precedes it, so deferring this one
+      // would not keep a throwing logger from the settle.
       warnUnreported(messageId, reportFateOf(error));
       const fate = mailFateOf(error);
       if (fate) {
