@@ -1,0 +1,632 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { makeClient, makeLoggingClient, makeIdleReadyClient, chunkedFetchOne } from './fixtures/test-client.js';
+import { withFakeTimers } from './fixtures/fake-timers.js';
+
+// Auto-IDLE policy: how the `autoIdleDelay` option is normalized, when the timer is allowed to
+// arm at all, and how the socket inactivity watchdog treats connections that are supposed to be
+// quiet.
+//
+// All of it matters more than the option looks. The configured value reaches setTimeout directly,
+// where NaN, a negative number and anything above the 32-bit range all become a 1ms timer, i.e.
+// an IDLE/DONE round trip around every single command. Arming while a caller still owns the
+// connection injects that round trip - or, with `missingIdleCommand` set to SELECT or STATUS, a
+// mailbox poll - between two of that caller's own commands. And the watchdog has to tell a
+// connection that is legitimately quiet (idling, a stalled download, a held lock) from one whose
+// command reply is overdue.
+
+const DEFAULT_DELAY = 15 * 1000;
+const DEFAULT_SOCKET_TIMEOUT = 5 * 60 * 1000;
+const SOCKET_MARGIN = 1000;
+const TIMEOUT_MAX = 2 ** 31 - 1;
+
+// ============================================================================
+// the socket inactivity watchdog
+// ============================================================================
+
+// A client wired up for _socketTimeout() with recording stubs: recovery commands land in
+// `recovered`, emitted errors in `errors`. run() is stubbed, so nothing here re-arms auto-IDLE -
+// which is deliberate: the handler itself must never start IDLE, that decision belongs to
+// autoidle() once the recovery NOOP settles for real.
+const makeWatchdogClient: any = () => {
+    let client = makeIdleReadyClient();
+    let errors: any = [];
+    let recovered: any = [];
+    client.on('error', (err: any) => errors.push(err));
+    client.run = async (command: any) => recovered.push(command);
+    client.idle = async () => recovered.push('IDLE');
+    client.writeSocket = client.socket;
+    client.setSocketHandlers();
+    return { client, errors, recovered };
+};
+
+const drainImmediate = () => new Promise(resolve => setImmediate(resolve));
+
+describe('auto-idle', () => {
+    // ============================================================================
+    // option normalization
+    // ============================================================================
+    it('Auto-IDLE: an unset delay uses the default', () => {
+        let { client, warnings } = makeLoggingClient();
+        assert.equal(client.autoIdleDelay, DEFAULT_DELAY);
+        assert.equal(warnings.length, 0, 'the default is not a misconfiguration');
+    });
+    it('Auto-IDLE: a configured delay is honored and reaches setTimeout', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 1234 });
+            assert.equal(client.autoIdleDelay, 1234);
+
+            client.autoidle();
+
+            let armed = timers.pending();
+            assert.equal(armed.length, 1, 'exactly one auto-IDLE timer is armed');
+            assert.equal(armed[0].delay, 1234, 'the configured delay is what the timer uses');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: numeric strings are accepted', () => {
+        // The normal shape of a value coming from an environment variable or a JSON/YAML config file
+        assert.equal(makeClient({ autoIdleDelay: '2000' }).autoIdleDelay, 2000);
+        assert.equal(makeClient({ autoIdleDelay: ' 2000 ' }).autoIdleDelay, 2000);
+    });
+    it('Auto-IDLE: zero is honored, fractions are floored', () => {
+        assert.equal(makeClient({ autoIdleDelay: 0 }).autoIdleDelay, 0);
+        assert.equal(makeClient({ autoIdleDelay: 1500.9 }).autoIdleDelay, 1500);
+    });
+    it('Auto-IDLE: unusable values fall back to the default and are reported', () => {
+        // Every one of these is something setTimeout would turn into a 1ms timer, or something a
+        // caller plausibly means as "off" - which is what disableAutoIdle is for.
+        for (let value of [NaN, -1, -0.5, Infinity, -Infinity, 'soon', '', '   ', true, false, {}, []]) {
+            let { client, warnings } = makeLoggingClient({ autoIdleDelay: value });
+            assert.equal(client.autoIdleDelay, DEFAULT_DELAY, `${String(value)} falls back to the default`);
+            assert.equal(warnings.length, 1, `${String(value)} is reported rather than silently swallowed`);
+            assert.equal(warnings[0].msg, 'Adjusted unusable autoIdleDelay option');
+            assert.equal(warnings[0].reason, 'not a non-negative finite number', `${String(value)} is reported with the right reason`);
+        }
+    });
+    it('Auto-IDLE: the delay is capped below socketTimeout', () => {
+        // A delay at or above socketTimeout means the inactivity watchdog fires before IDLE ever
+        // starts. `idling` is still false at that point, so the handler emits ETIMEOUT and tears down
+        // a quiet but perfectly healthy connection instead of letting it enter IDLE.
+        let { client, warnings } = makeLoggingClient({ autoIdleDelay: 10 * 60 * 1000 });
+        assert.equal(client.autoIdleDelay, DEFAULT_SOCKET_TIMEOUT - SOCKET_MARGIN);
+        assert.equal(warnings.length, 1, 'the caller is told the value was capped');
+
+        // The cap follows a custom socketTimeout, and keeps the delay inside the range setTimeout can
+        // represent: 2 ** 31 and larger would otherwise silently become a 1ms timer.
+        assert.equal(makeClient({ autoIdleDelay: 60000, socketTimeout: 30000 }).autoIdleDelay, 29000);
+        assert.equal(makeClient({ autoIdleDelay: 2 ** 31 }).autoIdleDelay, DEFAULT_SOCKET_TIMEOUT - SOCKET_MARGIN);
+        assert.equal(makeClient({ autoIdleDelay: Number.MAX_SAFE_INTEGER }).autoIdleDelay, DEFAULT_SOCKET_TIMEOUT - SOCKET_MARGIN);
+    });
+    it('Auto-IDLE: the cap stays inside the timer range for a huge socketTimeout', () => {
+        // socket.setTimeout truncates an over-range socketTimeout on its own, so a huge watchdog
+        // deadline still works - but the auto-IDLE delay must not inherit the raw value, or
+        // setTimeout would turn it into a 1ms timer and IDLE would follow every single command.
+        assert.equal(makeClient({ socketTimeout: 2 ** 32, autoIdleDelay: 2 ** 31 }).autoIdleDelay, TIMEOUT_MAX - SOCKET_MARGIN);
+        assert.equal(makeClient({ socketTimeout: 2200000000, autoIdleDelay: 2150000000 }).autoIdleDelay, TIMEOUT_MAX - SOCKET_MARGIN);
+    });
+    it('Auto-IDLE: capping the default for a short socketTimeout is silent', () => {
+        let { client, warnings } = makeLoggingClient({ socketTimeout: 5000 });
+        assert.equal(client.autoIdleDelay, 4000, 'the default is capped too');
+        assert.equal(warnings.length, 0, 'but nothing was misconfigured, so nothing is reported');
+    });
+    it('Auto-IDLE: an invalid value keeps its own reason when the default is then capped', () => {
+        // 'soon' falls back to the 15s default, which a 5s socketTimeout then caps to 4s. The
+        // warning must still name what was wrong with the configured value - the cap applied to
+        // the fallback, not to anything the caller asked for.
+        let { client, warnings } = makeLoggingClient({ autoIdleDelay: 'soon', socketTimeout: 5000 });
+        assert.equal(client.autoIdleDelay, 4000);
+        assert.equal(warnings.length, 1);
+        assert.equal(warnings[0].reason, 'not a non-negative finite number');
+    });
+
+    // ============================================================================
+    // when the timer may arm
+    // ============================================================================
+    it('Auto-IDLE: no timer is armed while a mailbox lock is held', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+
+            let lock = await client.getMailboxLock('INBOX');
+            assert.ok(client.currentLock, 'the lock was granted through the fast path');
+
+            client.autoidle();
+            assert.equal(timers.count(), 0, 'IDLE must not be injected between a lock holder own commands');
+
+            lock.release();
+            let armed = timers.pending();
+            assert.equal(armed.length, 1, 'releasing the lock re-arms auto-IDLE');
+            assert.equal(armed[0].delay, 200);
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: acquiring a lock through SELECT leaves no timer behind', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+            client.mailbox = false;
+            // The SELECT that opens the mailbox goes through run(), which re-arms auto-IDLE when it
+            // settles - a moment before currentLock is set. That timer would fire inside the lock.
+            client.mailboxOpen = async (path: any) => {
+                client.mailbox = { path, readOnly: false };
+                client.autoidle();
+                return client.mailbox;
+            };
+
+            let lock = await client.getMailboxLock('INBOX');
+            assert.ok(client.currentLock, 'the lock was granted through the SELECT path');
+            assert.equal(timers.count(), 0, 'the timer armed while opening the mailbox was cleared');
+
+            lock.release();
+            assert.equal(timers.count(), 1, 'and auto-IDLE resumes once the lock is released');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: releasing a lock with another one queued does not arm', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+
+            let lock = await client.getMailboxLock('INBOX');
+            // Queue a second request; the connection is not free when the first holder lets go
+            let queued = client.getMailboxLock('INBOX');
+            assert.equal(client.locks.length, 1, 'the second request is waiting');
+
+            lock.release();
+            assert.equal(timers.count(), 0, 'the next holder owns the connection, so IDLE stays off');
+
+            (await queued).release();
+            assert.equal(timers.count(), 1, 'the last release re-arms auto-IDLE');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: no timer is armed while a command is in flight or queued', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+
+            // Concurrent commands each clear the timer on entry, so without this guard the first one
+            // to settle would arm a timer that fires while the others are still running.
+            client.currentRequest = { tag: 'A001', command: 'FETCH', sent: true };
+            client.autoidle();
+            assert.equal(timers.count(), 0, 'a command in flight owns the connection');
+
+            client.currentRequest = false;
+            client.requestQueue = [{ tag: 'A002', command: 'FETCH' }];
+            client.autoidle();
+            assert.equal(timers.count(), 0, 'so does a command still waiting in the queue');
+
+            client.requestQueue = [];
+            client.autoidle();
+            assert.equal(timers.count(), 1, 'an idle connection arms the timer');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: the armed timer re-checks the busy guard when it fires', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+            let idleCalls = 0;
+            client.idle = async () => {
+                idleCalls++;
+            };
+
+            client.autoidle();
+            assert.equal(timers.count(), 1, 'the timer was armed on a free connection');
+
+            // Ownership taken without clearing the timer - the guard must not depend on every
+            // ownership-taking path remembering its clearTimeout.
+            client.currentRequest = { tag: 'A001', command: 'FETCH', sent: true };
+            await timers.fire();
+            assert.equal(idleCalls, 0, 'a connection that is busy at fire time does not start IDLE');
+
+            client.currentRequest = false;
+            client.autoidle();
+            await timers.fire();
+            assert.equal(idleCalls, 1, 'a connection that is free at fire time does');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: no timer is armed while a download is streaming', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+            let body = Buffer.from('A'.repeat(20));
+            let armedAfterChunk: any = [];
+
+            let serveChunk = chunkedFetchOne(body);
+            client.fetchOne = async (range: any, query: any) => {
+                // Stands in for run(), which clears the auto-IDLE timer on entry and re-arms it once
+                // the command settles. The pause between two chunks is where IDLE would slip in.
+                clearTimeout(client.idleStartTimer);
+                let part = await serveChunk(range, query);
+                client.autoidle();
+                armedAfterChunk.push(timers.count());
+                return part;
+            };
+
+            let { content } = await client.download('1', false, { chunkSize: 4 });
+            let received = [];
+            for await (let chunk of content) {
+                received.push(chunk);
+            }
+
+            assert.equal(Buffer.concat(received).toString(), 'A'.repeat(20), 'the whole body arrived');
+            assert.ok(armedAfterChunk.length > 2, 'the body really was fetched in several chunks');
+            assert.deepEqual(
+                armedAfterChunk.slice(1).filter((count: any) => count !== 0),
+                [],
+                'no chunk boundary inside the download armed an auto-IDLE timer'
+            );
+            assert.equal(timers.count(), 1, 'auto-IDLE resumes once the download stream is finished');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a download counts as busy before control returns to the event loop', async () => {
+        await withFakeTimers(async () => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 200 });
+            let body = Buffer.from('B'.repeat(12));
+            client.fetchOne = chunkedFetchOne(body);
+
+            let { content } = await client.download('1', false, { chunkSize: 4 });
+            // The head chunk's own FETCH re-arms auto-IDLE a moment before the download exists;
+            // with a very short delay that timer fires before the deferred chunk loop starts, so
+            // the busy guard must already see the download when download() hands the stream back.
+            assert.equal(client._openDownloads, 1, 'the download is counted before streaming starts');
+
+            let received = [];
+            for await (let chunk of content) {
+                received.push(chunk);
+            }
+            assert.equal(Buffer.concat(received).toString(), 'B'.repeat(12), 'the whole body arrived');
+            assert.equal(client._openDownloads, 0, 'the download is released once the stream is done');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a failing command still re-arms the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            // run() clears the timer before dispatching, so re-arming only on the success path would
+            // leave auto-IDLE off for good after one rejected command.
+            client.runInternal = async () => {
+                throw new Error('command failed');
+            };
+
+            let err;
+            try {
+                await client.run('NOOP');
+            } catch (E) {
+                err = E;
+            }
+
+            assert.ok(err, 'the failure still reaches the caller');
+            let armed = timers.pending();
+            assert.equal(armed.length, 1, 'auto-IDLE is re-armed after a failed command');
+            assert.equal(armed[0].delay, 300);
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a failing IDLE break still re-arms the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            // run() awaits preCheck() (breaking an active IDLE) before dispatching. A break that
+            // rejects exits run() before the command ever starts, and must still re-arm auto-IDLE
+            // exactly like a failed command does.
+            client.preCheck = async () => {
+                throw new Error('IDLE break failed');
+            };
+
+            let err;
+            try {
+                await client.run('NOOP');
+            } catch (E) {
+                err = E;
+            }
+
+            assert.ok(err, 'the failure still reaches the caller');
+            let armed = timers.pending();
+            assert.equal(armed.length, 1, 'auto-IDLE is re-armed after the failed IDLE break');
+            assert.equal(armed[0].delay, 300);
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a stalled download survives the socket watchdog', async () => {
+        // Suppressing auto-IDLE during a download means `idling` is false when the inactivity
+        // watchdog fires, so without the download clause the watchdog would tear down a connection
+        // whose only problem is a consumer that stopped draining.
+        let { client, errors, recovered }: any = makeWatchdogClient();
+        client._openDownloads = 1;
+
+        client._socketTimeout();
+        await drainImmediate();
+
+        assert.deepEqual(errors, [], 'no ETIMEOUT is emitted while a download is open');
+        assert.deepEqual(recovered, ['NOOP'], 'kept alive with a NOOP only - IDLE mid-download is what the busy guard exists to prevent');
+
+        client._openDownloads = 0;
+        client._socketTimeout();
+        assert.equal(errors.length, 1, 'once the download is done a quiet socket is a timeout again');
+        assert.equal((errors[0] as any).code, 'ETIMEOUT');
+
+        client.close();
+        assert.ok(client.isClosed, 'the socket stub supports everything close() needs');
+    });
+    it('Auto-IDLE: a stuck chunk FETCH mid-download is a dead connection', async () => {
+        // A quiet socket while a command is awaiting its reply means the reply is overdue. A
+        // recovery NOOP would only queue behind the stuck command and never reach the wire, so
+        // the watchdog must report the timeout instead of recovering into a silent hang.
+        let { client, errors, recovered } = makeWatchdogClient();
+        client._openDownloads = 1;
+        client.currentRequest = { tag: 'A001', command: 'FETCH', sent: true };
+
+        client._socketTimeout();
+        await drainImmediate();
+
+        assert.deepEqual(recovered, [], 'no recovery is attempted behind a stuck command');
+        assert.equal(errors.length, 1, 'the caller learns the connection is dead');
+        assert.equal(errors[0].code, 'ETIMEOUT');
+
+        client.close();
+    });
+    it('Auto-IDLE: a held mailbox lock keeps a quiet connection alive', async () => {
+        // A lock holder pausing between commands for longer than socketTimeout is legitimate (the
+        // held-lock diagnostic warns only after 30 minutes), and with auto-IDLE declining to arm
+        // during a lock there is no IDLE traffic to keep the socket busy - the watchdog has to.
+        let { client, errors, recovered }: any = makeWatchdogClient();
+        client.currentLock = { lockId: 1 };
+
+        client._socketTimeout();
+        await drainImmediate();
+
+        assert.deepEqual(errors, [], 'the lock holder keeps its connection');
+        assert.deepEqual(recovered, ['NOOP'], 'kept alive with a NOOP only, no IDLE inside the lock');
+
+        client.currentLock = false;
+        client._socketTimeout();
+        assert.equal(errors.length, 1, 'with the lock gone a quiet socket is a timeout again');
+        assert.equal((errors[0] as any).code, 'ETIMEOUT');
+
+        client.close();
+    });
+    it('Auto-IDLE: idling recovers even with the IDLE command in flight', async () => {
+        // During true IDLE the in-flight command IS the IDLE command; run() breaks it through
+        // preCheck() before the recovery NOOP goes out, so it does not count as stuck. A recovery
+        // NOOP that then never settles does: the next timeout must fail rather than queue another.
+        let { client, errors, recovered }: any = makeWatchdogClient();
+        client.idling = true;
+        client.currentRequest = { tag: 'A001', command: 'IDLE', sent: true };
+
+        client._socketTimeout();
+        await drainImmediate();
+        assert.deepEqual(errors, [], 'the idling connection is not torn down');
+        assert.deepEqual(recovered, ['NOOP'], 'it is recovered with a NOOP');
+
+        client.idling = false;
+        client.currentRequest = { tag: 'A002', command: 'NOOP', sent: true };
+        client._socketTimeout();
+        assert.equal(errors.length, 1, 'a recovery NOOP that never settled is a dead connection');
+        assert.equal((errors[0] as any).code, 'ETIMEOUT');
+
+        client.close();
+    });
+
+    it('Auto-IDLE: a recovery NOOP that cannot be sent is a dead connection at the next timeout', async () => {
+        // IDLE was written but the server never sent its "+", so DONE can not go out and the
+        // recovery NOOP never reaches the wire. The inactivity timer is one-shot, re-armed only
+        // by traffic, so without re-arming it here nothing would ever fire again on the silent
+        // peer and the connection would sit there for good.
+        let { client, errors }: any = makeWatchdogClient();
+        let armed: number[] = [];
+        client.socket.setTimeout = (ms: number) => armed.push(ms);
+        client.run = () => new Promise(() => {});
+        client.idling = true;
+        client.currentRequest = { tag: 'A001', command: 'IDLE', sent: true };
+
+        client._socketTimeout();
+        assert.equal(client._recoveryPending, true);
+        assert.deepEqual(armed, [client.socketTimeout], 'the watchdog is re-armed');
+        assert.deepEqual(errors, []);
+
+        client._socketTimeout();
+        assert.equal(errors.length, 1, 'the pending recovery counts as stuck');
+        assert.equal((errors[0] as any).code, 'ETIMEOUT');
+
+        client.close();
+    });
+    it('Auto-IDLE: a recovery NOOP that settles clears the pending flag', async () => {
+        let { client, recovered }: any = makeWatchdogClient();
+        client.idling = true;
+
+        client._socketTimeout();
+        assert.equal(client._recoveryPending, true);
+        await drainImmediate();
+        assert.deepEqual(recovered, ['NOOP']);
+        assert.equal(client._recoveryPending, false);
+
+        client.close();
+    });
+    it('Auto-IDLE: a response handler in progress is not a dead connection', async () => {
+        // The reader is parked in a fetch consumer, so nothing is read from the socket: the
+        // quiet is this side's. The timer is re-armed and nothing else happens.
+        let { client, errors, recovered }: any = makeWatchdogClient();
+        let armed: number[] = [];
+        client.socket.setTimeout = (ms: number) => armed.push(ms);
+        client.currentRequest = { tag: 'A001', command: 'FETCH', sent: true };
+        client._processingResponse = true;
+
+        client._socketTimeout();
+        assert.deepEqual(errors, []);
+        assert.deepEqual(recovered, []);
+        assert.deepEqual(armed, [client.socketTimeout]);
+
+        client._processingResponse = false;
+        client._socketTimeout();
+        assert.equal(errors.length, 1, 'with the handler done, a stuck FETCH is a dead connection');
+
+        client.close();
+    });
+    it('Auto-IDLE: a throttle back-off is expected quiet', async () => {
+        let { client, errors, recovered }: any = makeWatchdogClient();
+        client._throttleWaits.add({});
+
+        client._socketTimeout();
+        await drainImmediate();
+        assert.deepEqual(errors, []);
+        assert.deepEqual(recovered, ['NOOP'], 'the server is probed instead');
+
+        client._throttleWaits.clear();
+        client.close();
+    });
+
+    // ============================================================================
+    // re-arming auto-IDLE after a session that ended on its own
+    //
+    // run() skips its own auto-IDLE re-arm for the IDLE command, on the assumption that a user
+    // command broke IDLE and will re-arm on its way out. That assumption fails for a session that
+    // ended by itself: a server that refused IDLE with a tagged NO, one that ended IDLE with an
+    // unsolicited tagged OK, or a poll that failed. The idle command re-arms auto-IDLE in a
+    // finally so such a session does not leave the connection with no IDLE, no poll and no timer -
+    // dark until the socket watchdog tears it down as dead.
+    // ============================================================================
+    it('Auto-IDLE: a server-refused IDLE re-arms the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            client.capabilities = new Map([['IDLE', true]]);
+            // The server rejects IDLE with a tagged NO, so exec('IDLE') rejects and the IDLE
+            // session ends without any command having broken it.
+            client.exec = async (command: any) => {
+                if (command === 'IDLE') {
+                    let err: any = new Error('IDLE not allowed');
+                    err.responseStatus = 'NO';
+                    throw err;
+                }
+                return { next() {} };
+            };
+
+            await client.run('IDLE', false);
+
+            let armed = timers.pending().filter((t: any) => t.delay === 300);
+            assert.equal(armed.length, 1, 'auto-IDLE is re-armed after the server refused IDLE');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a server-ended IDLE re-arms the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            client.capabilities = new Map([['IDLE', true]]);
+            // The server ends IDLE with a tagged OK we never asked for: exec('IDLE') resolves
+            // although no DONE was sent and no command requested a break.
+            client.exec = async () => ({ next() {}, response: { attributes: [] } });
+
+            await client.run('IDLE', false);
+
+            let armed = timers.pending().filter((t: any) => t.delay === 300);
+            assert.equal(armed.length, 1, 'auto-IDLE is re-armed after the server ended IDLE on its own');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a failed poll re-arms the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            // No IDLE capability -> the polling fallback runs instead.
+            client.capabilities = new Map([['IMAP4rev1', true]]);
+            client.currentSelectCommand = { command: 'SELECT', arguments: [{ type: 'ATOM', value: 'INBOX' }] };
+            client.missingIdleCommand = 'NOOP';
+            // The first poll fails, which cancels the loop the same way a dead socket would.
+            client.exec = async (command: any) => {
+                if (command === 'NOOP') {
+                    throw new Error('poll failed');
+                }
+                return { next() {} };
+            };
+
+            await client.run('IDLE', false);
+
+            let armed = timers.pending().filter((t: any) => t.delay === 300);
+            assert.equal(armed.length, 1, 'auto-IDLE is re-armed after a failed poll');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: an active poll loop does not arm the timer early', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            client.capabilities = new Map([['IMAP4rev1', true]]);
+            client.currentSelectCommand = { command: 'SELECT', arguments: [{ type: 'ATOM', value: 'INBOX' }] };
+            client.missingIdleCommand = 'NOOP';
+            // Every poll succeeds, so the loop keeps running and never reaches the finally. The
+            // re-arm must not fire while polling is still live (the awaited fallback guards this).
+            client.exec = async () => ({ next() {} });
+
+            // maxIdleTime bounds the interval so the next poll is a distinctly-sized timer.
+            let idlePromise = client.run('IDLE', 60000);
+            // Let the first poll run and schedule the next one.
+            await drainImmediate();
+            await drainImmediate();
+
+            assert.equal(timers.pending().filter((t: any) => t.delay === 300).length, 0, 'no auto-IDLE timer while the poll loop is still running');
+            assert.equal(timers.pending().filter((t: any) => t.delay === 60000).length, 1, 'the next poll is scheduled');
+
+            // Break the loop; only now may auto-IDLE re-arm.
+            await client.preCheck();
+            await idlePromise;
+            assert.equal(timers.pending().filter((t: any) => t.delay === 300).length, 1, 'auto-IDLE re-arms once the loop ends');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: a session that ends during teardown does not arm the timer', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            client.capabilities = new Map([['IDLE', true]]);
+            // The connection leaves SELECTED (as close() does synchronously) before the IDLE
+            // session unwinds. autoidle() must decline, so no timer is left armed on a dead client.
+            client.exec = async (command: any) => {
+                if (command === 'IDLE') {
+                    client.state = client.states.LOGOUT;
+                    let err: any = new Error('connection gone');
+                    err.responseStatus = 'NO';
+                    throw err;
+                }
+                return { next() {} };
+            };
+
+            await client.run('IDLE', false);
+
+            assert.equal(timers.pending().filter((t: any) => t.delay === 300).length, 0, 'auto-IDLE stays disarmed once the connection is no longer SELECTED');
+
+            client.close();
+        });
+    });
+    it('Auto-IDLE: unbind() disarms the timer and keeps it disarmed after the handoff', async () => {
+        await withFakeTimers(async timers => {
+            let client = makeIdleReadyClient({ autoIdleDelay: 300 });
+            let started = 0;
+            client.idle = async () => {
+                started++;
+            };
+
+            client.autoidle();
+            assert.equal(timers.pending().length, 1, 'auto-IDLE is armed in SELECTED state');
+
+            client.unbind();
+            assert.equal(timers.pending().length, 0, 'unbind() clears the pending auto-IDLE timer');
+
+            // a lock release or a finished download calls autoidle() again after the handoff
+            client.autoidle();
+            assert.equal(timers.pending().length, 0, 'auto-IDLE is not re-armed on an unbound client');
+
+            await timers.drain();
+            assert.equal(started, 0, 'no IDLE is written onto the handed-over socket');
+
+            client.close();
+        });
+    });
+});
