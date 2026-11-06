@@ -3,7 +3,7 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { escapeSlackText } from "@chat-adapter/slack/format";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
-import type { AdapterPostableMessage } from "chat";
+import type { Adapter, AdapterPostableMessage } from "chat";
 import { Config, Redacted, Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
 import {
@@ -18,13 +18,13 @@ import type { MainChannelTarget } from "./main-channel";
 
 /**
  * One platform's channel as its factory builds it. `senderIds`, when set, is the form every
- * allowlist entry (and the Main channel's user) must have on this channel. `plainText`, when set,
- * is how plain text with its untrusted values in code spans is posted on this channel so that
- * they stay literal; else as given.
+ * allowlist entry (and the Main channel's user) must have on this channel. `plainText` is how
+ * plain text with its untrusted values in code spans is posted on this channel so that they stay
+ * literal.
  */
 type BuiltChannel = Omit<ChatChannel, "allowlist"> & {
   senderIds?: { valid: (id: string) => boolean; expected: string };
-  plainText?: (text: string) => AdapterPostableMessage;
+  plainText: (text: string) => AdapterPostableMessage;
 };
 
 /**
@@ -186,6 +186,8 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
         valid: (id) => ACI.test(id),
         expected: "a Signal ACI (a lowercase UUID with dashes), not a phone number",
       },
+      // The adapter sends a string verbatim, without style ranges or mentions.
+      plainText: (text) => text,
     };
   },
 };
@@ -196,13 +198,22 @@ export interface ChatConfig extends ChatOptions {
   mainChannel?: MainChannelTarget;
 }
 
+/** Whether `adapter` can open a DM, as the Main channel needs. */
+const canOpenDM = (adapter: Adapter): adapter is MainChannelTarget["adapter"] =>
+  adapter.openDM !== undefined;
+
 /**
- * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings, or `undefined` when it
- * configures no channels. Throws an error naming the file and the problem on unreadable or
- * malformed JSON, a shape mismatch, an unknown adapter, a missing or malformed secret, or a Main
- * channel on no configured channel or with a user ID that channel can't have.
+ * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings with `factories`, or
+ * `undefined` when it configures no channels. Throws an error naming the file and the problem on
+ * unreadable or malformed JSON, a shape mismatch, an unknown adapter, a missing or malformed
+ * secret, or a Main channel on no configured channel, on one whose adapter can't open a DM, or
+ * with a user ID that channel can't have.
  */
-export async function loadChatConfig(path: string, env: Env): Promise<ChatConfig | undefined> {
+export async function loadChatConfig(
+  path: string,
+  env: Env,
+  factories: Readonly<Record<string, AdapterFactory>> = adapterFactories,
+): Promise<ChatConfig | undefined> {
   const fail = (problem: string, cause?: unknown) => configError(path, problem, cause);
   const { chat } = await readConfigFile(path);
   const entries = Object.entries(chat.channels);
@@ -217,12 +228,10 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatConfig
   const channels: Record<string, ChatChannel> = {};
   let mainChannel: MainChannelTarget | undefined;
   for (const [platform, { options, allowlist }] of entries) {
-    const factory = Object.hasOwn(adapterFactories, platform)
-      ? adapterFactories[platform]
-      : undefined;
+    const factory = Object.hasOwn(factories, platform) ? factories[platform] : undefined;
     if (!factory) {
       return fail(
-        `channel "${platform}": unknown adapter; known: ${Object.keys(adapterFactories).join(", ")}`,
+        `channel "${platform}": unknown adapter; known: ${Object.keys(factories).join(", ")}`,
       );
     }
     let built: BuiltChannel;
@@ -237,14 +246,16 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatConfig
     } catch (error) {
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }
-    const { senderIds, plainText = (text) => text, ...channel } = built;
+    const { senderIds, plainText, ...channel } = built;
     channels[platform] = { ...channel, allowlist };
     if (main?.channel === platform) {
+      const { adapter } = channel;
+      if (!canOpenDM(adapter)) return fail(`mainChannel: the ${platform} adapter cannot open a DM`);
       // Not its value, as for allowlist entries.
       if (senderIds && !senderIds.valid(main.user)) {
         return fail(`mainChannel: user must be ${senderIds.expected}`);
       }
-      mainChannel = { ...main, adapter: channel.adapter, message: plainText };
+      mainChannel = { ...main, adapter, message: plainText };
     }
   }
   return { ...chatModel(chat), channels, ...(mainChannel ? { mainChannel } : {}) };

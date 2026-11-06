@@ -41,7 +41,7 @@ Daniel's bookkeeping folder in Proton Drive (`Buchhaltung`), the final home of f
 _Avoid_: Buchhaltung, drive, destination
 
 **Intake report**:
-A short message to Daniel's main channel summarising one processed Intake, flagging date fallbacks and failures.
+A short message to Daniel's main channel summarising one Intake run (processed or failed), flagging date fallbacks and failures.
 _Avoid_: Notification, alert
 
 **Main channel**:

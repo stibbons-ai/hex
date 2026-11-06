@@ -2,7 +2,7 @@
 // Signal later), on the chat adapter the server connects.
 import { messageOf } from "@hex/adapters";
 import type { Adapter, AdapterPostableMessage } from "chat";
-import { Context, Data, Effect, Layer } from "effect";
+import { Context, Data, Duration, Effect, Layer } from "effect";
 
 /** Posting to the Main channel failed. The message says why, never the posted text. */
 export class MainChannelError extends Data.TaggedError("MainChannelError")<{
@@ -27,8 +27,8 @@ export interface MainChannelTarget {
   readonly channel: string;
   /** The user whose DM it is, as the platform knows them. */
   readonly user: string;
-  /** The adapter the server connects for that channel; it must support `openDM`. */
-  readonly adapter: Adapter;
+  /** The adapter the server connects for that channel, able to open a DM. */
+  readonly adapter: Adapter & Required<Pick<Adapter, "openDM">>;
   /** `text` as a message to post on that platform, its quoted values kept literal. */
   readonly message: (text: string) => AdapterPostableMessage;
 }
@@ -39,28 +39,27 @@ export const mainChannelOff = Layer.succeed(MainChannel, {
 });
 
 /**
- * How long a post may take: the Slack client retries a failing call for about 30 min, and an
- * Intake run waits for its report.
+ * How long a post may take by default: the Slack client retries a failing call for about 30 min,
+ * and an Intake run waits for its report.
  */
-const POST_TIMEOUT = "30 seconds";
+const POST_TIMEOUT: Duration.Input = "30 seconds";
 
 /**
  * The Main channel on `target`'s adapter: opens the user's DM on the first post (kept once
  * opened), then posts there. Posting works once the server has started the channel. A failure, or
- * a post that takes longer than {@link POST_TIMEOUT}, is a {@link MainChannelError}.
+ * a post not confirmed within `timeout`, is a {@link MainChannelError}; such a post is not
+ * cancelled, so it may still arrive.
  */
-export function mainChannelLayer({
-  channel,
-  user,
-  adapter,
-  message,
-}: MainChannelTarget): Layer.Layer<MainChannel> {
+export function mainChannelLayer(
+  { channel, user, adapter, message }: MainChannelTarget,
+  { timeout = POST_TIMEOUT }: { timeout?: Duration.Input } = {},
+): Layer.Layer<MainChannel> {
+  const limit = Duration.fromInputUnsafe(timeout);
   let dm: string | undefined;
   return Layer.succeed(MainChannel, {
     post: (text) =>
       Effect.tryPromise({
         try: async () => {
-          if (!adapter.openDM) throw new Error(`the ${channel} adapter cannot open a DM`);
           dm ??= await adapter.openDM(user);
           await adapter.postMessage(dm, message(text));
           return "sent" as const;
@@ -69,11 +68,11 @@ export function mainChannelLayer({
           new MainChannelError({ message: `posting to ${channel} failed: ${messageOf(cause)}` }),
       }).pipe(
         Effect.timeoutOrElse({
-          duration: POST_TIMEOUT,
+          duration: limit,
           orElse: () =>
             Effect.fail(
               new MainChannelError({
-                message: `posting to ${channel} took longer than ${POST_TIMEOUT}`,
+                message: `posting to ${channel} was not confirmed within ${Duration.format(limit)}; it may still arrive`,
               }),
             ),
         }),

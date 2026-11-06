@@ -36,7 +36,10 @@ export type ReportConsequence =
       readonly maxFailedRuns: number;
       readonly retryInMinutes: number;
     }
-  /** The last run: its mail goes to `hex/failed`. */
+  /**
+   * The last run: the Intake failed permanently, its mail due in `hex/failed`; `mail` says what
+   * became of it.
+   */
   | {
       readonly status: "failed-permanently";
       readonly failedRuns: number;
@@ -70,8 +73,11 @@ export interface IntakeReportInput {
 /** How long a quoted value may get before it is cut. */
 const MAX_QUOTED = 200;
 
-/** Line breaks and other control characters, and the bidi controls that can disguise a name. */
-const UNPRINTABLE = /[\p{Cc}\u2028\u2029\u202A-\u202E\u2066-\u2069]+/gu;
+/**
+ * Line breaks and other control characters, and format characters: the bidi controls that can
+ * disguise a name, zero-width characters, the byte order mark.
+ */
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 
 /**
  * `text` as a code span: on one line, without backticks (so it can't end the span early), cut to

@@ -172,4 +172,18 @@ describe("renderIntakeReport", () => {
     );
     expect(fallback).toBe("1 without a detected date, filed by received date: `x'y.pdf`");
   });
+
+  test("zero-width, bidi mark and byte order mark characters are flattened like line breaks", () => {
+    const report = renderIntakeReport({
+      intake: {
+        messageId: "only-invisible@shop.example",
+        subject: "\u200B\uFEFF\u200E",
+        sender: "bill\u200Bing\u200F@\u061Cshop.example\uFEFF",
+      },
+      filings: [],
+      forwardings: [],
+      outcome: processed,
+    });
+    expect(report.split("\n")[0]).toBe("Intake processed: from `bill ing @ shop.example`");
+  });
 });

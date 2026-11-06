@@ -9,12 +9,14 @@ import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadForwardingConfig } from "../src/config";
 import { IntakeRunError, runIntake } from "../src/intake-workflow";
+import { type MainChannel, mainChannelLayer } from "../src/main-channel";
 import type { IntakeForwarding } from "../src/intake-workflow";
 import { recordFailedRun } from "../src/mail-fate";
 import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes, pdfMail } from "./eml";
 import type { Mail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
 import { recordingMailer } from "./recording-mailer";
+import { hangingAdapter } from "./hanging-adapter";
 import { recordingMainChannel } from "./recording-main-channel";
 import { scriptedDateExtractor } from "./scripted-extractor";
 import type { Script } from "./scripted-extractor";
@@ -80,8 +82,11 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
         }),
     })),
   ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
-  /** The Forwarding the next run uses, and whether it has a Main channel; tests may change them. */
-  const config = { forwarding, reports: true };
+  /** The Forwarding the next run uses, and its Main channel (none: off); tests may change them. */
+  const config: {
+    forwarding: IntakeForwarding | undefined;
+    mainChannel: Layer.Layer<MainChannel> | undefined;
+  } = { forwarding, mainChannel: mainChannel.layer };
   /** Runs the workflow once on `intake`, as the dev command does, and returns its result. */
   const run = (intake: Intake) =>
     runIntake(intake, {
@@ -91,7 +96,7 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
       mailer: mailer.layer,
       ledger,
       mailbox: mailbox.layer,
-      mainChannel: config.reports ? mainChannel.layer : undefined,
+      mainChannel: config.mainChannel,
       forwarding: config.forwarding,
     });
   return {
@@ -1076,6 +1081,15 @@ describe("Intake workflow", () => {
       expect((failed as IntakeRunError).mail).toBeUndefined();
       expect(hex.mailbox.messageIds()).toEqual(["uncounted@shop.example"]);
       expect(await hex.failedRuns("uncounted@shop.example")).toBeUndefined();
+      expect((failed as IntakeRunError).report).toEqual(SENT);
+      expect(hex.mainChannel.posted).toEqual([
+        [
+          "Intake FAILED: `Rechnung` from `billing@shop.example`",
+          "Failed: filing: `reading the Document date failed: 429`",
+          "Nothing filed or forwarded.",
+          "Counting the failed run failed (`Intake ledger: database is locked`); see the hex log.",
+        ].join("\n"),
+      ]);
     });
 
     test("the 5th failed run moves the mail to hex/failed; moved back, the Intake runs afresh and only its failed branch repeats", async () => {
@@ -1331,9 +1345,63 @@ describe("Intake workflow", () => {
       expect(hex.mailbox.messageIds()).toEqual(["unposted-failure@shop.example"]);
     });
 
+    const DIED = {
+      status: "not-sent",
+      reason: "posting it failed unexpectedly: adapter.postMessage is not a function",
+    } as const;
+
+    test("a report whose post dies leaves the processed Intake and its move as they are", async () => {
+      const hex = freshHex(dated);
+      hex.mainChannel.dieNext();
+      const mail = pdfMail("died@shop.example");
+      hex.deliver(mail);
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        mail: { status: "moved", to: "processed", copies: 1 },
+        report: DIED,
+      });
+      expect(await hex.ledger("died@shop.example")).toMatchObject({ documentCount: 1 });
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["died@shop.example"]);
+    });
+
+    test("a failed run's report whose post dies leaves its error, count and mail as they are", async () => {
+      const hex = freshHex(failing);
+      hex.mainChannel.dieNext();
+      const mail = pdfMail("died-failure@shop.example");
+      hex.deliver(mail);
+      const failed = (await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError;
+      expect(failed.message).toBe(
+        `the Intake workflow did not finish: filing: reading the Document date failed: 429${FIRST_FAILED_RUN}`,
+      );
+      expect(failed.report).toEqual(DIED);
+      expect(failed.mail).toEqual({ status: "kept-for-retry" });
+      expect(await hex.failedRuns("died-failure@shop.example")).toMatchObject({ count: 1 });
+    });
+
+    test("a post the platform never confirms times out: not sent, the Intake processed and moved", async () => {
+      const hex = freshHex(dated);
+      const target = { channel: "slack", user: "U0DANIEL", adapter: hangingAdapter() };
+      hex.config.mainChannel = mainChannelLayer(
+        { ...target, message: (text) => text },
+        { timeout: "20 millis" },
+      );
+      const mail = pdfMail("hanging@shop.example");
+      hex.deliver(mail);
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        mail: { status: "moved", to: "processed", copies: 1 },
+        report: {
+          status: "not-sent",
+          reason: "posting to slack was not confirmed within 20ms; it may still arrive",
+        },
+      });
+    });
+
     test("without a Main channel nothing is posted, and the result says reports are off", async () => {
       const hex = freshHex(dated);
-      hex.config.reports = false;
+      hex.config.mainChannel = undefined;
       const result = await hex.process(pdfMail("off@shop.example"));
       expect(result.report).toEqual({ status: "off" });
       expect(hex.mainChannel.posted).toEqual([]);

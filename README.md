@@ -275,7 +275,7 @@ The workflow, in order:
 
 1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`) is in the ledger was
    processed before; the run ends there, files or forwards nothing and moves its mail to
-   `hex/processed` (as in step 7).
+   `hex/processed` (as in step 8), and posts no Intake report.
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
    `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
    TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
@@ -350,7 +350,11 @@ The workflow, in order:
    place.
 6. **Ledger**: when every branch succeeded, the Intake is recorded as processed with its
    Filings, also when it had no Documents.
-7. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
+7. **Intake report**: a processed Intake's report goes to the Main channel (see `mainChannel`
+   under [Chat](#chat-slack-signal)) before its mail moves; a failed run's goes after the
+   failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
+   restart posts its report again, as it repeats its move.
+8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
    (compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail moves too), goes
    to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
@@ -445,7 +449,9 @@ carries the same Filings, also for an Intake already processed, its Forwardings 
 by this run or `forwarded-earlier`) and what happened to its mail (`mail`: `moved` with the
 folder and the number of copies, `not-in-mailbox`, or `not-moved` with the reason); a failed
 run's `IntakeRunError` says it too (`kept-for-retry` when the Intake has runs left), unless the
-run ended before step 7 or the ledger couldn't record the failed run there. Each branch is
+run ended before step 7 or the ledger couldn't record the failed run in step 8. Both also say
+what became of the run's Intake report (`report`: `sent`, `off`, or `not-sent` with the reason;
+none for an Intake already processed). Each branch is
 recorded as it succeeds, before the Intake is
 processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`target`,
 `forwarded_at`; one row per target) and `hex_intake_filings` (`document_index`, `path`,
@@ -536,7 +542,9 @@ folder or the active runs or to wait for news (all at warn, naming the mail when
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
 is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. For a run of
+consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too, as is an
+Intake report that couldn't be posted (`hex: Intake <id>: its Intake report was not posted:
+<reason>`). For a run of
 the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
 by UID, and after one that went through, the mail the watcher looked at goes too if still there
 (a copy whose Message-ID the server reads differently). When the retries fail too (or the run
@@ -651,14 +659,19 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   run that ends processed or failed, unprompted, as a DM to `user` on the configured channel
   `channel` (Slack: the member ID `U…`; Signal: an ACI, as for its allowlist). Without it, Intake
   reports are off (`hex: Intake reports off: …` at startup). A `channel` that names no configured
-  channel, or a `user` with whitespace or of the wrong form for its channel, fails startup. The
+  channel or whose adapter can't open a DM, or a `user` with whitespace, fails startup; so does a
+  Signal `user` that isn't an ACI. Slack's member ID form is not checked: a wrong one fails at the
+  first post, with a warning. The
   report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
   folder, names each one filed by the received date, lists the Forwarding targets, and for a failed
   run each failed branch, what was done nonetheless and what comes next (`failed run n of 5`, or
   failed permanently with the mail in `hex/failed`). Text from the mail goes in code spans,
-  escaped for Slack, so it forms no mention or link. A report that can't be posted (within 30
-  seconds) is logged as a warning and changes nothing about the Intake; an Intake already processed
-  gets none. `bun run intake` posts no report.
+  escaped for Slack, so it forms no mention or link. A report that can't be posted is logged as a
+  warning and changes nothing about the Intake; one the platform hasn't confirmed within 30
+  seconds counts as not posted, though it may still arrive. No report goes out for an Intake
+  already processed, for a run that ends before step 7 of the [Intake workflow](#intake-dev-command)
+  (an unreadable ledger, a defect), or for mail that never becomes an Intake (an unreadable
+  `.eml`, moved to `hex/failed` by the watcher). `bun run intake` posts no report.
 
 Secrets live only in the environment, never in the file:
 

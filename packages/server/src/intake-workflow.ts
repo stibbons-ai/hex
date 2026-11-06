@@ -76,7 +76,7 @@ const IntakeOutcome = Schema.Struct({
 
 /**
  * What the Intake workflow did with one Intake, with its mail, and with its Intake report (none
- * for an Intake already processed: its report went out when it was processed).
+ * when the run found the Intake already processed: a re-run posts no report).
  */
 export const IntakeResult = Schema.Struct({
   ...IntakeOutcome.fields,
@@ -304,7 +304,8 @@ const reportedForwardings = (attempts: readonly ForwardingAttempt[]): ReportForw
  * failure ({@link recordFailedRun}: on the 5th the Intake fails permanently, its mail going to
  * `hex/failed`), then posts its Intake report, saying what comes next. No copy in the folder
  * moves nothing; a move that fails is reported in the result, the outcome standing. So is a report
- * that can't be posted (`report`); an Intake already processed gets none.
+ * that can't be posted: in the result's `report`, or for a failed run in its
+ * {@link IntakeRunError}'s `report`; an Intake already processed gets none.
  *
  * Forwarding per target and Filing (date extraction, then Filing) are branches: each is attempted
  * on every run even when another failed, and recorded in the ledger as it succeeds (a Forwarding
@@ -595,11 +596,13 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
       return run(
         IntakeResult,
         Effect.gen(function* () {
-          // Spec order: the Intake report, then the IMAP move.
+          // Spec order: the Intake report, then the IMAP move. A run resumed in this step posts
+          // its report again, as it repeats its move.
           const report = yield* postReport(intake, {
             filings: inputData.filings.map(({ path, fellBack }) => ({
               path,
-              fellBack: fellBack === true,
+              // Absent on ledger entries from before #7, which filed by the received date.
+              fellBack: fellBack !== false,
             })),
             forwardings: reportedForwardings(inputData.forwardings),
             outcome: { status: "processed" },

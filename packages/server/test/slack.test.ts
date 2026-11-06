@@ -151,12 +151,8 @@ test("a Slack start that finishes after the deadline leaves no socket open", asy
 });
 
 /** Posts `text` to the Main channel configured for `chat`, as the Intake workflow does. */
-const postToMain = (chat: ChatConfig, text: string) =>
-  Effect.runPromise(
-    MainChannel.use((channel) => channel.post(text)).pipe(
-      Effect.provide(mainChannelLayer(chat.mainChannel!)),
-    ),
-  );
+const postToMain = (chat: ChatConfig, text: string, layer = mainChannelLayer(chat.mainChannel!)) =>
+  Effect.runPromise(MainChannel.use((channel) => channel.post(text)).pipe(Effect.provide(layer)));
 
 test("the Main channel opens Daniel's DM and posts there unprompted, quoted text kept literal", async () => {
   const slack = fakeSlack();
@@ -177,6 +173,26 @@ test("the Main channel opens Daniel's DM and posts there unprompted, quoted text
       );
       expect(post.has("markdown_text")).toBe(false);
       expect(post.get("unfurl_links")).toBe("false");
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("the Main channel opens Daniel's DM once and posts every later report there", async () => {
+  const slack = fakeSlack();
+  try {
+    const chat = await chatFor(slack);
+    const server = await startServer(options("main-channel-twice", { chat }));
+    try {
+      await slack.connected();
+      const layer = mainChannelLayer(chat.mainChannel!);
+      expect(await postToMain(chat, "first", layer)).toBe("sent");
+      expect(await postToMain(chat, "second", layer)).toBe("sent");
+      expect(slack.opened).toEqual([DANIEL]);
+      expect(slack.methods.filter((method) => method === "chat.postMessage")).toHaveLength(2);
     } finally {
       await server.stop();
     }

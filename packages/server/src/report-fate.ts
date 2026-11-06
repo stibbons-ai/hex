@@ -1,5 +1,6 @@
 // What becomes of an Intake run's Intake report: shared by the Intake workflow, which posts it,
 // and the mailbox watcher, which warns when it wasn't posted.
+import { messageOf } from "@hex/adapters";
 import type { Intake } from "@hex/adapters";
 import { normalizeMessageId, renderIntakeReport } from "@hex/domain";
 import type { IntakeReportInput, ReportConsequence } from "@hex/domain";
@@ -32,8 +33,8 @@ export function reportConsequence({ failedRuns, mail }: FailedRun): ReportConseq
 }
 
 /**
- * Posts the Intake report on `report` for `intake` to the Main channel; a post that fails is only
- * its fate, never a failure.
+ * Posts the Intake report on `report` for `intake` to the Main channel; a post that fails, even
+ * with a defect, is only its fate, never a failure.
  */
 export const postReport = (
   { messageId, subject, sender }: Intake,
@@ -50,6 +51,12 @@ export const postReport = (
     Effect.map((status): ReportFate => ({ status })),
     Effect.catchTag("MainChannelError", ({ message }) =>
       Effect.succeed<ReportFate>({ status: "not-sent", reason: message }),
+    ),
+    Effect.catchDefect((defect) =>
+      Effect.succeed<ReportFate>({
+        status: "not-sent",
+        reason: `posting it failed unexpectedly: ${messageOf(defect)}`,
+      }),
     ),
   );
 

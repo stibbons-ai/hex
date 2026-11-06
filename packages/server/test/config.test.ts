@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redacted } from "effect";
-import { loadChatConfig } from "../src/channels";
+import { type AdapterFactory, adapterFactories, loadChatConfig } from "../src/channels";
 import {
   loadEvalConfig,
   loadForwardingConfig,
@@ -273,7 +273,7 @@ describe("loadChatConfig", () => {
       const chat = await loadChatConfig(path, slackEnv);
       expect(chat?.mainChannel).toMatchObject({ channel: "slack", user: "U0DANIEL" });
       // The adapter the server connects, so posting works once chat has started.
-      expect(chat?.mainChannel?.adapter).toBe(chat!.channels["slack"]!.adapter);
+      expect<unknown>(chat?.mainChannel?.adapter).toBe(chat!.channels["slack"]!.adapter);
       expect(chat?.mainChannel?.message("`<!channel>` & <@U0X> `a & b`")).toEqual({
         raw: "`&lt;!channel&gt;` &amp; &lt;@U0X&gt; `a &amp; b`",
       });
@@ -329,6 +329,17 @@ describe("loadChatConfig", () => {
       const main = (await loadChatConfig(path, signalEnv))?.mainChannel;
       expect(main).toMatchObject({ channel: "signal", user: DANIEL_ACI });
       expect(main?.message("`<x>` & y")).toBe("`<x>` & y");
+    });
+
+    test("on a channel whose adapter can't open a DM: fails", async () => {
+      const slackWithoutDMs: AdapterFactory = (options, env) => {
+        const built = adapterFactories["slack"]!(options, env);
+        return { ...built, adapter: Object.assign(built.adapter, { openDM: undefined }) };
+      };
+      const path = await configFile(withMain({ channel: "slack", user: "U0DANIEL" }));
+      await expect(loadChatConfig(path, slackEnv, { slack: slackWithoutDMs })).rejects.toThrow(
+        `hex config ${path}: mainChannel: the slack adapter cannot open a DM`,
+      );
     });
   });
 });
