@@ -111,7 +111,11 @@ export const recordFailedRun = (messageId: string, runId: string) =>
 
 /** How a move is told. */
 export interface DescribeOptions {
-  /** Said by the run, before the watcher (if it started the run) tries a failed move to `hex/failed` once more. */
+  /**
+   * Said before the watcher, for a run it started, tries a failed move to `hex/failed` once more
+   * (by Message-ID, then by UID): by the run's move step, and by the watcher itself when it
+   * counts the failed run. The line's wording stays the run's ("if it started the run").
+   */
   readonly retryPending?: boolean;
   /** Said after a failed move, which may have gone through all the same. */
   readonly afterFailedMove?: boolean;

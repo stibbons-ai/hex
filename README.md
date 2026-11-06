@@ -459,11 +459,11 @@ after a restart, still fails the Intake permanently instead of counting 1. When 
 fails an Intake permanently itself (5 failed runs counted, the process gone before it ended
 them), no row is kept.
 
-Since #9, a Message-ID is keyed without every layer of `<>` (`<<a@b>>` is `a@b`), where before
-only one layer came off; Content-IDs are compared the same way. Mail read from a file or the
-mailbox was already keyed without both layers, so only a ledger row of an Intake given with
-three or more layers, or with two through `workflows.start` or Studio, keeps its old key and
-no longer matches; such an Intake would run again. None is known to exist (no such Message-ID is
+Since #9, a Message-ID is keyed without every layer of `<>` (`<<a@b>>` is `a@b`); Content-IDs
+are compared the same way. Before, the ledger took one layer off and `readEml` another, so mail
+read from a file was already keyed without two layers. Only a ledger row of an Intake given with
+three or more layers, or with two through `workflows.start` or Studio, keeps its old key and no
+longer matches; such an Intake would run again. None is known to exist (no such Message-ID is
 valid), so the rows aren't rewritten.
 
 ### Mailbox
@@ -522,7 +522,8 @@ sets or reads flags. Each look goes through the folder's mail in order, one run 
 
 Decisions and actions go by the Message-ID hex reads from the mail, the one runs, the ledger and
 the active runs know it by. The server's reading (its ENVELOPE) decides only to pass over a mail
-without fetching it: another copy seen in this look, an active run, a retry still waiting; when
+without fetching it: another copy seen in this look, an active run, an Intake held back in memory
+(below), a retry still waiting; when
 the two readings differ, a mail can be held back by the server's reading of another Intake's id.
 The outcome folders `hex/processed` and `hex/failed` are created on first use, with the server's
 hierarchy delimiter and under its personal namespace (`hex.processed` on a server that separates

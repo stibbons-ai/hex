@@ -59,8 +59,9 @@ export interface MailboxWatcherOptions {
 export interface MailboxWatcher {
   /**
    * Stops taking mail and closes the mailbox's connection. A run in progress goes on, but what
-   * the watcher would do after it (moving its mail by UID, logging its outcome, counting a run that
-   * ended before its move step) does not happen.
+   * the watcher would do after it (moving its mail by Message-ID again or by UID, logging its
+   * outcome, counting a run that ended before its move step, or holding its Intake back in memory
+   * when that count fails) does not happen.
    */
   stop(): Promise<void>;
 }
@@ -98,8 +99,9 @@ const endsLook = (error: unknown): error is MailboxError =>
  * its {@link MAX_FAILED_RUNS}th. A mail that can't become an Intake goes to `hex/failed` at once,
  * without a run. Every action goes by the Message-ID hex reads from the mail, the one the run,
  * the ledger and the active runs know it by; the server's reading decides only to pass over a
- * mail without fetching it (another copy seen in this look, an active run, a retry still
- * waiting), so when the two differ, it can hold back a mail hex would run. A run of its own still
+ * mail without fetching it (another copy seen in this look, an active run, an Intake held back
+ * in memory, a retry still waiting), so when the two differ, it can hold back a mail hex would
+ * run. A run of its own still
  * going after {@link LONG_RUN_MS} is a warning, repeated as long as it goes on: no other mail is
  * taken meanwhile. A failure with one mail is logged at warn, naming its UID and the server's
  * Message-ID, and the look goes on with the next. A lost connection, UIDs that changed meaning, a

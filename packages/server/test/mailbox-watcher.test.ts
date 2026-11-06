@@ -594,6 +594,29 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("a failed move to hex/failed is tried again by Message-ID: every copy goes, no fresh series", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.mailbox.deliver(emlOf("two-copies@shop.example"));
+    hex.mailbox.deliver(emlOf("two-copies@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      if (run === 5) hex.mailbox.refuse("moving mail to hex/failed");
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    // A retry by UID alone would leave the copy the watcher didn't look at, its count ended.
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([
+      "two-copies@shop.example",
+      "two-copies@shop.example",
+    ]);
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(5);
+  });
+
   test("a move to hex/failed failing every retry says the Intake is run afresh at the next look", async () => {
     // The run's move, then the watcher's by Message-ID and by UID.
     const hex = await toFifthFailure("move-never@shop.example", (mailbox) =>
