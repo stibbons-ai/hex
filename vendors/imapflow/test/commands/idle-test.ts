@@ -1,0 +1,658 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import idleCommand from '../../src/commands/idle.js';
+import { createMockConnection } from '../fixtures/mock-connection.js';
+import { withFakeTimers } from '../fixtures/fake-timers.js';
+
+describe('commands/idle', () => {
+    it('Commands: idle with IDLE capability', async () => {
+        let execCommand = '';
+        let idlingSet = false;
+        const connection = createMockConnection({
+            state: 3, // SELECTED
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                execCommand = cmd;
+                idlingSet = connection.idling;
+                // Simulate continuation response
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(execCommand, 'IDLE');
+        assert.equal(idlingSet, true);
+    });
+    it('Commands: idle fails the connection when the server never acknowledges IDLE', async () => {
+        // The socket watchdog only covers a server that goes quiet. One that keeps sending untagged
+        // lines without ever answering "+" kept the IDLE in flight for good, and every later
+        // command queued behind it. DONE can not be sent before the "+", so the connection is
+        // failed the way the watchdog fails a dead peer, with socketTimeout as the budget.
+        await withFakeTimers(async timers => {
+            let emitted: any[] = [];
+            let rejectExec: any = null;
+            const connection: any = createMockConnection({
+                state: 3,
+                capabilities: new Map([['IDLE', true]]),
+                socketTimeout: 1234,
+                isClosed: false,
+                emitError: (err: any) => {
+                    emitted.push(err);
+                    connection.isClosed = true;
+                    rejectExec(err);
+                },
+                exec: async (cmd: any, attrs: any, opts: any) => {
+                    opts.onSend();
+                    await new Promise((resolve, reject) => {
+                        rejectExec = reject;
+                    });
+                    return { next: () => {} };
+                },
+                write: () => {}
+            });
+
+            let idlePromise = idleCommand(connection);
+            await timers.drain();
+
+            let armed = timers.pending();
+            assert.equal(armed.length, 1, 'the acknowledgement deadline is armed once IDLE is on the wire');
+            assert.equal(armed[0].delay, 1234, 'with the socket timeout as its budget');
+            assert.ok(armed[0].unrefd, 'and does not keep the process alive');
+
+            await timers.fire();
+            await idlePromise;
+
+            assert.equal(emitted.length, 1, 'the connection was failed once');
+            assert.equal(emitted[0].code, 'ETIMEOUT');
+            assert.match(emitted[0].message, /IDLE/);
+            assert.equal(connection.idling, false);
+            assert.equal(timers.count(), 0, 'no timer is left armed');
+        });
+    });
+    it('Commands: the IDLE acknowledgement deadline is cleared by the continuation', async () => {
+        await withFakeTimers(async timers => {
+            const connection: any = createMockConnection({
+                state: 3,
+                capabilities: new Map([['IDLE', true]]),
+                socketTimeout: 1234,
+                isClosed: false,
+                emitError: () => {
+                    throw new Error('the deadline must not fire');
+                },
+                exec: async (cmd: any, attrs: any, opts: any) => {
+                    opts.onSend();
+                    await opts.onPlusTag();
+                    return { next: () => {} };
+                },
+                write: () => {}
+            });
+
+            await idleCommand(connection);
+
+            assert.equal(timers.history().length, 1, 'only the deadline was armed');
+            assert.ok(timers.history()[0].cleared, 'the deadline was cleared by the "+"');
+            assert.equal(timers.count(), 0);
+            await timers.fire();
+        });
+    });
+    it('Commands: idle uses IDLE on rev2-only servers without the IDLE token', async () => {
+        let execCommand = '';
+        const connection = createMockConnection({
+            state: 3,
+            // IDLE is part of base IMAP4rev2 - no separate token required
+            capabilities: new Map([['IMAP4rev2', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                execCommand = cmd;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection);
+        assert.equal(execCommand, 'IDLE');
+    });
+    it('Commands: idle skips when not selected', async () => {
+        const connection = createMockConnection({ state: 2 }); // AUTHENTICATED
+
+        const result = await idleCommand(connection);
+        assert.equal(result, undefined);
+    });
+    it('Commands: idle falls back to NOOP without IDLE capability', async () => {
+        let noopCalled = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map(), // No IDLE
+            currentSelectCommand: { command: 'SELECT', arguments: [{ value: 'INBOX' }] },
+            exec: async (cmd: any) => {
+                if (cmd === 'NOOP') {
+                    noopCalled = true;
+                    // Break out of the loop by calling preCheck
+                    if (connection.preCheck) {
+                        await (connection as any).preCheck();
+                    }
+                }
+                return { next: () => {} };
+            }
+        });
+
+        // Start idle - it will loop with NOOP
+        const idlePromise = idleCommand(connection as any);
+
+        // Give it a moment to start, then break the loop
+        await new Promise(resolve => setTimeout(resolve, 10));
+        if ((connection as any).preCheck) {
+            await (connection as any).preCheck();
+        }
+
+        await idlePromise;
+        assert.equal(noopCalled, true);
+    });
+    it('Commands: idle preCheck breaks IDLE', async () => {
+        let doneSent = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // After IDLE is initiated, trigger preCheck
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: (data: any) => {
+                if (data === 'DONE') {
+                    doneSent = true;
+                }
+            }
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(doneSent, true);
+        assert.equal(connection.idling, false);
+    });
+    it('Commands: idle handles error', async () => {
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async () => {
+                throw new Error('IDLE failed');
+            }
+        });
+
+        const result = await idleCommand(connection);
+        assert.equal(result, false);
+        assert.equal(connection.idling, false);
+    });
+    it('Commands: idle with maxIdleTime restarts loop', async () => {
+        let idleCount = 0;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                idleCount++;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Break after second iteration
+                if (idleCount >= 2 && connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        // Very short maxIdleTime to trigger restart
+        await idleCommand(connection, 5);
+        assert.ok(idleCount >= 1);
+    });
+    it('Commands: idle without currentSelectCommand returns immediately', async () => {
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map(), // No IDLE
+            currentSelectCommand: false // No select command
+        });
+
+        // Should resolve immediately
+        await idleCommand(connection);
+        assert.ok(true);
+    });
+    it('Commands: idle NOOP fallback uses STATUS when configured', async () => {
+        let statusCalled = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map(),
+            currentSelectCommand: { command: 'SELECT', arguments: [{ value: 'INBOX' }] },
+            missingIdleCommand: 'STATUS',
+            exec: async (cmd: any) => {
+                if (cmd === 'STATUS') {
+                    statusCalled = true;
+                    if (connection.preCheck) {
+                        await (connection as any).preCheck();
+                    }
+                }
+                return { next: () => {} };
+            }
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(statusCalled, true);
+    });
+    it('Commands: idle NOOP fallback uses SELECT when configured', async () => {
+        // SELECT polling goes through the real select implementation, so it applies the same
+        // mailbox state transitions as a caller-issued select instead of replaying wire arguments.
+        let selectCalled = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map(),
+            // The mailbox is already open, so its folder metadata is cached (no LIST round trip)
+            folders: new Map([['INBOX', { path: 'INBOX', delimiter: '/' }]]),
+            currentSelectCommand: { command: 'SELECT', arguments: [{ value: 'INBOX' }] },
+            missingIdleCommand: 'SELECT',
+            exec: async (cmd: any) => {
+                if (cmd === 'SELECT') {
+                    selectCalled = true;
+                    if (connection.preCheck) {
+                        await (connection as any).preCheck();
+                    }
+                }
+                return { next: () => {}, response: { attributes: [{ value: 'OK' }] } };
+            }
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(selectCalled, true);
+        assert.equal(connection.mailbox.path, 'INBOX', 'mailbox state was reapplied by the select implementation');
+        assert.equal(connection.mailbox.delimiter, '/', 'cached folder metadata was merged in, as with a normal SELECT');
+    });
+    it('Commands: idle sets preCheck function', async () => {
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Check that preCheck is set
+                assert.equal(typeof connection.preCheck, 'function');
+                // Break the IDLE
+                if ((connection as any).preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+    });
+    it('Commands: idle clears preCheck on completion', async () => {
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+        assert.equal((connection as any).preCheck, false);
+    });
+    it('Commands: idle NOOP fallback handles error', async () => {
+        let errorLogged = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map(),
+            currentSelectCommand: { command: 'SELECT', arguments: [{ value: 'INBOX' }] },
+            exec: async () => {
+                throw new Error('NOOP failed');
+            },
+            log: {
+                warn: () => {
+                    errorLogged = true;
+                },
+                debug: () => {},
+                trace: () => {}
+            }
+        });
+
+        // Should resolve even on error
+        await idleCommand(connection);
+        assert.equal(errorLogged, true);
+    });
+    it('Commands: idle clears wait queue on normal completion', async () => {
+        let preCheckResolved = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Simulate waiting preCheck request before completion
+                if (connection.preCheck) {
+                    // Queue a preCheck request
+                    (connection as any).preCheck().then(() => {
+                        preCheckResolved = true;
+                    });
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+        // Wait a tick for the promise to resolve
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(preCheckResolved, true);
+    });
+    it('Commands: idle rejects wait queue on error', async () => {
+        let preCheckRejected = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Queue a preCheck request then throw
+                if (connection.preCheck) {
+                    (connection as any).preCheck().catch(() => {
+                        preCheckRejected = true;
+                    });
+                }
+                throw new Error('IDLE failed');
+            }
+        });
+
+        const result = await idleCommand(connection as any);
+        assert.equal(result, false);
+        // Wait a tick for the promise to reject
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(preCheckRejected, true);
+    });
+    it('Commands: idle onPlusTag calls preCheck if doneRequested', async () => {
+        let doneSent = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                // Request done before onPlusTag is called
+                if (connection.preCheck) {
+                    (connection as any).preCheck().catch(() => {});
+                }
+                // Then call onPlusTag which should send DONE
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                return { next: () => {} };
+            },
+            write: (data: any) => {
+                if (data === 'DONE') {
+                    doneSent = true;
+                }
+            }
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(doneSent, true);
+    });
+    it('Commands: idle calls onSend callback', async () => {
+        let onSendCalled = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                // Call onSend callback
+                if (opts && opts.onSend) {
+                    opts.onSend();
+                    onSendCalled = true;
+                }
+                // Then call onPlusTag to enable IDLE
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Break IDLE via preCheck
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+        assert.equal(onSendCalled, true);
+    });
+    it('Commands: idle clears preCheck and queue on normal completion', async () => {
+        let waitQueueResolved = false;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // After onPlusTag, queue a preCheck but don't resolve yet
+                if (connection.preCheck) {
+                    (connection as any).preCheck().then(() => {
+                        waitQueueResolved = true;
+                    });
+                }
+                // Return to complete IDLE - this should clear the queue
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection as any);
+        await new Promise(resolve => setImmediate(resolve));
+        // preCheck should be cleared after completion
+        assert.equal((connection as any).preCheck, false);
+        assert.equal(waitQueueResolved, true);
+    });
+    it('Commands: idle with maxIdleTime triggers preCheck after timeout', async () => {
+        let preCheckCalled = false;
+        let loopCount = 0;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            idling: false,
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                loopCount++;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // Simulate time passing - on first loop, wait for timer
+                if (loopCount === 1) {
+                    // Wait a bit for the timer to fire
+                    await new Promise(resolve => setTimeout(resolve, 25));
+                }
+                // Check if preCheck was called by the timer
+                if (connection.preCheck && loopCount === 1) {
+                    preCheckCalled = true;
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        // Use very short maxIdleTime
+        await idleCommand(connection, 10);
+        assert.ok(preCheckCalled || loopCount > 1, 'preCheck should be called by timer or loop should restart');
+    });
+    it('Commands: idle stillIdling triggers loop restart', async () => {
+        let loopCount = 0;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            idling: false,
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                loopCount++;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // First iteration: let the timer set stillIdling and trigger preCheck
+                if (loopCount === 1) {
+                    await new Promise(resolve => setTimeout(resolve, 20));
+                    // Timer should have called preCheck which sets stillIdling
+                }
+                // Second iteration: just complete
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection, 5);
+        // Loop should have run at least once (could run twice if timer works)
+        assert.ok(loopCount >= 1, 'IDLE loop should have run');
+    });
+    it('Commands: idle does not restart with a command queued behind the break', async () => {
+        // The max-IDLE-time break lets a queued command (a CLOSE, say) run next: restarting
+        // IDLE right behind it would idle in whatever state that command left the connection
+        let loopCount = 0;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            idling: false,
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                loopCount++;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                // the max-IDLE-time timer breaks the session, with a command queued meanwhile
+                await new Promise(resolve => setTimeout(resolve, 20));
+                connection.requestQueue.push({ tag: 'A2', command: 'CLOSE', attributes: [], options: {} });
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection, 5);
+        assert.equal(loopCount, 1, 'IDLE is not restarted');
+    });
+    it('Commands: idle does not restart once the mailbox is no longer selected', async () => {
+        let loopCount = 0;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            idling: false,
+            exec: async (cmd: any, attrs: any, opts: any) => {
+                loopCount++;
+                if (opts && opts.onPlusTag) {
+                    await opts.onPlusTag();
+                }
+                await new Promise(resolve => setTimeout(resolve, 20));
+                // the break let a CLOSE through, and it has completed
+                connection.state = 2;
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            },
+            write: () => {}
+        });
+
+        await idleCommand(connection, 5);
+        assert.equal(loopCount, 1, 'IDLE is not restarted');
+    });
+    it('Commands: idle releases queued waiters when the server refuses IDLE', async () => {
+        let waiter: any = null;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async () => {
+                // a command is waiting for IDLE to break when the server answers IDLE with BAD
+                assert.ok(connection.preCheck);
+                waiter = connection.preCheck().then(
+                    () => 'resolved',
+                    () => 'rejected'
+                );
+                const err: any = new Error('Command failed');
+                err.responseStatus = 'BAD';
+                throw err;
+            }
+        });
+
+        assert.equal(await idleCommand(connection), false);
+        assert.equal(await waiter, 'resolved', 'the waiting command runs instead of failing with the IDLE error');
+    });
+    it('Commands: a throttled IDLE does not turn IDLE off and releases the queued waiters', async () => {
+        // Microsoft 365 answers a throttled command with BAD, which asks for a later try and says
+        // nothing about IDLE support
+        let waiter: any = null;
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            exec: async () => {
+                waiter = (connection as any).preCheck().then(
+                    () => 'resolved',
+                    () => 'rejected'
+                );
+                const err: any = new Error('Command failed');
+                err.responseStatus = 'BAD';
+                err.code = 'ETHROTTLE';
+                throw err;
+            }
+        });
+
+        assert.equal(await idleCommand(connection), false);
+        assert.ok(!connection.skipIdle, 'IDLE is tried again next time');
+        assert.equal(await waiter, 'resolved', 'the waiting command runs instead of failing with the throttled IDLE');
+    });
+    it('Commands: idle polls instead of retrying once the server refused IDLE', async () => {
+        let commands: string[] = [];
+        const connection = createMockConnection({
+            state: 3,
+            capabilities: new Map([['IDLE', true]]),
+            currentSelectCommand: { command: 'SELECT', arguments: [{ value: 'INBOX' }] },
+            exec: async (cmd: any) => {
+                commands.push(cmd);
+                if (cmd === 'IDLE') {
+                    const err: any = new Error('Command failed');
+                    err.responseStatus = 'NO';
+                    throw err;
+                }
+                if (connection.preCheck) {
+                    await (connection as any).preCheck();
+                }
+                return { next: () => {} };
+            }
+        });
+
+        assert.equal(await idleCommand(connection), false);
+        assert.equal(connection.skipIdle, true);
+
+        const polling = idleCommand(connection, 5);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        if ((connection as any).preCheck) {
+            await (connection as any).preCheck();
+        }
+        await polling;
+        assert.deepEqual([...new Set(commands)], ['IDLE', 'NOOP']);
+    });
+});

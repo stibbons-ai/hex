@@ -543,8 +543,8 @@ was one resumed at boot, which the watcher doesn't follow), the Intake's count i
 so the next look runs it afresh, a new series of 5 runs, as the warning says. When the watcher's
 retry finds the mail gone, the first move's answer was likely lost although it went through: the
 line says so, pointing at `hex/failed`, instead of a fresh series. A failed run the ledger can't
-count (its writes failing while reads work) is an error, and the watcher holds the Intake back in
-memory for 5 minutes, the first retry delay, instead of running it on every look.
+count (its writes failing while reads work) is an error, and the watcher counts it in memory
+instead (see Limits).
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after
@@ -563,6 +563,19 @@ Message-ID the server reports for each mail (its ENVELOPE) only to pass over a m
 fetching it (see above); when the run then finds no copy by Message-ID (a server reading the
 header differently from hex), the watcher moves that mail by its UID. Studio (`bun run studio`)
 never watches the mailbox and never restarts runs; a run started there moves no mail.
+
+While the ledger can't be written but can be read, failed runs it can't count are counted in
+memory on top of its own count, each an error line, and every decision goes by the sum: the
+Intake is held back as the count would hold it (5, 10, 20, 40 minutes), and its 5th failed run
+fails it permanently once the ledger writes again (counted or not by the ledger, at the next
+look). While the ledger still can't be written, hex can't fail it permanently (that is a ledger
+write too), so it stops running it until hex restarts, with one error line saying so; the mail
+stays in the watched folder. Each of those runs may resend the Forwardings the ledger couldn't
+record. A restart clears the memory: the Intake runs again at the watcher's first look, counted
+from what the ledger has. A look that no longer lists its mail clears its count too, but not a
+stop: a stop holds until the restart, even when the ledger writes again or the mail is moved
+away and back. When only failing it permanently failed (its 5th failed run counted), the next
+look tries that again.
 
 ## Chat (Slack, Signal)
 
@@ -997,6 +1010,23 @@ Mastra does not validate step output, so every step decodes its own output with 
 `packages/adapters/test/schema.test.ts` pins that contract against real workflow runs. Use
 schemas whose encoded and decoded types match: Mastra re-validates the decoded input at each step,
 so transforming schemas (such as `Schema.NumberFromString`) fail there.
+
+## Vendored sources
+
+`vendors/` holds upstream source as squashed git subtrees, for coding agents to read instead of
+the compiled code in `node_modules` (see `AGENTS.md`): `vendors/effect` (Effect, tag
+`effect@4.1.0`) and `vendors/imapflow` (tag `v2.10.0`), the versions the catalog pins. Nothing
+imports from them, and lint (`--disable-nested-config`, `ignorePatterns`), formatting
+(`.oxfmtrc.json` `ignorePatterns`), `bun test` (`bunfig.toml` `pathIgnorePatterns`), the
+container build (`.dockerignore`) and VS Code (`.vscode/settings.json`, the Oxc extension on the
+root config alone) skip them. `--disable-nested-config` keeps oxlint from loading
+`vendors/effect/.oxlintrc.json`, so a nested `.oxlintrc.json` under `packages/` would be ignored
+too: put lint configuration in the root `.oxlintrc.json`. When a pin changes, move its subtree in
+the same change:
+
+```sh
+git subtree pull -S --prefix=vendors/effect https://github.com/Effect-TS/effect.git effect@<version> --squash
+```
 
 ## Telemetry and licences
 

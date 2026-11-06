@@ -1,0 +1,112 @@
+{
+    "name": "imapflow",
+    "version": "2.10.0",
+    "description": "IMAP Client for Node",
+    "type": "module",
+    "main": "./dist/cjs/imap-flow.js",
+    "types": "./dist/cjs/imap-flow.d.ts",
+    "typesVersions": {
+        "*": {
+            "lib/*": [
+                "dist/cjs/*.d.ts"
+            ]
+        }
+    },
+    "exports": {
+        ".": {
+            "import": "./dist/esm/imap-flow.js",
+            "require": "./dist/cjs/imap-flow.js"
+        },
+        "./lib/*.js": {
+            "import": "./dist/esm/*.js",
+            "require": "./dist/cjs/*.js"
+        },
+        "./lib/*": {
+            "import": "./dist/esm/*.js",
+            "require": "./dist/cjs/*.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist",
+        "CHANGELOG.md",
+        "SECURITY.md",
+        "SECURITY.txt"
+    ],
+    "scripts": {
+        "build": "node scripts/build.js",
+        "typecheck": "node scripts/build.js --generate-only && tsc -p tsconfig.json",
+        "pretest": "npm run build",
+        "test": "node --import tsx --test --test-force-exit --test-concurrency=1 $(find test -name '*-test.ts' -not -path '*/integration/*' -not -path '*/cloudflare/*' -not -path '*/celld/*' -not -path '*/browser/*')",
+        "pretest:coverage": "npm run build",
+        "test:coverage": "c8 node --import tsx --test --test-force-exit --test-concurrency=1 $(find test -name '*-test.ts' -not -path '*/integration/*' -not -path '*/cloudflare/*' -not -path '*/celld/*' -not -path '*/browser/*')",
+        "pretest:cjs": "npm run build",
+        "test:cjs": "NODE_OPTIONS=--no-experimental-require-module node test/package/cjs-smoke.cjs",
+        "pretest:bun": "npm run build",
+        "test:bun": "bun test --timeout 60000 $(find ./test -name '*-test.ts' -not -path '*/integration/*' -not -path '*/cloudflare/*' -not -path '*/celld/*' -not -path '*/browser/*')",
+        "pretest:workers": "npm run build",
+        "test:workers": "node --import tsx --test test/cloudflare/cloudflare-test.ts",
+        "pretest:celld": "npm run build",
+        "test:celld": "node --import tsx --test --test-force-exit test/celld/celld-test.ts",
+        "pretest:browser": "npm run build",
+        "test:browser": "node --import tsx --test --test-force-exit test/browser/browser-test.ts",
+        "test:rev2": "bash test/integration/run-rev2-tests.sh",
+        "test:mutation": "node scripts/mutation-test.js",
+        "format": "prettier --write \"**/*.{js,cjs,ts,json,md,yml,yaml}\"",
+        "format:check": "prettier --check \"**/*.{js,cjs,ts,json,md,yml,yaml}\"",
+        "lint": "npm run typecheck && eslint .",
+        "lint:fix": "eslint . --fix",
+        "prepare": "npm run build",
+        "update": "rm -rf node_modules package-lock.json && ncu -u && npm install",
+        "test:james": "bash test/integration/run-james-tests.sh"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/postalsys/imapflow.git"
+    },
+    "keywords": [
+        "imap",
+        "email",
+        "mail"
+    ],
+    "author": "Postal Systems OÜ",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/postalsys/imapflow/issues"
+    },
+    "homepage": "https://imapflow.com/",
+    "devDependencies": {
+        "@types/node": "20.19.43",
+        "buffer": "6.0.3",
+        "c8": "12.0.0",
+        "esbuild": "0.28.2",
+        "eslint": "10.13.0",
+        "eslint-config-prettier": "10.1.8",
+        "events": "3.3.0",
+        "globals": "17.13.0",
+        "imapkit": "5.2.0",
+        "playwright-core": "1.64.1",
+        "prettier": "3.9.10",
+        "process": "0.11.10",
+        "readable-stream": "4.8.0",
+        "string_decoder": "1.3.0",
+        "tsx": "4.23.15",
+        "types-node-legacy": "npm:@types/node@20.0.0",
+        "typescript": "6.0.3",
+        "typescript-eslint": "8.72.1",
+        "wrangler": "4.155.0"
+    },
+    "dependencies": {
+        "@zone-eu/mailsplit": "5.4.29",
+        "encoding-japanese": "2.4.0",
+        "iconv-lite": "0.7.3",
+        "libbase64": "1.4.1",
+        "libmime": "5.6.3",
+        "libqp": "3.0.1",
+        "pino": "10.3.1",
+        "socks": "2.8.10"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}

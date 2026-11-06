@@ -208,6 +208,10 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     get closed() {
       return closed;
     },
+    /** Opens the closed Mailbox again, as a restarted hex connects anew. */
+    reopen() {
+      closed = false;
+    },
     /**
      * Puts a raw mail into the watched folder; with IDLE, a waiting watcher hears of it.
      * `serverMessageId`: the Message-ID the server reports, when it reads the header differently

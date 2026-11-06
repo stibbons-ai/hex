@@ -12,3 +12,7 @@ exact = true
 minimumReleaseAge = 259200  # 3 days in seconds
 # our own package, published by us: exempt so its releases are usable at once.
 minimumReleaseAgeExcludes = ["@stibbons/chat-adapter-signal"]
+
+[test]
+# Vendored upstream sources (vendors/, reference for agents) carry their own test suites.
+pathIgnorePatterns = ["vendors/**"]
