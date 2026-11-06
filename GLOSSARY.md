@@ -41,9 +41,9 @@ Daniel's bookkeeping folder in Proton Drive (`Buchhaltung`), the final home of f
 _Avoid_: Buchhaltung, drive, destination
 
 **Intake report**:
-A short message to Daniel's main channel summarising one processed Intake, flagging date fallbacks and failures.
+A short message to Daniel's main channel summarising one Intake run (processed or failed), flagging date fallbacks and failures.
 _Avoid_: Notification, alert
 
 **Main channel**:
-The one conversation (currently a Slack DM, later Signal) where hex reaches Daniel unprompted.
+The one conversation (a DM on Slack or Signal) where hex reaches Daniel unprompted.
 _Avoid_: Default channel, notification channel

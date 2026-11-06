@@ -21,3 +21,12 @@ export type { CalendarDate, Category, FilingPlan } from "./filing";
 export { normalizeMessageId } from "./ids";
 export { detectDocuments } from "./intake";
 export type { DetectedDocument, IntakeAttachmentFacts } from "./intake";
+export { renderIntakeReport, sentUnrecordedReason } from "./intake-report";
+export type {
+  IntakeReportInput,
+  ReportConsequence,
+  ReportFailedMail,
+  ReportFailure,
+  ReportFiling,
+  ReportForwarding,
+} from "./intake-report";

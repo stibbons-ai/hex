@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { RunningServer } from "../src";
+import { INTAKE_WORKFLOW_ID } from "../src/intake-workflow";
+import { DANIEL, DM_CHANNEL, fakeSlack, slackEnv } from "./fake-slack";
 import { fakeImap } from "./fake-imap";
+import { client } from "./server-helpers";
 import { freePort } from "./timeouts";
 
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -53,6 +57,7 @@ describe("bun packages/server/src/main.ts", () => {
         const { url, output } = await listeningUrl(child.stdout);
         expect(output.match(/hex: chat off: HEX_CONFIG is not set/g)).toHaveLength(1);
         expect(output.match(/hex: mailbox off: HEX_CONFIG is not set/g)).toHaveLength(1);
+        expect(output.match(/hex: Intake reports off: HEX_CONFIG is not set/g)).toHaveLength(1);
         expect(url.hostname).toBe("127.0.0.1");
         const health = await fetch(new URL("/health", url));
         expect(health.status).toBe(200);
@@ -190,10 +195,61 @@ describe("bun packages/server/src/main.ts", () => {
       const { output } = await listeningUrl(child.stdout);
       expect(output).toContain(`hex: chat off: ${config} configures no channels`);
       expect(output).toContain(`hex: mailbox off: ${config} configures no mailbox`);
+      expect(
+        output.split(`hex: Intake reports off: ${config} configures no Main channel`),
+      ).toHaveLength(2);
     } finally {
       child.kill("SIGTERM");
     }
     expect(await child.exited).toBe(0);
+  });
+
+  test("a config with a Main channel posts each Intake's report to Daniel's Slack DM", async () => {
+    const slack = fakeSlack();
+    const config = join(directory, "main-channel.json");
+    await Bun.write(
+      config,
+      JSON.stringify({
+        chat: {
+          model: "openai/gpt-5",
+          channels: { slack: { options: { mode: "socket" }, allowlist: [DANIEL] } },
+          mainChannel: { channel: "slack", user: DANIEL },
+        },
+      }),
+    );
+    const child = spawnMain({
+      ...slackEnv(slack),
+      HEX_PORT: "0",
+      HEX_DATA_DIR: join(directory, "main-channel"),
+      HEX_CONFIG: config,
+    });
+    try {
+      const { url, output } = await listeningUrl(child.stdout);
+      expect(output).not.toContain("Intake reports off");
+      // An Intake without Documents: processed without asking a model.
+      const started = await client({ url } as RunningServer).workflows.start({
+        workflowId: INTAKE_WORKFLOW_ID,
+        inputData: {
+          messageId: "<main@shop.example>",
+          receivedAt: "2026-11-02T07:15:00.000Z",
+          subject: "Rechnung",
+          sender: "billing@shop.example",
+          cidReferences: [],
+          attachments: [],
+        },
+      });
+      expect(started).toMatchObject({ status: "success", result: { report: { status: "sent" } } });
+      const post = await slack.posted();
+      expect(slack.opened).toEqual([DANIEL]);
+      expect(post.get("channel")).toBe(DM_CHANNEL);
+      expect(post.get("text")).toBe(
+        "Intake processed: `Rechnung` from `billing@shop.example`\nNo Documents; nothing filed.",
+      );
+    } finally {
+      child.kill("SIGTERM");
+      await child.exited;
+      await slack.server.stop(true);
+    }
   });
 
   test("an Intake ledger that can't be opened fails startup, naming it", async () => {

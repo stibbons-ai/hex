@@ -8,6 +8,8 @@ export interface FakeSlack {
   server: Server<undefined>;
   /** Web API methods called, in order. */
   methods: string[];
+  /** The users each `conversations.open` opened a DM with, in order. */
+  opened: string[];
   /** Each waits at most 2 s. */
   connected(): Promise<ServerWebSocket<undefined>>;
   closed(): Promise<void>;
@@ -21,13 +23,24 @@ export interface FakeSlackOptions {
   authError?: string;
   /** `auth.test` answers only once this settles (a slow Slack). */
   authHold?: Promise<void>;
+  /** Makes `chat.postMessage` fail with this Slack error code. */
+  postError?: string;
 }
 
-export function fakeSlack({ openError, authError, authHold }: FakeSlackOptions = {}): FakeSlack {
+/** Daniel's DM with hex: where his messages come from, and what `conversations.open` answers. */
+export const DM_CHANNEL = "D0DANIEL";
+
+export function fakeSlack({
+  openError,
+  authError,
+  authHold,
+  postError,
+}: FakeSlackOptions = {}): FakeSlack {
   const connected = Promise.withResolvers<ServerWebSocket<undefined>>();
   const closed = Promise.withResolvers<void>();
   const posted = Promise.withResolvers<URLSearchParams>();
   const methods: string[] = [];
+  const opened: string[] = [];
   const server: Server<undefined> = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -58,7 +71,11 @@ export function fakeSlack({ openError, authError, authHold }: FakeSlackOptions =
             ok: true,
             user: { id: DANIEL, name: "daniel", real_name: "Daniel" },
           });
+        case "conversations.open":
+          opened.push(body.get("users") ?? "");
+          return Response.json({ ok: true, channel: { id: DM_CHANNEL } });
         case "chat.postMessage":
+          if (postError) return Response.json({ ok: false, error: postError });
           posted.resolve(body);
           return Response.json({ ok: true, channel: body.get("channel"), ts: "1700000001.000200" });
         default:
@@ -81,6 +98,7 @@ export function fakeSlack({ openError, authError, authHold }: FakeSlackOptions =
   return {
     server,
     methods,
+    opened,
     connected: () => within(connected.promise, "the Slack socket to open"),
     closed: () => within(closed.promise, "the Slack socket to close"),
     posted: () => within(posted.promise, "a chat.postMessage call"),
@@ -109,7 +127,7 @@ export function directMessage(sender: string, text: string) {
       event_id: `event-${sender}`,
       event: {
         type: "message",
-        channel: "D0DANIEL",
+        channel: DM_CHANNEL,
         channel_type: "im",
         user: sender,
         text,

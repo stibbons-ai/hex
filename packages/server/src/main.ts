@@ -10,6 +10,7 @@ import { loadChatConfig } from "./channels";
 import { loadForwardingConfig, loadIntakeConfig, loadMailboxConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
+import { mainChannelLayer } from "./main-channel";
 import { shutdownOnce } from "./lifecycle";
 import { listenAddress } from "./listen-address";
 import { dataPaths } from "./paths";
@@ -32,6 +33,14 @@ if (!chat) {
       : "hex: chat off: HEX_CONFIG is not set",
   );
 }
+const mainChannel = chat?.mainChannel;
+if (!mainChannel) {
+  console.log(
+    configPath
+      ? `hex: Intake reports off: ${process.env.HEX_CONFIG} configures no Main channel`
+      : "hex: Intake reports off: HEX_CONFIG is not set",
+  );
+}
 const { category, model } = await loadIntakeConfig(configPath);
 // Off without targets; with one enabled, missing SMTP settings fail startup, naming the variable.
 const forwarding = await loadForwardingConfig(configPath, process.env);
@@ -52,6 +61,8 @@ const intakeRuntime = createIntakeRuntime(paths, {
   dateExtractor: dateExtractorLayer(model),
   mailer: forwarding && smtpMailerLayer(forwarding.smtp),
   mailbox: mailbox && imapMailboxLayer(mailbox.imap),
+  // On the adapter the server connects: posting works once chat has started, before any run.
+  mainChannel: mainChannel && mainChannelLayer(mainChannel),
 });
 /** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
 const disposeAfterFailure = (error: unknown) =>

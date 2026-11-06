@@ -4,11 +4,29 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { startServer } from "../src";
 import type { ServerOptions } from "../src";
 import { loadChatConfig } from "../src/channels";
-import { DANIEL, type FakeSlack, directMessage, fakeSlack, slackEnv } from "./fake-slack";
+import type { ChatConfig } from "../src/channels";
+import {
+  INTAKE_WORKFLOW_ID,
+  createIntakeRuntime,
+  createIntakeWorkflow,
+} from "../src/intake-workflow";
+import { MainChannel, mainChannelLayer } from "../src/main-channel";
+import { buildEml, pdfMail } from "./eml";
+import {
+  DANIEL,
+  DM_CHANNEL,
+  type FakeSlack,
+  directMessage,
+  fakeSlack,
+  slackEnv,
+} from "./fake-slack";
+import { memoryMailbox } from "./memory-mailbox";
 import { REPLY, mockModel } from "./mock-model";
+import { scriptedDateExtractor } from "./scripted-extractor";
 import { serverOptions } from "./server-helpers";
 import { freePort, within } from "./timeouts";
 
@@ -22,6 +40,7 @@ beforeAll(async () => {
     chat: {
       model: "anthropic/claude-opus-5-5",
       channels: { slack: { options: { mode: "socket" }, allowlist: [DANIEL] } },
+      mainChannel: { channel: "slack", user: DANIEL },
     },
   };
   await writeFile(configPath, JSON.stringify(config));
@@ -49,7 +68,7 @@ test("answers a Slack DM over socket mode and closes the socket on stop()", asyn
       const socket = await slack.connected();
       socket.send(directMessage(DANIEL, "hi hex"));
       const reply = await slack.posted();
-      expect(reply.get("channel")).toBe("D0DANIEL");
+      expect(reply.get("channel")).toBe(DM_CHANNEL);
       expect(reply.get("markdown_text")).toBe(REPLY);
       expect(reply.get("token")).toBe("xoxb-test");
     } finally {
@@ -126,6 +145,161 @@ test("a Slack start that finishes after the deadline leaves no socket open", asy
     authAnswer.resolve();
     await slack.connected();
     await slack.closed();
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+/** Posts `text` to the Main channel configured for `chat`, as the Intake workflow does. */
+const postToMain = (chat: ChatConfig, text: string, layer = mainChannelLayer(chat.mainChannel!)) =>
+  Effect.runPromise(MainChannel.use((channel) => channel.post(text)).pipe(Effect.provide(layer)));
+
+test("the Main channel opens Daniel's DM and posts there unprompted, quoted text kept literal", async () => {
+  const slack = fakeSlack();
+  try {
+    const chat = await chatFor(slack);
+    const server = await startServer(options("main-channel", { chat }));
+    try {
+      await slack.connected();
+      // No inbound message: hex speaks first.
+      const text = "Intake processed: `<!channel> & <@U0X> @here https://evil.example`";
+      expect(await postToMain(chat, text)).toBe("sent");
+      const post = await slack.posted();
+      expect(slack.opened).toEqual([DANIEL]);
+      expect(post.get("channel")).toBe(DM_CHANNEL);
+      // Plain `text` with Slack's escapes, not `markdown_text`: no mention or link forms.
+      expect(post.get("text")).toBe(
+        "Intake processed: `&lt;!channel&gt; &amp; &lt;@U0X&gt; @here https://evil.example`",
+      );
+      expect(post.has("markdown_text")).toBe(false);
+      expect(post.get("unfurl_links")).toBe("false");
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("the Main channel opens Daniel's DM once and posts every later report there", async () => {
+  const slack = fakeSlack();
+  try {
+    const chat = await chatFor(slack);
+    const server = await startServer(options("main-channel-twice", { chat }));
+    try {
+      await slack.connected();
+      const layer = mainChannelLayer(chat.mainChannel!);
+      expect(await postToMain(chat, "first", layer)).toBe("sent");
+      expect(await postToMain(chat, "second", layer)).toBe("sent");
+      expect(slack.opened).toEqual([DANIEL]);
+      expect(slack.methods.filter((method) => method === "chat.postMessage")).toHaveLength(2);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("a post Slack refuses fails with a MainChannelError naming Slack's error", async () => {
+  const slack = fakeSlack({ postError: "channel_not_found" });
+  try {
+    const chat = await chatFor(slack);
+    const server = await startServer(options("main-channel-refused", { chat }));
+    try {
+      await slack.connected();
+      const failed = await postToMain(chat, "Intake processed: `x`").catch(
+        (error: unknown) => error,
+      );
+      expect(failed).toMatchObject({
+        _tag: "MainChannelError",
+        message: expect.stringMatching(/^posting to slack failed: .*channel_not_found/),
+      });
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("the mailbox watcher processes an Intake and its Intake report arrives in Daniel's Slack DM", async () => {
+  const slack = fakeSlack();
+  try {
+    const chat = await chatFor(slack);
+    const server = options("watcher-report", { chat });
+    const paths = {
+      databasePath: server.databasePath,
+      outboxDirectory: join(directory, "watcher-report", "outbox"),
+    };
+    const mailbox = memoryMailbox();
+    mailbox.deliver(buildEml(pdfMail("slack-report@shop.example")));
+    const runtime = createIntakeRuntime(paths, {
+      dateExtractor: scriptedDateExtractor(() => ({ year: 2026, month: 10, day: 1 })).layer,
+      mailbox: mailbox.layer,
+      mainChannel: mainChannelLayer(chat.mainChannel!),
+    });
+    const running = await startServer({
+      ...server,
+      workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category: "ER" }) },
+      mailbox: { runtime, pollMs: 60_000 },
+    });
+    try {
+      const post = await slack.posted();
+      expect(post.get("channel")).toBe(DM_CHANNEL);
+      expect(post.get("text")).toBe(
+        "Intake processed: `Rechnung` from `billing@shop.example`\n1 Document filed under 2026-10/ER",
+      );
+      await within(mailbox.waiting(), "the watcher's look");
+      expect(mailbox.messageIds("hex/processed")).toEqual(["slack-report@shop.example"]);
+    } finally {
+      await running.stop();
+      await runtime.dispose();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});
+
+test("an Intake report Slack refuses is warned of on the server's logger; the Intake is processed", async () => {
+  const slack = fakeSlack({ postError: "channel_not_found" });
+  try {
+    const chat = await chatFor(slack);
+    const server = options("watcher-report-refused", { chat });
+    const paths = {
+      databasePath: server.databasePath,
+      outboxDirectory: join(directory, "watcher-report-refused", "outbox"),
+    };
+    const mailbox = memoryMailbox();
+    const runtime = createIntakeRuntime(paths, {
+      dateExtractor: scriptedDateExtractor(() => ({ year: 2026, month: 10, day: 1 })).layer,
+      mailbox: mailbox.layer,
+      mainChannel: mainChannelLayer(chat.mainChannel!),
+    });
+    const running = await startServer({
+      ...server,
+      workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category: "ER" }) },
+      mailbox: { runtime, pollMs: 60_000 },
+    });
+    try {
+      // Production passes the workflow no logger of its own: the warning goes to Mastra's.
+      const warned: unknown[] = [];
+      await within(mailbox.waiting(), "the watcher's first look");
+      spyOn(running.mastra.getLogger(), "warn").mockImplementation((message: unknown) => {
+        warned.push(message);
+      });
+      mailbox.deliver(buildEml(pdfMail("slack-refused@shop.example")));
+      await within(mailbox.waiting(), "the watcher's look");
+      expect(mailbox.messageIds("hex/processed")).toEqual(["slack-refused@shop.example"]);
+      expect(warned).toContainEqual(
+        expect.stringMatching(
+          /^hex: Intake slack-refused@shop\.example: its Intake report was not posted: posting to slack failed: .*channel_not_found/,
+        ),
+      );
+    } finally {
+      await running.stop();
+      await runtime.dispose();
+    }
   } finally {
     await slack.server.stop(true);
   }

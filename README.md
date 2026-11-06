@@ -191,8 +191,9 @@ docker compose down             # stops it; the data volume stays
 - **Pinned settings**: `compose.yaml` sets `HEX_HOST=0.0.0.0`, `HEX_PORT=4111`,
   `HEX_DATA_DIR=/data`, `HEX_OUTBOX_DIR=/outbox`, `MASTRA_TELEMETRY_DISABLED=1` and
   `DO_NOT_TRACK=1` under `environment:`, which a `.env` line can't override. No config file is
-  mounted yet, so chat, Forwarding and the mailbox watcher stay off (`hex: chat off: HEX_CONFIG
-  is not set`, `hex: mailbox off: HEX_CONFIG is not set`).
+  mounted yet, so chat, Intake reports, Forwarding and the mailbox watcher stay off (`hex: chat
+  off: HEX_CONFIG is not set`, `hex: Intake reports off: HEX_CONFIG is not set`, `hex: mailbox
+  off: HEX_CONFIG is not set`).
 - **Network**: inside its container the server listens on every interface, which is why it logs
   the no-authentication warning; the port is published on the Mac's loopback only
   (`127.0.0.1:4111:4111`). Never publish it as `-p 4111:4111` or `"4111:4111"` without
@@ -274,7 +275,7 @@ The workflow, in order:
 
 1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`) is in the ledger was
    processed before; the run ends there, files or forwards nothing and moves its mail to
-   `hex/processed` (as in step 7).
+   `hex/processed` (as in step 8), and posts no Intake report.
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
    `application/octet-stream` named `*.pdf`) or a raster image (JPEG, PNG, GIF, WebP, HEIC/HEIF,
    TIFF, BMP). Not Documents: any part the HTML body references by `cid:` (signature images,
@@ -349,7 +350,11 @@ The workflow, in order:
    place.
 6. **Ledger**: when every branch succeeded, the Intake is recorded as processed with its
    Filings, also when it had no Documents.
-7. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
+7. **Intake report**: a processed Intake's report goes to the Main channel (see `mainChannel`
+   under [Chat](#chat-slack-signal)) before its mail moves; a failed run's goes after the
+   failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
+   restart posts its report again, as it repeats its move.
+8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
    (compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail moves too), goes
    to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
@@ -444,7 +449,10 @@ carries the same Filings, also for an Intake already processed, its Forwardings 
 by this run or `forwarded-earlier`) and what happened to its mail (`mail`: `moved` with the
 folder and the number of copies, `not-in-mailbox`, or `not-moved` with the reason); a failed
 run's `IntakeRunError` says it too (`kept-for-retry` when the Intake has runs left), unless the
-run ended before step 7 or the ledger couldn't record the failed run there. Each branch is
+run ended before step 7 or the ledger couldn't record the failed run in step 8. Both also say
+what became of the run's Intake report (`report`: `sent`, `off`, or `not-sent` with the reason;
+none for an Intake already processed or a run that ended before step 7: an unreadable ledger, a
+defect). Each branch is
 recorded as it succeeds, before the Intake is
 processed, in two more tables keyed by `message_id`: `hex_intake_forwardings` (`target`,
 `forwarded_at`; one row per target) and `hex_intake_filings` (`document_index`, `path`,
@@ -535,7 +543,9 @@ folder or the active runs or to wait for news (all at warn, naming the mail when
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
 is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. For a run of
+consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake
+report that couldn't be posted is warned of by the run that posted it, also one resumed at boot
+(`hex: Intake <id>: its Intake report was not posted: <reason>`). For a run of
 the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
 by UID, and after one that went through, the mail the watcher looked at goes too if still there
 (a copy whose Message-ID the server reads differently). When the retries fail too (or the run
@@ -628,7 +638,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
     "channels": {
       "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] },
       "signal": { "options": {}, "allowlist": ["01234567-89ab-4cde-8f01-23456789abcd"] }
-    }
+    },
+    "mainChannel": { "channel": "slack", "user": "U0123ABCD" }
   }
 }
 ```
@@ -645,6 +656,34 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   its chat adapter package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
 - `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
   empty list answers no one and is logged once at startup.
+- `mainChannel` (optional): the Main channel, where hex posts an Intake report after each Intake
+  run that ends processed or failed, unprompted, as a DM to `user` on the configured channel
+  `channel` (Slack: the member ID `U…`; Signal: an ACI, as for its allowlist). Without it, Intake
+  reports are off (`hex: Intake reports off: …` at startup). A `channel` that names no configured
+  channel or whose adapter can't open a DM, or a `user` with whitespace, fails startup; so does a
+  Signal `user` that isn't an ACI. Slack's member ID form is not checked: a wrong one fails at the
+  first post, with a warning. The
+  report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
+  folder (at most 10 folders, then `and N more in M folders`), names each one filed by the
+  received date, also one whose record failed (at most 10, then `and N more`), lists the
+  Forwarding targets, and for a failed
+  run each failed branch, what was done nonetheless and what comes next (`Failed run n of 5`,
+  counted as the mailbox watcher does, with the failed runs it held back in memory; at 5 failed
+  permanently, with what became of the mail: moved to `hex/failed`, not found by its Message-ID,
+  or not moved; or failing so at the watcher's next look; or, when the ledger can't record or end
+  the failed runs, that it couldn't, with the reason, in place of `Failed run n of 5`). What
+  was done includes a Forwarding the server accepted but the ledger couldn't record, and a
+  Document written to the Outbox whose record failed (`Filed, but recording it failed, …`: a
+  run again files it again). When earlier runs' Filings and Forwardings can't be read, the report
+  says so and lists this run's alone. So bounded, a report stays a few thousand characters,
+  within the platform's message limit. Text from the mail goes in code spans,
+  escaped for Slack, so it forms no mention or link. A report that can't be posted is logged as a
+  warning and changes nothing about the Intake; one the platform hasn't confirmed within 30
+  seconds counts as not posted, though it may still arrive. No report goes out
+  for an Intake
+  already processed, for a run that ends before step 7 of the [Intake workflow](#intake-dev-command)
+  (an unreadable ledger, a defect), or for mail that never becomes an Intake (an unreadable
+  `.eml`, moved to `hex/failed` by the watcher). `bun run intake` posts no report.
 
 Secrets live only in the environment, never in the file:
 
@@ -681,6 +720,7 @@ Secrets live only in the environment, never in the file:
          - groups:history
          - im:history
          - im:read
+         - im:write
          - mpim:history
          - users:read
    settings:
@@ -698,8 +738,8 @@ Secrets live only in the environment, never in the file:
    `connections:write`: that `xapp-…` token is `SLACK_APP_TOKEN`.
 3. **Install App** → install to the workspace: the **Bot User OAuth Token** (`xoxb-…`) is
    `SLACK_BOT_TOKEN`.
-4. Your Slack user ID for the allowlist: in Slack, open your profile → **⋮** → **Copy member ID**
-   (`U…`).
+4. Your Slack user ID for the allowlist and `mainChannel.user`: in Slack, open your profile → **⋮**
+   → **Copy member ID** (`U…`). `im:write` lets hex open the DM it posts Intake reports to.
 
 Run it, then DM the app in Slack (App Home → **Messages**):
 
@@ -994,12 +1034,12 @@ per model and the fetched price data, so a test can script both.
 
 ## Packages
 
-| Package             | Holds                                                                                                                                           |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names   |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)  |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                           |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers) |
+| Package             | Holds                                                                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names, Intake report |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)               |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Main channel, the Intake workflow and `bun run intake`                      |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers)              |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags
