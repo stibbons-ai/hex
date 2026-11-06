@@ -10,6 +10,7 @@ import {
   createLocalStore,
   documentDateOf,
   intakeLedgerLayer,
+  messageOf,
   outboxLayer,
   toMastraSchema,
 } from "@hex/adapters";
@@ -21,6 +22,7 @@ import {
   documentMediaType,
   normalizeMessageId,
   planFiling,
+  sentUnrecordedReason,
 } from "@hex/domain";
 import type { Category, ReportFailure, ReportFiling, ReportForwarding } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
@@ -288,12 +290,7 @@ function failedBranches(
         case "failed":
           return [{ branch, reason: attempt.reason }];
         case "sent-unrecorded":
-          return [
-            {
-              branch,
-              reason: `sent, but recording it failed (${attempt.reason}); running this Intake again sends it again`,
-            },
-          ];
+          return [{ branch, reason: attempt.reason, sentUnrecorded: true }];
         default:
           return [];
       }
@@ -326,13 +323,14 @@ function withEarlierForwardings(
 }
 
 /**
- * Warns on `log` when the run's Intake report wasn't posted (`report`); a logger that throws
- * changes nothing: the Intake's outcome stands.
+ * Warns on `log` (the logger, looked up only now) when the run's Intake report wasn't posted
+ * (`report`); a logger that throws, here or on its lookup, changes nothing: the Intake's outcome
+ * stands.
  */
-function warnUnposted(log: IntakeLog, messageId: string, report: ReportFate | undefined) {
+function warnUnposted(log: () => IntakeLog, messageId: string, report: ReportFate | undefined) {
   if (report?.status !== "not-sent") return;
   try {
-    log.warn(`hex: Intake ${messageId}: its Intake report was not posted: ${report.reason}`);
+    log().warn(`hex: Intake ${messageId}: its Intake report was not posted: ${report.reason}`);
   } catch {
     // A logger that fails here has no caller to tell.
   }
@@ -593,7 +591,12 @@ export function createIntakeWorkflow({
       const failures = failedBranches(attempts, inputData);
       if (failures.length > 0) {
         return Schema.decodeUnknownPromise(Recorded)({
-          failure: failures.map(({ branch, reason }) => `${branch}: ${reason}`).join("; "),
+          failure: failures
+            .map(
+              ({ branch, reason, sentUnrecorded }) =>
+                `${branch}: ${sentUnrecorded ? sentUnrecordedReason(reason) : reason}`,
+            )
+            .join("; "),
         });
       }
       return run(
@@ -622,7 +625,7 @@ export function createIntakeWorkflow({
     execute: async ({ inputData, getInitData, getStepResult, runId, mastra }) => {
       const intake = getInitData<Intake>();
       const { messageId } = intake;
-      const logger = log ?? mastra.getLogger();
+      const logger = () => log ?? mastra.getLogger();
       if ("failure" in inputData) {
         const attempts = getStepResult(forward).forwardings;
         const filed = getStepResult(file);
@@ -652,7 +655,13 @@ export function createIntakeWorkflow({
               ),
             );
             // Every Filing and Forwarding so far, also an earlier run's; this run's alone, said
-            // so, if the ledger fails.
+            // so, if the ledger fails, or reading it fails unexpectedly.
+            const unreadable = (reason: string) =>
+              Effect.succeed({
+                filings: reportedFilings(filed.filings),
+                forwardings: reportedForwardings(attempts),
+                earlierRunsUnreadable: reason,
+              });
             const done = yield* IntakeLedger.use((ledger) => ledger.branches(messageId)).pipe(
               Effect.map((branches) => ({
                 filings: reportedFilings(branches.filings),
@@ -660,13 +669,8 @@ export function createIntakeWorkflow({
                   withEarlierForwardings(attempts, branches.forwardings),
                 ),
               })),
-              Effect.catchTag("LedgerError", ({ message }) =>
-                Effect.succeed({
-                  filings: reportedFilings(filed.filings),
-                  forwardings: reportedForwardings(attempts),
-                  earlierRunsUnreadable: message,
-                }),
-              ),
+              Effect.catchTag("LedgerError", ({ message }) => unreadable(message)),
+              Effect.catchDefect((defect) => unreadable(messageOf(defect))),
             );
             const report = yield* postReport(intake, {
               ...done,

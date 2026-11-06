@@ -666,9 +666,10 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
   folder (at most 10 folders, then `and N more in M folders`), names each one filed by the
   received date (at most 10, then `and N more`), lists the Forwarding targets, and for a failed
-  run each failed branch, what was done nonetheless and what comes next (`failed run n of 5`,
+  run each failed branch, what was done nonetheless and what comes next (`Failed run n of 5`,
   counted as the mailbox watcher does, with the failed runs it held back in memory; at 5 failed
-  permanently with the mail in `hex/failed`, or failing so at the watcher's next look). What
+  permanently, with what became of the mail: moved to `hex/failed`, not found by its Message-ID,
+  or not moved; or failing so at the watcher's next look). What
   was done includes a Forwarding the server accepted but the ledger couldn't record, and a
   Document written to the Outbox whose record failed (`Filed, but recording it failed, …`: a
   run again files it again). When earlier runs' Filings and Forwardings can't be read, the report

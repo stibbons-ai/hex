@@ -1,5 +1,6 @@
 // The Intake report: the short message Daniel gets on his Main channel after each Intake run that
-// ends processed or failed.
+// ends processed or failed. A run that ends before its move step (an unreadable ledger, a defect)
+// gets none.
 
 /** One Filing as the report tells it: where the Document went, and whether it fell back. */
 export interface ReportFiling {
@@ -23,9 +24,24 @@ export interface ReportForwarding {
 export interface ReportFailure {
   /** Which branch, composed by hex from config (target names); trusted, shown as is. */
   readonly branch: string;
-  /** Untrusted (from the mail or a server), quoted. */
+  /**
+   * Why it failed; with {@link sentUnrecorded}, why recording the send failed. Untrusted (from the
+   * mail or a server), quoted.
+   */
   readonly reason: string;
+  /**
+   * The server accepted the send but the ledger couldn't record it: running this Intake again
+   * sends it again. Said by hex, outside the quoted reason, so cutting that never cuts this.
+   */
+  readonly sentUnrecorded?: boolean | undefined;
 }
+
+/**
+ * Why a send the ledger couldn't record failed its branch, and what that means, `reason` as given
+ * (quote it first where it goes into a report).
+ */
+export const sentUnrecordedReason = (reason: string): string =>
+  `sent, but recording it failed (${reason}); running this Intake again sends it again`;
 
 /** What became of the mail of an Intake that failed permanently. */
 export type ReportFailedMail =
@@ -152,7 +168,7 @@ function failedMailLine(mail: ReportFailedMail): string {
     case "not-in-mailbox":
       return "its mail was not found by its Message-ID in the watched folder; see the hex log";
     case "not-moved":
-      return `moving its mail to hex/failed failed (${quote(mail.reason)}); see the hex log`;
+      return `moving its mail to hex/failed failed (${quote(mail.reason)}); if moving it keeps failing, hex runs the Intake afresh; see the hex log`;
   }
 }
 
@@ -237,9 +253,9 @@ function consequenceLine(consequence: ReportConsequence): string {
       return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${failedMailLine(mail)}.`;
     }
     case "failing-permanently":
-      return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.`;
+      return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then, unless that fails; see the hex log.`;
     case "uncounted":
-      return `Recording the failed run failed (${quote(consequence.reason)}); see the hex log.`;
+      return `Recording or ending the failed runs failed (${quote(consequence.reason)}); see the hex log.`;
   }
 }
 
@@ -254,9 +270,9 @@ function consequenceLine(consequence: ReportConsequence): string {
  *
  * The report stays short whatever the Intake: each quoted value is cut at {@link MAX_QUOTED}
  * characters, each list at {@link MAX_LISTED} entries, and the failure and Forwarding lines grow
- * only with the configured targets; with a handful of targets it stays within a few thousand
- * characters, far below a chat platform's message limit, so its last line, the consequence, is
- * never cut.
+ * only with the configured targets and the targets recorded in the ledger; with a handful of
+ * targets it stays within a few thousand characters, far below a chat platform's message limit,
+ * so its last line, the consequence, is never cut.
  */
 export function renderIntakeReport({
   intake,
@@ -280,7 +296,7 @@ export function renderIntakeReport({
   if (outcome.status === "processed") {
     return [
       `Intake processed: ${identify(intake)}`,
-      ...(filings.length === 0 && unread.length === 0 ? ["No Documents; nothing filed."] : []),
+      ...(done.length === 0 && unread.length === 0 ? ["No Documents; nothing filed."] : []),
       ...done,
       ...unread,
     ].join("\n");
@@ -288,7 +304,10 @@ export function renderIntakeReport({
   const nothingDone = unread.length === 0 ? ["Nothing filed or forwarded."] : [];
   return [
     `Intake FAILED: ${identify(intake)}`,
-    ...outcome.failures.map(({ branch, reason }) => `Failed: ${branch}: ${quote(reason)}`),
+    ...outcome.failures.map(
+      ({ branch, reason, sentUnrecorded }) =>
+        `Failed: ${branch}: ${sentUnrecorded ? sentUnrecordedReason(quote(reason)) : quote(reason)}`,
+    ),
     ...(done.length === 0 ? nothingDone : ["Done nonetheless:", ...done]),
     ...unread,
     consequenceLine(outcome.consequence),

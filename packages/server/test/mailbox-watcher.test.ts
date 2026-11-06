@@ -862,11 +862,11 @@ describe("watchMailbox", () => {
     // Each report counts as the watcher does: runs 3 to 5 by their effective count, the 5th
     // failing permanently at the next look, as it did.
     expect(hex.mainChannel.posted.map((report) => report.split("\n").at(-1))).toEqual([
-      "Recording the failed run failed (`Intake ledger: disk full`); see the hex log.",
-      "Recording the failed run failed (`Intake ledger: disk full`); see the hex log.",
+      "Recording or ending the failed runs failed (`Intake ledger: disk full`); see the hex log.",
+      "Recording or ending the failed runs failed (`Intake ledger: disk full`); see the hex log.",
       "Failed run 3 of 5: hex tries again in 20 min at the earliest.",
       "Failed run 4 of 5: hex tries again in 40 min at the earliest.",
-      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.",
+      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then, unless that fails; see the hex log.",
     ]);
     // Moved back: run at once, its failure the first of a fresh series, nothing left in memory.
     hex.mailbox.moveBack("hex/failed");

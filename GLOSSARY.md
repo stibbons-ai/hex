@@ -45,5 +45,5 @@ A short message to Daniel's main channel summarising one Intake run (processed o
 _Avoid_: Notification, alert
 
 **Main channel**:
-The one conversation (currently a Slack DM, later Signal) where hex reaches Daniel unprompted.
+The one conversation (a DM on Slack or Signal) where hex reaches Daniel unprompted.
 _Avoid_: Default channel, notification channel

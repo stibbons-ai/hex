@@ -260,3 +260,47 @@ test("the mailbox watcher processes an Intake and its Intake report arrives in D
     await slack.server.stop(true);
   }
 });
+
+test("an Intake report Slack refuses is warned of on the server's logger; the Intake is processed", async () => {
+  const slack = fakeSlack({ postError: "channel_not_found" });
+  try {
+    const chat = await chatFor(slack);
+    const server = options("watcher-report-refused", { chat });
+    const paths = {
+      databasePath: server.databasePath,
+      outboxDirectory: join(directory, "watcher-report-refused", "outbox"),
+    };
+    const mailbox = memoryMailbox();
+    const runtime = createIntakeRuntime(paths, {
+      dateExtractor: scriptedDateExtractor(() => ({ year: 2026, month: 10, day: 1 })).layer,
+      mailbox: mailbox.layer,
+      mainChannel: mainChannelLayer(chat.mainChannel!),
+    });
+    const running = await startServer({
+      ...server,
+      workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category: "ER" }) },
+      mailbox: { runtime, pollMs: 60_000 },
+    });
+    try {
+      // Production passes the workflow no logger of its own: the warning goes to Mastra's.
+      const warned: unknown[] = [];
+      await within(mailbox.waiting(), "the watcher's first look");
+      spyOn(running.mastra.getLogger(), "warn").mockImplementation((message: unknown) => {
+        warned.push(message);
+      });
+      mailbox.deliver(buildEml(pdfMail("slack-refused@shop.example")));
+      await within(mailbox.waiting(), "the watcher's look");
+      expect(mailbox.messageIds("hex/processed")).toEqual(["slack-refused@shop.example"]);
+      expect(warned).toContainEqual(
+        expect.stringMatching(
+          /^hex: Intake slack-refused@shop\.example: its Intake report was not posted: posting to slack failed: .*channel_not_found/,
+        ),
+      );
+    } finally {
+      await running.stop();
+      await runtime.dispose();
+    }
+  } finally {
+    await slack.server.stop(true);
+  }
+});

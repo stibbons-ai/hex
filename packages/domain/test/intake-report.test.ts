@@ -60,6 +60,43 @@ describe("renderIntakeReport", () => {
     );
   });
 
+  test("processed with only a Document filed but not recorded: no 'nothing filed' line", () => {
+    const report = renderIntakeReport({
+      intake,
+      filings: [],
+      unrecordedFilings: [{ path: "2026-10/ER/a.pdf", fellBack: false }],
+      forwardings: [],
+      outcome: processed,
+    });
+    expect(report).toBe(
+      [
+        "Intake processed: `Rechnung Oktober` from `shop@example.com`",
+        "Filed, but recording it failed, so running this Intake again files it again: 2026-10/ER/`a.pdf`",
+      ].join("\n"),
+    );
+  });
+
+  test("a send the ledger couldn't record: the resend warning stands whole after a long reason", () => {
+    // A realistic ledger error: a Gmail Message-ID, and SQLite's lock message.
+    const reason = `Intake ledger: recording the Forwarding of <CAJx7nK2pQ9vL_bR4mT8wZ3yF6hD1sN5aE0cU-XoGiVkY+jMtPq@mail.gmail.com> to sevdesk-belege-eingang-2026: SQLITE_BUSY: database is locked (while the mailbox watcher held a write transaction open for a resumed run)`;
+    const report = renderIntakeReport({
+      intake,
+      filings: [],
+      forwardings: [{ target: "sevdesk", earlier: false }],
+      outcome: {
+        status: "failed",
+        failures: [{ branch: "forwarding to sevdesk", reason, sentUnrecorded: true }],
+        consequence: { status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 },
+      },
+    });
+    const line = report.split("\n")[1]!;
+    expect(line).toStartWith(
+      "Failed: forwarding to sevdesk: sent, but recording it failed (`Intake ledger: recording the Forwarding of <CAJx7nK2pQ9vL",
+    );
+    expect(line).toContain("…`)");
+    expect(line).toEndWith("; running this Intake again sends it again");
+  });
+
   test.each([
     ["no subject: by its sender", { sender: "shop@example.com" }, "from `shop@example.com`"],
     ["no sender: by its subject", { subject: "Beleg" }, "`Beleg`"],
@@ -126,7 +163,7 @@ describe("renderIntakeReport", () => {
     [
       "at the limit only with failed runs counted in memory: failing permanently at the next look",
       { status: "failing-permanently", failedRuns: 5, maxFailedRuns: 5 },
-      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.",
+      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then, unless that fails; see the hex log.",
     ],
     [
       "permanently, its move failed",
@@ -136,12 +173,12 @@ describe("renderIntakeReport", () => {
         maxFailedRuns: 5,
         mail: { status: "not-moved", reason: "connection lost" },
       },
-      "Failed run 5 of 5: failed permanently, moving its mail to hex/failed failed (`connection lost`); see the hex log.",
+      "Failed run 5 of 5: failed permanently, moving its mail to hex/failed failed (`connection lost`); if moving it keeps failing, hex runs the Intake afresh; see the hex log.",
     ],
     [
       "uncounted",
       { status: "uncounted", reason: "database is locked" },
-      "Recording the failed run failed (`database is locked`); see the hex log.",
+      "Recording or ending the failed runs failed (`database is locked`); see the hex log.",
     ],
   ])(
     "a failed run %s: each failure, what was done, the consequence",
