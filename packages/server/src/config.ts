@@ -70,6 +70,11 @@ const ConfigFile = Schema.Struct({
         allowlist: Schema.Array(SenderId),
       }),
     ),
+    /**
+     * The Main channel, where hex posts each Intake report: the DM with `user` on the configured
+     * channel `channel`. Intake reports are off when absent.
+     */
+    mainChannel: Schema.optionalKey(Schema.Struct({ channel: Schema.String, user: SenderId })),
   }),
   intake: Schema.optionalKey(
     Schema.Struct({

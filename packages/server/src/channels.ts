@@ -2,6 +2,7 @@
 // that reading the config file (Mastra Studio does) never loads an adapter package.
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
+import type { AdapterPostableMessage } from "chat";
 import { Config, Redacted, Result, Schema } from "effect";
 import type { ChatChannel, ChatOptions } from "./chat";
 import {
@@ -12,19 +13,25 @@ import {
   readConfigFile,
   readEnvConfig,
 } from "./config";
+import type { MainChannelTarget } from "./main-channel";
+
+/**
+ * One platform's channel as its factory builds it. `senderIds`, when set, is the form every
+ * allowlist entry (and the Main channel's user) must have on this channel. `plainText`, when set,
+ * is how plain text with its untrusted values in code spans is posted on this channel so that
+ * they stay literal; else as given.
+ */
+type BuiltChannel = Omit<ChatChannel, "allowlist"> & {
+  senderIds?: { valid: (id: string) => boolean; expected: string };
+  plainText?: (text: string) => AdapterPostableMessage;
+};
 
 /**
  * Builds one platform's channel from its config `options`; secrets come from `env` only. An
  * adapter package may still read `process.env` itself for options left unset (the Slack adapter
  * does for e.g. `SLACK_API_URL`), so a test that must not see the real environment sets them.
- * `senderIds`, when set, is the form every allowlist entry must have on this channel.
  */
-export type AdapterFactory = (
-  options: unknown,
-  env: Env,
-) => Omit<ChatChannel, "allowlist"> & {
-  senderIds?: { valid: (id: string) => boolean; expected: string };
-};
+export type AdapterFactory = (options: unknown, env: Env) => BuiltChannel;
 
 /** The variable's value; the error names the variable and what it must be, never the value. */
 function requireEnv(
@@ -52,6 +59,15 @@ function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted
     ),
   );
 }
+
+/**
+ * `text` for Slack's `text` field, taken literally: `&`, `<` and `>` escaped, so no `<@user>`,
+ * `<!channel>` or `<url|label>` forms from it. Bare `@names` and URLs stay plain only inside code
+ * spans (Slack links neither there, and the adapter rewrites no mention there).
+ */
+const slackPlainText = (text: string) => ({
+  raw: text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
+});
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
@@ -117,6 +133,7 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
           throw new Error("Slack did not accept SLACK_BOT_TOKEN (auth.test failed; see the log)");
         }
       },
+      plainText: slackPlainText,
     };
   },
   signal(options, env) {
@@ -174,17 +191,32 @@ export const adapterFactories: Readonly<Record<string, AdapterFactory>> = {
   },
 };
 
+/** The chat settings, with the Main channel when one is configured. */
+export interface ChatConfig extends ChatOptions {
+  /** Where Intake reports go; absent: Intake reports are off. */
+  mainChannel?: MainChannelTarget;
+}
+
 /**
  * Reads the hex config file (`HEX_CONFIG`) and builds the chat settings, or `undefined` when it
  * configures no channels. Throws an error naming the file and the problem on unreadable or
- * malformed JSON, a shape mismatch, an unknown adapter, or a missing or malformed secret.
+ * malformed JSON, a shape mismatch, an unknown adapter, a missing or malformed secret, or a Main
+ * channel on no configured channel or with a user ID that channel can't have.
  */
-export async function loadChatConfig(path: string, env: Env): Promise<ChatOptions | undefined> {
+export async function loadChatConfig(path: string, env: Env): Promise<ChatConfig | undefined> {
   const fail = (problem: string, cause?: unknown) => configError(path, problem, cause);
   const { chat } = await readConfigFile(path);
   const entries = Object.entries(chat.channels);
+  const main = chat.mainChannel;
+  if (main && !Object.hasOwn(chat.channels, main.channel)) {
+    const configured = entries.length === 0 ? "none" : Object.keys(chat.channels).join(", ");
+    return fail(
+      `mainChannel: channel "${main.channel}" is not configured; configured: ${configured}`,
+    );
+  }
   if (entries.length === 0) return undefined;
   const channels: Record<string, ChatChannel> = {};
+  let mainChannel: MainChannelTarget | undefined;
   for (const [platform, { options, allowlist }] of entries) {
     const factory = Object.hasOwn(adapterFactories, platform)
       ? adapterFactories[platform]
@@ -194,17 +226,27 @@ export async function loadChatConfig(path: string, env: Env): Promise<ChatOption
         `channel "${platform}": unknown adapter; known: ${Object.keys(adapterFactories).join(", ")}`,
       );
     }
+    let built: BuiltChannel;
     try {
-      const { senderIds, ...channel } = factory(options, env);
+      built = factory(options, env);
+      const { senderIds } = built;
       // The entry's position, not its value: a misplaced phone number is personal data.
       const bad = senderIds ? allowlist.findIndex((id) => !senderIds.valid(id)) : -1;
       if (senderIds && bad !== -1) {
         throw new Error(`allowlist entry ${bad + 1} must be ${senderIds.expected}`);
       }
-      channels[platform] = { ...channel, allowlist };
     } catch (error) {
       return fail(`channel "${platform}": ${(error as Error).message}`, error);
     }
+    const { senderIds, plainText = (text) => text, ...channel } = built;
+    channels[platform] = { ...channel, allowlist };
+    if (main?.channel === platform) {
+      // Not its value, as for allowlist entries.
+      if (senderIds && !senderIds.valid(main.user)) {
+        return fail(`mainChannel: user must be ${senderIds.expected}`);
+      }
+      mainChannel = { ...main, adapter: channel.adapter, message: plainText };
+    }
   }
-  return { ...chatModel(chat), channels };
+  return { ...chatModel(chat), channels, ...(mainChannel ? { mainChannel } : {}) };
 }

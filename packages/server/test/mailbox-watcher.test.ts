@@ -24,6 +24,7 @@ import type { IntakeWorkflow, MailboxWatcher } from "../src/mailbox-watcher";
 import { buildEml, pdfMail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
 import { recordingMailer } from "./recording-mailer";
+import { recordingMainChannel } from "./recording-main-channel";
 import { scriptedDateExtractor } from "./scripted-extractor";
 import type { Script } from "./scripted-extractor";
 import { within } from "./timeouts";
@@ -102,6 +103,7 @@ async function freshWatcher({
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
   const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
+  const mainChannel = recordingMainChannel();
   const mailbox = memoryMailbox({ idle });
   const clock = { offset: 0, advance: (ms: number) => (clock.offset += ms) };
   /**
@@ -147,6 +149,7 @@ async function freshWatcher({
     dateExtractor,
     mailer: mailer.layer,
     mailbox: mailbox.layer,
+    mainChannel: mainChannel.layer,
     ledger,
   });
   const storage = await createLocalStore(paths.databasePath);
@@ -195,6 +198,7 @@ async function freshWatcher({
   return {
     asked,
     mailer,
+    mainChannel,
     mailbox,
     clock,
     failing,
@@ -1162,5 +1166,29 @@ describe("watchMailbox", () => {
     expect(hex.asked.map(({ fileName }) => fileName)).toEqual(["first.pdf"]);
     expect(await hex.runs()).toEqual(["success"]);
     expect(hex.mailbox.messageIds()).toEqual(["first@shop.example", "second@shop.example"]);
+  });
+
+  test("a report that can't be posted is a warning; the Intake is processed or retried all the same", async () => {
+    let failures = 1;
+    const hex = await freshWatcher({
+      script: () => (failures-- > 0 ? new Error("rate limited (429)") : DATED),
+    });
+    hex.mainChannel.failNext(2);
+    hex.mailbox.deliver(emlOf("unreported@shop.example"));
+    hex.start();
+    await hex.scanned();
+    const warning =
+      "warn: hex: Intake unreported@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found";
+    expect(hex.log()).toContain(warning);
+    expect(hex.log().some((line) => line.includes("failed run 1 of 5"))).toBe(true);
+    expect(hex.mailbox.messageIds()).toEqual(["unreported@shop.example"]);
+
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.log().filter((line) => line === warning)).toHaveLength(2);
+    expect(hex.log()).toContain(
+      "info: hex: Intake unreported@shop.example: processed; its mail was moved to hex/processed",
+    );
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["unreported@shop.example"]);
+    expect(hex.mainChannel.posted).toEqual([]);
   });
 });

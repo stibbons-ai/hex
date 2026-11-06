@@ -2,7 +2,8 @@ import { IntakeLedger, Mailbox, MailboxError, messageOf, readEml } from "@hex/ad
 import type { Intake, MailOutcome } from "@hex/adapters";
 import { normalizeMessageId } from "@hex/domain";
 import { Cause, Effect, Exit, Fiber, Option, Schema } from "effect";
-import type { IntakeResult, IntakeRuntime } from "./intake-workflow";
+import { reportFateOf } from "./intake-workflow";
+import type { IntakeResult, IntakeRuntime, ReportFate } from "./intake-workflow";
 import {
   MAX_FAILED_RUNS,
   describeFailedRun,
@@ -340,6 +341,13 @@ export function watchMailbox({
       );
     });
 
+  /** Warns when the run's Intake report could not be posted; the Intake's outcome stands. */
+  const warnUnreported = (messageId: string, report: ReportFate | undefined) => {
+    if (report?.status === "not-sent") {
+      log.warn(`hex: Intake ${messageId}: its Intake report was not posted: ${report.reason}`);
+    }
+  };
+
   /** Runs the workflow on `intake`, the mail at `uid`, and logs what came of it. */
   const process = (intake: Intake, uid: number) =>
     Effect.gen(function* () {
@@ -361,7 +369,8 @@ export function watchMailbox({
       }
       const result = started.success;
       if (result.status === "success" && "result" in result) {
-        const { status, mail } = result.result;
+        const { status, mail, report } = result.result;
+        warnUnreported(messageId, report);
         yield* settleLogged(
           messageId,
           uid,
@@ -375,6 +384,7 @@ export function watchMailbox({
       const error = "error" in result ? result.error : undefined;
       const reason = error ? error.message : `the run ended ${result.status}`;
       log.warn(`hex: Intake ${messageId}: the run failed: ${reason}`);
+      warnUnreported(messageId, reportFateOf(error));
       const fate = mailFateOf(error);
       if (fate) {
         if (fate.status === "kept-for-retry") {

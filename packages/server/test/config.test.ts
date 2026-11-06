@@ -256,6 +256,81 @@ describe("loadChatConfig", () => {
       ]);
     });
   });
+
+  describe("mainChannel", () => {
+    const withMain = (mainChannel: unknown, chat: object = valid.chat) => ({
+      chat: { ...chat, mainChannel },
+    });
+
+    test("absent: no Main channel, Intake reports are off", async () => {
+      expect(await loadChatConfig(await configFile(valid), slackEnv)).not.toHaveProperty(
+        "mainChannel",
+      );
+    });
+
+    test("a Slack user's DM on the configured channel's adapter, posted with Slack's escapes", async () => {
+      const path = await configFile(withMain({ channel: "slack", user: "U0DANIEL" }));
+      const chat = await loadChatConfig(path, slackEnv);
+      expect(chat?.mainChannel).toMatchObject({ channel: "slack", user: "U0DANIEL" });
+      // The adapter the server connects, so posting works once chat has started.
+      expect(chat?.mainChannel?.adapter).toBe(chat!.channels["slack"]!.adapter);
+      expect(chat?.mainChannel?.message("`<!channel>` & <@U0X> `a & b`")).toEqual({
+        raw: "`&lt;!channel&gt;` &amp; &lt;@U0X&gt; `a &amp; b`",
+      });
+    });
+
+    test.each([
+      ["names a channel not configured", "signal", "slack"],
+      ["names an unknown platform", "toString", "slack"],
+    ])("%s: fails, listing the configured ones", async (_case, channel, configured) => {
+      const path = await configFile(withMain({ channel, user: "U0DANIEL" }));
+      await expect(loadChatConfig(path, slackEnv)).rejects.toThrow(
+        `hex config ${path}: mainChannel: channel "${channel}" is not configured; configured: ${configured}`,
+      );
+    });
+
+    test("on a config without channels: fails, never silently off", async () => {
+      const path = await configFile(
+        withMain({ channel: "slack", user: "U0DANIEL" }, { model: "openai/gpt-5", channels: {} }),
+      );
+      await expect(loadChatConfig(path, {})).rejects.toThrow(
+        `hex config ${path}: mainChannel: channel "slack" is not configured; configured: none`,
+      );
+    });
+
+    test.each([
+      ["a user ID with whitespace", { channel: "slack", user: "U0 DANIEL" }],
+      ["an empty user ID", { channel: "slack", user: "" }],
+      ["no user", { channel: "slack" }],
+      ["an unknown key", { channel: "slack", user: "U0DANIEL", thread: "x" }],
+    ])("%s fails as invalid config", async (_case, mainChannel) => {
+      const path = await configFile(withMain(mainChannel));
+      await expect(loadChatConfig(path, slackEnv)).rejects.toThrow(
+        `hex config ${path}: invalid config: `,
+      );
+    });
+
+    test("Signal: the user must be an ACI, as allowlist entries; the error never echoes it", async () => {
+      const phone = "+15555550199";
+      const path = await configFile(
+        withMain({ channel: "signal", user: phone }, signalConfig.chat),
+      );
+      const loading = loadChatConfig(path, signalEnv);
+      await expect(loading).rejects.toThrow(
+        `hex config ${path}: mainChannel: user must be a Signal ACI (a lowercase UUID with dashes), not a phone number`,
+      );
+      await expect(loading).rejects.not.toThrow(phone);
+    });
+
+    test("Signal: an ACI user is the Main channel, its text posted as given", async () => {
+      const path = await configFile(
+        withMain({ channel: "signal", user: DANIEL_ACI }, signalConfig.chat),
+      );
+      const main = (await loadChatConfig(path, signalEnv))?.mainChannel;
+      expect(main).toMatchObject({ channel: "signal", user: DANIEL_ACI });
+      expect(main?.message("`<x>` & y")).toBe("`<x>` & y");
+    });
+  });
 });
 
 describe("loadIntakeConfig", () => {

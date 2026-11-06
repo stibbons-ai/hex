@@ -191,8 +191,9 @@ docker compose down             # stops it; the data volume stays
 - **Pinned settings**: `compose.yaml` sets `HEX_HOST=0.0.0.0`, `HEX_PORT=4111`,
   `HEX_DATA_DIR=/data`, `HEX_OUTBOX_DIR=/outbox`, `MASTRA_TELEMETRY_DISABLED=1` and
   `DO_NOT_TRACK=1` under `environment:`, which a `.env` line can't override. No config file is
-  mounted yet, so chat, Forwarding and the mailbox watcher stay off (`hex: chat off: HEX_CONFIG
-  is not set`, `hex: mailbox off: HEX_CONFIG is not set`).
+  mounted yet, so chat, Intake reports, Forwarding and the mailbox watcher stay off (`hex: chat
+  off: HEX_CONFIG is not set`, `hex: Intake reports off: HEX_CONFIG is not set`, `hex: mailbox
+  off: HEX_CONFIG is not set`).
 - **Network**: inside its container the server listens on every interface, which is why it logs
   the no-authentication warning; the port is published on the Mac's loopback only
   (`127.0.0.1:4111:4111`). Never publish it as `-p 4111:4111` or `"4111:4111"` without
@@ -628,7 +629,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
     "channels": {
       "slack": { "options": { "mode": "socket" }, "allowlist": ["U0123ABCD"] },
       "signal": { "options": {}, "allowlist": ["01234567-89ab-4cde-8f01-23456789abcd"] }
-    }
+    },
+    "mainChannel": { "channel": "slack", "user": "U0123ABCD" }
   }
 }
 ```
@@ -645,6 +647,18 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   its chat adapter package and adding it to `adapterFactories` in `packages/server/src/config.ts`.
 - `allowlist`: exact sender IDs; whitespace is rejected when the file loads, case must match. An
   empty list answers no one and is logged once at startup.
+- `mainChannel` (optional): the Main channel, where hex posts an Intake report after each Intake
+  run that ends processed or failed, unprompted, as a DM to `user` on the configured channel
+  `channel` (Slack: the member ID `U…`; Signal: an ACI, as for its allowlist). Without it, Intake
+  reports are off (`hex: Intake reports off: …` at startup). A `channel` that names no configured
+  channel, or a `user` with whitespace or of the wrong form for its channel, fails startup. The
+  report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
+  folder, names each one filed by the received date, lists the Forwarding targets, and for a failed
+  run each failed branch, what was done nonetheless and what comes next (`failed run n of 5`, or
+  failed permanently with the mail in `hex/failed`). Text from the mail goes in code spans,
+  escaped for Slack, so it forms no mention or link. A report that can't be posted (within 30
+  seconds) is logged as a warning and changes nothing about the Intake; an Intake already processed
+  gets none. `bun run intake` posts no report.
 
 Secrets live only in the environment, never in the file:
 
@@ -681,6 +695,7 @@ Secrets live only in the environment, never in the file:
          - groups:history
          - im:history
          - im:read
+         - im:write
          - mpim:history
          - users:read
    settings:
@@ -698,8 +713,8 @@ Secrets live only in the environment, never in the file:
    `connections:write`: that `xapp-…` token is `SLACK_APP_TOKEN`.
 3. **Install App** → install to the workspace: the **Bot User OAuth Token** (`xoxb-…`) is
    `SLACK_BOT_TOKEN`.
-4. Your Slack user ID for the allowlist: in Slack, open your profile → **⋮** → **Copy member ID**
-   (`U…`).
+4. Your Slack user ID for the allowlist and `mainChannel.user`: in Slack, open your profile → **⋮**
+   → **Copy member ID** (`U…`). `im:write` lets hex open the DM it posts Intake reports to.
 
 Run it, then DM the app in Slack (App Home → **Messages**):
 
@@ -994,12 +1009,12 @@ per model and the fetched price data, so a test can script both.
 
 ## Packages
 
-| Package             | Holds                                                                                                                                           |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names   |
-| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)  |
-| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Intake workflow and `bun run intake`                           |
-| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers) |
+| Package             | Holds                                                                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@hex/domain`       | Pure domain: imports only `effect` and its own files, depends only on `effect`; sender allowlist, Document detection, Filing path, file names, Intake report |
+| `@hex/adapters`     | Effect Schema → Mastra helper (`toMastraSchema`, ADR 0002); LibSQL storage; `.eml` reader, Outbox, Intake ledger, DateExtractor (model router)               |
+| `@hex/server`       | `Bun.serve` entrypoint: `/health`, the oRPC API (`contract`), chat channels, the Main channel, the Intake workflow and `bun run intake`                      |
+| `@hex/eval-harness` | `expected.json` types, decoder and loader; synthetic fixture set and its generator; `bun run eval` (`runEval`, `Report`, deterministic scorers)              |
 
 The domain's source imports are allow-listed by `scripts/domain-imports.test.ts`, its dependency
 list by `bun run manifests`, and an oxlint override (run by `bun run lint`, so also in CI) flags
