@@ -543,8 +543,8 @@ was one resumed at boot, which the watcher doesn't follow), the Intake's count i
 so the next look runs it afresh, a new series of 5 runs, as the warning says. When the watcher's
 retry finds the mail gone, the first move's answer was likely lost although it went through: the
 line says so, pointing at `hex/failed`, instead of a fresh series. A failed run the ledger can't
-count (its writes failing while reads work) is an error, and the watcher holds the Intake back in
-memory for 5 minutes, the first retry delay, instead of running it on every look.
+count (its writes failing while reads work) is an error, and the watcher counts it in memory
+instead (see Limits).
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after
@@ -563,6 +563,15 @@ Message-ID the server reports for each mail (its ENVELOPE) only to pass over a m
 fetching it (see above); when the run then finds no copy by Message-ID (a server reading the
 header differently from hex), the watcher moves that mail by its UID. Studio (`bun run studio`)
 never watches the mailbox and never restarts runs; a run started there moves no mail.
+
+While the ledger can't be written but can be read, failed runs it can't count are counted in
+memory on top of its own count, each an error line: the Intake is held back as the ledger's
+count would hold it (5, 10, 20, 40 minutes), but on its 5th failed run hex can't fail it
+permanently (that is a ledger write too), so it stops running it until hex restarts, with one
+error line saying so; the mail stays in the watched folder. Each of those runs may resend the
+Forwardings the ledger couldn't record. A restart clears the memory: the Intake runs again at
+the watcher's first look, counted from what the ledger has. When only failing it permanently
+failed (its 5th failed run counted), the next look tries that again.
 
 ## Chat (Slack, Signal)
 

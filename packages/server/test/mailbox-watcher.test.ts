@@ -217,6 +217,12 @@ async function freshWatcher({
     stop: () => watcher!.stop(),
     /** Resolves once the watcher finished a scan and waits for news again. */
     scanned: () => within(mailbox.waiting(), "the watcher's scan"),
+    /** Moves the clock `ms` on and waits for the look the next poll starts. */
+    async lookAfter(ms: number) {
+      clock.advance(ms);
+      mailbox.tick();
+      await within(mailbox.waiting(), "the watcher's scan");
+    },
     /** Runs `program` on the Intake runtime's ledger. */
     ledger: <A, E>(program: (ledger: IntakeLedger["Service"]) => Effect.Effect<A, E>) =>
       runtime.runPromise(IntakeLedger.use(program)),
@@ -698,26 +704,67 @@ describe("watchMailbox", () => {
     expect(hex.asked).toHaveLength(5);
   });
 
-  test("a failed run the ledger can't count is held back in memory, an error, not run on every look", async () => {
+  test("failed runs the ledger can't count back off 5, 10, 20, 40 min in memory; the 5th stops the Intake until a restart", async () => {
     const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
     hex.ledgerWrites.failing = true;
     hex.mailbox.deliver(emlOf("uncountable@shop.example"));
     hex.start();
     await hex.scanned();
     expect(hex.asked).toHaveLength(1);
-    expect(hex.log()).toContain(
-      "error: hex: Intake uncountable@shop.example: its failed run could not be counted (Intake ledger: disk full); held back 5 min in memory",
-    );
-    // A poll later: held back.
-    hex.clock.advance(60_000);
-    hex.mailbox.tick();
+    for (const [failedRuns, delay] of [
+      [1, 5],
+      [2, 10],
+      [3, 20],
+      [4, 40],
+    ] as const) {
+      expect(hex.log()).toContain(
+        `error: hex: Intake uncountable@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run ${failedRuns} of 5, held back ${delay} min in memory`,
+      );
+      // A minute short of the delay: held back; at it: run again.
+      await hex.lookAfter((delay - 1) * 60_000);
+      expect(hex.asked).toHaveLength(failedRuns);
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(failedRuns + 1);
+    }
+    const stopped =
+      "error: hex: Intake uncountable@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 5 of 5, but the ledger can't record failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it";
+    expect(hex.log().filter((line) => line === stopped)).toHaveLength(1);
+    // Hours of looks later: no 6th run, no second line, the mail still waiting.
+    for (let hour = 0; hour < 4; hour++) await hex.lookAfter(60 * 60_000);
+    expect(hex.asked).toHaveLength(5);
+    expect(hex.log().filter((line) => line.startsWith("error:"))).toHaveLength(5);
+    expect(hex.mailbox.messageIds()).toEqual(["uncountable@shop.example"]);
+    // A restart (a new watcher) runs it again.
+    await hex.stop();
+    hex.mailbox.reopen();
+    hex.start();
     await hex.scanned();
-    expect(hex.asked).toHaveLength(1);
-    // Past the first retry delay: run again.
-    hex.clock.advance(5 * 60_000);
-    hex.mailbox.tick();
+    expect(hex.asked).toHaveLength(6);
+  });
+
+  test("the failed runs the ledger counted add to those it couldn't", async () => {
+    let fail = true;
+    const hex = await freshWatcher({
+      script: () => (fail ? new Error("rate limited (429)") : DATED),
+    });
+    hex.mailbox.deliver(emlOf("half-counted@shop.example"));
+    hex.start();
     await hex.scanned();
+    // Counted by the ledger: run 1; the next, 5 min later, isn't.
+    hex.ledgerWrites.failing = true;
+    await hex.lookAfter(5 * 60_000);
     expect(hex.asked).toHaveLength(2);
+    expect(hex.log()).toContain(
+      "error: hex: Intake half-counted@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 2 of 5, held back 10 min in memory",
+    );
+    await hex.lookAfter(9 * 60_000);
+    expect(hex.asked).toHaveLength(2);
+    // Run 3, at 10 min, succeeds once the ledger writes again: processed.
+    hex.ledgerWrites.failing = false;
+    fail = false;
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(3);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["half-counted@shop.example"]);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {
