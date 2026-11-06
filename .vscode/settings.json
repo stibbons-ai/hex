@@ -1,0 +1,13 @@
+{
+  "typescript.preferences.autoImportFileExcludePatterns": ["vendors/**"],
+  "javascript.preferences.autoImportFileExcludePatterns": ["vendors/**"],
+  "files.exclude": {
+    "vendors/**": true
+  },
+  "files.watcherExclude": {
+    "vendors/**": true
+  },
+  "search.exclude": {
+    "vendors/**": true
+  }
+}

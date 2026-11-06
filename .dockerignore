@@ -24,6 +24,7 @@
 **/fixtures
 crates
 docs
+vendors
 packages/*/test
 scripts/*.test.ts
 # Only its manifest is needed, for the workspace install; its sources never reach the bundle.

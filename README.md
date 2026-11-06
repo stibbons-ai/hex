@@ -998,6 +998,19 @@ Mastra does not validate step output, so every step decodes its own output with 
 schemas whose encoded and decoded types match: Mastra re-validates the decoded input at each step,
 so transforming schemas (such as `Schema.NumberFromString`) fail there.
 
+## Vendored sources
+
+`vendors/` holds upstream source as squashed git subtrees, for coding agents to read instead of
+the compiled code in `node_modules` (see `AGENTS.md`): `vendors/effect` (Effect, tag
+`effect@4.1.0`) and `vendors/imapflow` (tag `v2.10.0`), the versions the catalog pins. Nothing
+imports from them, and lint (`--disable-nested-config`, `ignorePatterns`), `bun test`
+(`bunfig.toml` `pathIgnorePatterns`), the container build (`.dockerignore`) and VS Code
+(`.vscode/settings.json`) skip them. When a pin changes, move its subtree in the same change:
+
+```sh
+git subtree pull -S --prefix=vendors/effect https://github.com/Effect-TS/effect.git effect@<version> --squash
+```
+
 ## Telemetry and licences
 
 Every script that runs code starts with `MASTRA_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1`
