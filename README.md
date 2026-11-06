@@ -572,8 +572,10 @@ look). While the ledger still can't be written, hex can't fail it permanently (t
 write too), so it stops running it until hex restarts, with one error line saying so; the mail
 stays in the watched folder. Each of those runs may resend the Forwardings the ledger couldn't
 record. A restart clears the memory: the Intake runs again at the watcher's first look, counted
-from what the ledger has. So does a look that no longer lists its mail. When only failing it
-permanently failed (its 5th failed run counted), the next look tries that again.
+from what the ledger has. A look that no longer lists its mail clears its count too, but not a
+stop: a stop holds until the restart, even when the ledger writes again or the mail is moved
+away and back. When only failing it permanently failed (its 5th failed run counted), the next
+look tries that again.
 
 ## Chat (Slack, Signal)
 

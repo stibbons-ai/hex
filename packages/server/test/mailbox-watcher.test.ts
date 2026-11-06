@@ -860,10 +860,76 @@ describe("watchMailbox", () => {
     expect(hex.log()).toContain(
       "error: hex: Intake unended@shop.example: failing it permanently failed (Intake ledger: disk full); the next look tries again",
     );
+    // A look while ending still fails: a warning, the mail stays; once it works, `hex/failed`.
+    await hex.lookAfter(60_000);
+    expect(hex.log().at(-1)).toMatch(
+      /^warn: hex: mailbox: UID 1 \(unended@shop\.example as the server reads it\): .*disk full.*; going on with the next mail$/,
+    );
+    expect(hex.mailbox.messageIds()).toEqual(["unended@shop.example"]);
     hex.ledgerWrites.failing = false;
     await hex.lookAfter(60_000);
     expect(hex.asked).toHaveLength(5);
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["unended@shop.example"]);
+  });
+
+  test("at 5 with some counted in memory, a ledger that can't fail it permanently stops it until a restart, said once", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("stuck@shop.example"));
+    hex.start();
+    await hex.scanned();
+    // Runs 1 and 2 counted in memory, 3 to 5 by the ledger.
+    for (const [failedRuns, delay] of [
+      [1, 5],
+      [2, 10],
+      [3, 20],
+      [4, 40],
+    ] as const) {
+      if (failedRuns === 2) hex.ledgerWrites.failing = false;
+      await hex.lookAfter(delay * 60_000);
+    }
+    expect(hex.asked).toHaveLength(5);
+    hex.ledgerWrites.failing = true;
+    await hex.lookAfter(60_000);
+    expect(hex.log().at(-1)).toBe(
+      "error: hex: Intake stuck@shop.example: failing it permanently failed (Intake ledger: disk full); failed run 5 of 5, 2 of them counted in memory, but the ledger can't record failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it",
+    );
+    const lines = hex.log().length;
+    for (let hour = 0; hour < 2; hour++) await hex.lookAfter(60 * 60_000);
+    expect(hex.log()).toHaveLength(lines);
+    expect(hex.asked).toHaveLength(5);
+    expect(hex.mailbox.messageIds()).toEqual(["stuck@shop.example"]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([]);
+  });
+
+  test("a mail the server reads with another Message-ID than hex is held back by hex's", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("hexview@shop.example"), { serverMessageId: "srvview@shop.example" });
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(1);
+    await hex.lookAfter(60_000);
+    await hex.lookAfter(3 * 60_000);
+    expect(hex.asked).toHaveLength(1);
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(2);
+  });
+
+  test("an empty folder ends every hold-back", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("alone@shop.example"));
+    hex.start();
+    await hex.scanned();
+    hex.mailbox.discard(1);
+    await hex.lookAfter(60_000);
+    hex.mailbox.deliver(emlOf("alone@shop.example"));
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(2);
+    const firstFailure =
+      "error: hex: Intake alone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {
