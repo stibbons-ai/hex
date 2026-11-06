@@ -11,7 +11,7 @@ import {
 } from "@hex/adapters";
 import type { Intake } from "@hex/adapters";
 import { Mastra } from "@mastra/core/mastra";
-import { Effect, Layer } from "effect";
+import { Clock, Effect, Layer } from "effect";
 import { closeInOrder } from "../src/close";
 import {
   INTAKE_WORKFLOW_ID,
@@ -83,7 +83,8 @@ async function flush() {
  * there, a recording Mailer forwarding to `forwarding`, an in-memory Mailbox (`idle: false`: the
  * server has no IMAP IDLE), and a watcher on them, not started yet. `workflow` wraps the
  * registered workflow (a run whose start rejects, say). The watcher's clock is the real one moved
- * forward by `clock.advance` (or set by `clock.offset`); it tries again at once after a failure.
+ * forward by `clock.advance` (or set by `clock.offset`), and the ledger stamps failed runs on it;
+ * it tries again at once after a failure.
  * Setting `failing.line` makes the next log line containing it throw, as a broken logger would.
  */
 async function freshWatcher({
@@ -102,25 +103,44 @@ async function freshWatcher({
   const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
   const mailbox = memoryMailbox({ idle });
-  /** Set `failing` to fail every ledger write, as a full volume would; reads still work. */
-  const ledgerWrites = { failing: false };
+  const clock = { offset: 0, advance: (ms: number) => (clock.offset += ms) };
+  /**
+   * Set `failing` to fail every ledger write, as a full volume would; reads still work. `only`
+   * narrows it to the one write method so named.
+   */
+  const ledgerWrites = { failing: false, only: undefined as string | undefined };
   const failingWhen =
-    <A extends unknown[], R>(write: (...args: A) => Effect.Effect<R, LedgerError>) =>
+    <A extends unknown[], R>(name: string, write: (...args: A) => Effect.Effect<R, LedgerError>) =>
     (...args: A) =>
       Effect.suspend(() =>
-        ledgerWrites.failing
+        ledgerWrites.failing && (ledgerWrites.only ?? name) === name
           ? Effect.fail(new LedgerError({ message: "Intake ledger: disk full" }))
           : write(...args),
       );
+  /** The ledger stamps failed runs on the watcher's clock, so retry windows line up with it. */
+  const onWatcherClock = <A, E>(effect: Effect.Effect<A, E>) =>
+    Effect.clockWith((real) =>
+      Effect.provideService(effect, Clock.Clock, {
+        currentTimeMillisUnsafe: () => real.currentTimeMillisUnsafe() + clock.offset,
+        currentTimeMillis: Effect.sync(() => real.currentTimeMillisUnsafe() + clock.offset),
+        currentTimeNanosUnsafe: () => real.currentTimeNanosUnsafe(),
+        currentTimeNanos: real.currentTimeNanos,
+        monotonicTimeNanosUnsafe: () => real.monotonicTimeNanosUnsafe(),
+        monotonicTimeNanos: real.monotonicTimeNanos,
+        sleep: (duration) => real.sleep(duration),
+      }),
+    );
   const ledger = Layer.effect(
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
       ...real,
-      record: failingWhen(real.record),
-      recordForwarding: failingWhen(real.recordForwarding),
-      recordFiling: failingWhen(real.recordFiling),
-      recordFailedRun: failingWhen(real.recordFailedRun),
-      endFailedRuns: failingWhen(real.endFailedRuns),
+      record: failingWhen("record", real.record),
+      recordForwarding: failingWhen("recordForwarding", real.recordForwarding),
+      recordFiling: failingWhen("recordFiling", real.recordFiling),
+      recordFailedRun: failingWhen("recordFailedRun", (messageId: string, runId: string) =>
+        onWatcherClock(real.recordFailedRun(messageId, runId)),
+      ),
+      endFailedRuns: failingWhen("endFailedRuns", real.endFailedRuns),
     })),
   ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
   const runtime = createIntakeRuntime(paths, {
@@ -144,7 +164,6 @@ async function freshWatcher({
     () => mastra.shutdown(),
   );
   const registered: IntakeWorkflow = mastra.getWorkflow(INTAKE_WORKFLOW_ID);
-  const clock = { offset: 0, advance: (ms: number) => (clock.offset += ms) };
   const log: { level: string; message: string }[] = [];
   /** Lines containing it throw, once each time it is set. */
   const failing = { line: undefined as string | undefined };
@@ -350,13 +369,12 @@ describe("watchMailbox", () => {
     expect(hex.asked).toHaveLength(2);
     expect(hex.log().at(-1)).toContain("failed run 2 of 5");
 
-    // The failures are recorded at real time, the watcher's clock runs ahead by its offset:
     // 9 minutes after the second failure is too early; 10: retried, processed, moved.
-    hex.clock.offset = 9 * 60_000;
+    hex.clock.advance(9 * 60_000);
     hex.mailbox.tick();
     await hex.scanned();
     expect(hex.asked).toHaveLength(2);
-    hex.clock.offset = 10 * 60_000;
+    hex.clock.advance(60_000);
     hex.mailbox.tick();
     await hex.scanned();
     expect(hex.asked).toHaveLength(3);
@@ -734,12 +752,19 @@ describe("watchMailbox", () => {
     expect(hex.asked).toHaveLength(5);
     expect(hex.log().filter((line) => line.startsWith("error:"))).toHaveLength(5);
     expect(hex.mailbox.messageIds()).toEqual(["uncountable@shop.example"]);
-    // A restart (a new watcher) runs it again.
+    // A restart (a new watcher) runs it again, counting from the ledger's 0 afresh.
     await hex.stop();
     hex.mailbox.reopen();
     hex.start();
     await hex.scanned();
     expect(hex.asked).toHaveLength(6);
+    const first =
+      "error: hex: Intake uncountable@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === first)).toHaveLength(2);
+    await hex.lookAfter(4 * 60_000);
+    expect(hex.asked).toHaveLength(6);
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(7);
   });
 
   test("the failed runs the ledger counted add to those it couldn't", async () => {
@@ -765,6 +790,80 @@ describe("watchMailbox", () => {
     await hex.lookAfter(60_000);
     expect(hex.asked).toHaveLength(3);
     expect(hex.mailbox.messageIds("hex/processed")).toEqual(["half-counted@shop.example"]);
+  });
+
+  test("once the ledger writes again, the effective count goes on: the 5th failed run fails it permanently; moved back, a fresh series", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("flapping@shop.example"));
+    hex.start();
+    await hex.scanned();
+    // Runs 1 and 2 counted in memory, 3 to 5 by the ledger again; on schedule throughout.
+    for (const [failedRuns, delay] of [
+      [1, 5],
+      [2, 10],
+      [3, 20],
+      [4, 40],
+    ] as const) {
+      if (failedRuns === 2) hex.ledgerWrites.failing = false;
+      await hex.lookAfter((delay - 1) * 60_000);
+      expect(hex.asked).toHaveLength(failedRuns);
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(failedRuns + 1);
+    }
+    expect(hex.log()).toContain(
+      "warn: hex: Intake flapping@shop.example: failed run 4 of 5, 2 of them counted in memory: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 40 min from now",
+    );
+    expect(hex.log()).toContain(
+      "warn: hex: Intake flapping@shop.example: failed run 5 of 5, 2 of them counted in memory: the mailbox watcher fails it permanently at its next look",
+    );
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(5);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["flapping@shop.example"]);
+    // Moved back: run at once, its failure the first of a fresh series, nothing left in memory.
+    hex.mailbox.moveBack("hex/failed");
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(6);
+    expect(hex.log().at(-1)).toContain("failed run 1 of 5");
+    expect(hex.log().at(-1)).not.toContain("counted in memory");
+  });
+
+  test("a hold-back ends with a full look that doesn't list its mail", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    hex.mailbox.deliver(emlOf("staying@shop.example", "staying.pdf"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(2);
+    // Deleted, then a look without it; delivered again: run at once, counted from 1.
+    hex.mailbox.discard(1);
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(2);
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(3);
+    const firstFailure =
+      "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
+  test("a 5th failed run the ledger counted but couldn't end isn't stopped: the next look fails it permanently", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.only = "endFailedRuns";
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("unended@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (const delay of [5, 10, 20, 40]) await hex.lookAfter(delay * 60_000);
+    expect(hex.asked).toHaveLength(5);
+    expect(hex.log()).toContain(
+      "error: hex: Intake unended@shop.example: failing it permanently failed (Intake ledger: disk full); the next look tries again",
+    );
+    hex.ledgerWrites.failing = false;
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(5);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["unended@shop.example"]);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {

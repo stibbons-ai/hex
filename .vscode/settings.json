@@ -1,6 +1,8 @@
 {
   "typescript.preferences.autoImportFileExcludePatterns": ["vendors/**"],
   "javascript.preferences.autoImportFileExcludePatterns": ["vendors/**"],
+  "oxc.configPath": ".oxlintrc.json",
+  "oxc.disableNestedConfig": true,
   "files.exclude": {
     "vendors/**": true
   },

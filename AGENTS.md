@@ -24,5 +24,5 @@ Upstream sources live under `vendors/` as squashed git subtrees, pinned to the v
 - Use them as read-only reference material when working with these libraries; prefer their source, tests and docs over guesses, web search or the compiled code in `node_modules`.
 - When writing Effect code, read `vendors/effect/LLMS.md` first, then inspect `vendors/effect/` for idiomatic usage, tests, module structure and API design.
 - Do not edit files under `vendors/` unless explicitly asked, and never import from it: application code imports from the normal package dependencies.
-- Lint, tests and the container build skip `vendors/`.
+- Lint, formatting, tests and the container build skip `vendors/`. Lint runs with `--disable-nested-config` (else it loads `vendors/effect/.oxlintrc.json`), so a nested `.oxlintrc.json` under `packages/` would be ignored: put lint configuration in the root `.oxlintrc.json`.
 - When a pin changes in the root `package.json` catalog, move its subtree to the same tag in the same change: `git subtree pull -S --prefix=vendors/<name> <url> <tag> --squash`.

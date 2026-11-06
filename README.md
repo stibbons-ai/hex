@@ -565,13 +565,15 @@ header differently from hex), the watcher moves that mail by its UID. Studio (`b
 never watches the mailbox and never restarts runs; a run started there moves no mail.
 
 While the ledger can't be written but can be read, failed runs it can't count are counted in
-memory on top of its own count, each an error line: the Intake is held back as the ledger's
-count would hold it (5, 10, 20, 40 minutes), but on its 5th failed run hex can't fail it
-permanently (that is a ledger write too), so it stops running it until hex restarts, with one
-error line saying so; the mail stays in the watched folder. Each of those runs may resend the
-Forwardings the ledger couldn't record. A restart clears the memory: the Intake runs again at
-the watcher's first look, counted from what the ledger has. When only failing it permanently
-failed (its 5th failed run counted), the next look tries that again.
+memory on top of its own count, each an error line, and every decision goes by the sum: the
+Intake is held back as the count would hold it (5, 10, 20, 40 minutes), and its 5th failed run
+fails it permanently once the ledger writes again (counted or not by the ledger, at the next
+look). While the ledger still can't be written, hex can't fail it permanently (that is a ledger
+write too), so it stops running it until hex restarts, with one error line saying so; the mail
+stays in the watched folder. Each of those runs may resend the Forwardings the ledger couldn't
+record. A restart clears the memory: the Intake runs again at the watcher's first look, counted
+from what the ledger has. So does a look that no longer lists its mail. When only failing it
+permanently failed (its 5th failed run counted), the next look tries that again.
 
 ## Chat (Slack, Signal)
 
@@ -1012,9 +1014,13 @@ so transforming schemas (such as `Schema.NumberFromString`) fail there.
 `vendors/` holds upstream source as squashed git subtrees, for coding agents to read instead of
 the compiled code in `node_modules` (see `AGENTS.md`): `vendors/effect` (Effect, tag
 `effect@4.1.0`) and `vendors/imapflow` (tag `v2.10.0`), the versions the catalog pins. Nothing
-imports from them, and lint (`--disable-nested-config`, `ignorePatterns`), `bun test`
-(`bunfig.toml` `pathIgnorePatterns`), the container build (`.dockerignore`) and VS Code
-(`.vscode/settings.json`) skip them. When a pin changes, move its subtree in the same change:
+imports from them, and lint (`--disable-nested-config`, `ignorePatterns`), formatting
+(`.oxfmtrc.json` `ignorePatterns`), `bun test` (`bunfig.toml` `pathIgnorePatterns`), the
+container build (`.dockerignore`) and VS Code (`.vscode/settings.json`, the Oxc extension on the
+root config alone) skip them. `--disable-nested-config` keeps oxlint from loading
+`vendors/effect/.oxlintrc.json`, so a nested `.oxlintrc.json` under `packages/` would be ignored
+too: put lint configuration in the root `.oxlintrc.json`. When a pin changes, move its subtree in
+the same change:
 
 ```sh
 git subtree pull -S --prefix=vendors/effect https://github.com/Effect-TS/effect.git effect@<version> --squash
