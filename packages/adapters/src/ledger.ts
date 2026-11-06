@@ -53,6 +53,21 @@ export interface IntakeBranches {
   readonly filings: readonly RecordedFiling[];
 }
 
+/** An Intake's failed runs: how many, and when the last one failed (ISO 8601 instant). */
+export interface FailedRuns {
+  readonly count: number;
+  readonly lastFailedAt: string;
+}
+
+/**
+ * A run's failure as recorded: the Intake's failed runs that count now, and whether this run is
+ * the one the Intake failed permanently on (see `endFailedRuns`).
+ */
+export interface RecordedFailedRun {
+  readonly count: number;
+  readonly ended: boolean;
+}
+
 /** The ledger could not be read or written. */
 export class LedgerError extends Data.TaggedError("LedgerError")<{
   readonly message: string;
@@ -61,8 +76,9 @@ export class LedgerError extends Data.TaggedError("LedgerError")<{
 
 /**
  * Which Intakes are processed, keyed by normalised Message-ID (`normalizeMessageId`), so each is
- * processed once, and which of an Intake's branches (a Forwarding per target, a Filing per
- * Document) succeeded, so a retry repeats only the others.
+ * processed once, which of an Intake's branches (a Forwarding per target, a Filing per Document)
+ * succeeded, so a retry repeats only the others, and how many of its runs failed, so it fails
+ * permanently after a number of them.
  */
 export class IntakeLedger extends Context.Service<
   IntakeLedger,
@@ -71,8 +87,8 @@ export class IntakeLedger extends Context.Service<
     readonly find: (messageId: string) => Effect.Effect<LedgerEntry | undefined, LedgerError>;
     /**
      * Records the Intake as processed now with its Filings, one per Document (so its Document
-     * count is their number). Fails when it is already recorded (processed by someone else
-     * meanwhile).
+     * count is their number). Recording it again keeps the first record (a run resumed after a
+     * restart repeats this).
      */
     readonly record: (
       messageId: string,
@@ -96,13 +112,40 @@ export class IntakeLedger extends Context.Service<
       messageId: string,
       filing: RecordedFiling,
     ) => Effect.Effect<void, LedgerError>;
+    /**
+     * The Intake's failed runs that count: those since it last failed permanently (or ever); how
+     * many, and when the last one failed; undefined when there are none.
+     */
+    readonly failedRuns: (messageId: string) => Effect.Effect<FailedRuns | undefined, LedgerError>;
+    /**
+     * Records that the run `runId` of the Intake failed now, and returns the failed runs that
+     * count. Recording a run again keeps the first record, so a run repeated after a restart
+     * counts once, and still says whether it was the one the Intake failed permanently on.
+     */
+    readonly recordFailedRun: (
+      messageId: string,
+      runId: string,
+    ) => Effect.Effect<RecordedFailedRun, LedgerError>;
+    /**
+     * The Intake failed permanently, on the run `runId` if given: its failed runs stop counting,
+     * so it gets its full number of runs again. `runId`'s own row stays, marked ended, so a repeat
+     * of that run's step still sees the Intake failed permanently; without a run none stays. One
+     * transaction: either all of it happens or nothing does.
+     */
+    readonly endFailedRuns: (
+      messageId: string,
+      runId?: string | undefined,
+    ) => Effect.Effect<void, LedgerError>;
   }
 >()("hex/IntakeLedger") {}
 
 /**
  * Own tables in Mastra's LibSQL database, keyed by `message_id`: one row per processed Intake,
- * and one per succeeded branch (a Forwarding per target, a Filing per Document), written as each
- * succeeds. A branch row is never replaced: `ON CONFLICT DO NOTHING` keeps the first.
+ * one per succeeded branch (a Forwarding per target, a Filing per Document), written as each
+ * succeeds, and one per failed run of an Intake, kept after a later success and removed when the
+ * Intake fails permanently (but for the row of the run it failed on, marked `ended`, if there is
+ * one). A row is never replaced:
+ * `ON CONFLICT DO NOTHING` keeps the first.
  */
 const CREATE_TABLES = [
   `CREATE TABLE IF NOT EXISTS hex_intake_ledger (
@@ -124,6 +167,13 @@ const CREATE_TABLES = [
   fell_back INTEGER NOT NULL,
   filed_at TEXT NOT NULL,
   PRIMARY KEY (message_id, document_index)
+)`,
+  `CREATE TABLE IF NOT EXISTS hex_intake_failed_runs (
+  message_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  failed_at TEXT NOT NULL,
+  ended INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (message_id, run_id)
 )`,
 ];
 
@@ -149,6 +199,16 @@ const FilingRows = Schema.Array(
 );
 const decodeFilingRows = Schema.decodeUnknownEffect(FilingRows);
 
+const FailedRunRows = Schema.Array(
+  Schema.Struct({ count: Schema.Int, last_failed_at: Schema.NullOr(Schema.String) }),
+);
+const decodeFailedRunRows = Schema.decodeUnknownEffect(FailedRunRows);
+
+const RecordedFailedRunRows = Schema.Array(
+  Schema.Struct({ count: Schema.Int, ended: Schema.Literals([0, 1]) }),
+);
+const decodeRecordedFailedRunRows = Schema.decodeUnknownEffect(RecordedFailedRunRows);
+
 /** The key of a Message-ID, failing for a blank one. */
 function key(messageId: string): Effect.Effect<string, LedgerError> {
   const normalized = normalizeMessageId(messageId);
@@ -163,10 +223,13 @@ const ledgerError = (what: string) => (cause: unknown) =>
 /** Now, as the ISO 8601 instant the ledger stores. */
 const now = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(millis).toISOString()));
 
+/** How long a ledger statement waits for a lock on `mastra.db` before failing with SQLITE_BUSY. */
+const BUSY_TIMEOUT_MS = 5000;
+
 /**
  * The Intake ledger in the LibSQL file at `databasePath` (Mastra's `mastra.db`; its directory is
- * created if missing), on its own connection, closed when the layer is released. The tables are
- * created if missing.
+ * created if missing), on its own client (a pool of connections), closed when the layer is
+ * released. The tables are created if missing.
  */
 export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedger, LedgerError> {
   return Layer.effect(
@@ -175,10 +238,13 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
       const client = yield* Effect.acquireRelease(
         Effect.tryPromise({
           try: async () => {
-            const client = createClient({ url: await localDatabaseUrl(databasePath) });
+            // Mastra writes to the same file: wait up to 5 s for its locks instead of failing, on
+            // every connection of the client's pool (a PRAGMA would cover only the first).
+            const client = createClient({
+              url: await localDatabaseUrl(databasePath),
+              timeout: BUSY_TIMEOUT_MS,
+            });
             try {
-              // Mastra writes to the same file; wait for its locks instead of failing.
-              await client.execute("PRAGMA busy_timeout = 5000");
               for (const statement of CREATE_TABLES) await client.execute(statement);
             } catch (error) {
               client.close();
@@ -227,6 +293,23 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
             })),
           ),
         );
+      const failedRunsOf = (id: string) =>
+        execute(
+          "SELECT COUNT(*) AS count, MAX(failed_at) AS last_failed_at FROM hex_intake_failed_runs WHERE message_id = ? AND ended = 0",
+          [id],
+          "reading",
+        ).pipe(
+          Effect.flatMap(({ rows }) =>
+            decodeFailedRunRows(rows).pipe(
+              Effect.mapError(ledgerError(`unreadable failed runs for ${id}`)),
+            ),
+          ),
+          Effect.map(([row]): FailedRuns | undefined =>
+            row && row.last_failed_at !== null
+              ? { count: row.count, lastFailedAt: row.last_failed_at }
+              : undefined,
+          ),
+        );
 
       return {
         find: (messageId) =>
@@ -254,7 +337,7 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
           Effect.gen(function* () {
             const id = yield* key(messageId);
             yield* execute(
-              "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?)",
+              "INSERT INTO hex_intake_ledger (message_id, processed_at, document_count, filings) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
               [id, yield* now, filings.length, JSON.stringify(filings)],
               `recording ${id}`,
             );
@@ -282,6 +365,49 @@ export function intakeLedgerLayer(databasePath: string): Layer.Layer<IntakeLedge
               [id, index, path, fellBack ? 1 : 0, yield* now],
               `recording the Filing of Document ${index} of ${id}`,
             );
+          }),
+        failedRuns: (messageId) => key(messageId).pipe(Effect.flatMap(failedRunsOf)),
+        recordFailedRun: (messageId, runId) =>
+          Effect.gen(function* () {
+            const id = yield* key(messageId);
+            yield* execute(
+              "INSERT INTO hex_intake_failed_runs (message_id, run_id, failed_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+              [id, runId, yield* now],
+              `recording the failed run ${runId} of ${id}`,
+            );
+            const { rows } = yield* execute(
+              "SELECT (SELECT COUNT(*) FROM hex_intake_failed_runs WHERE message_id = ? AND ended = 0) AS count, ended FROM hex_intake_failed_runs WHERE message_id = ? AND run_id = ?",
+              [id, id, runId],
+              "reading",
+            );
+            const [row] = yield* decodeRecordedFailedRunRows(rows).pipe(
+              Effect.mapError(ledgerError(`unreadable failed runs for ${id}`)),
+            );
+            if (!row)
+              return yield* new LedgerError({ message: `failed run ${runId} not recorded` });
+            return { count: row.count, ended: row.ended === 1 };
+          }),
+        endFailedRuns: (messageId, runId) =>
+          Effect.gen(function* () {
+            const id = yield* key(messageId);
+            // Ended first, so even statement by statement no state left between them counts.
+            yield* Effect.tryPromise({
+              try: () =>
+                client.batch(
+                  [
+                    {
+                      sql: "UPDATE hex_intake_failed_runs SET ended = 1 WHERE message_id = ?",
+                      args: [id],
+                    },
+                    {
+                      sql: "DELETE FROM hex_intake_failed_runs WHERE message_id = ? AND run_id IS NOT ?",
+                      args: [id, runId ?? null],
+                    },
+                  ],
+                  "write",
+                ),
+              catch: ledgerError(`ending the failed runs of ${id}`),
+            });
           }),
       };
     }),

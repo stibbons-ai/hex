@@ -2,7 +2,7 @@ import { isIPv4, isIPv6 } from "node:net";
 import { Context, Data, Effect, Layer, Redacted } from "effect";
 import { createTransport } from "nodemailer";
 import type { NodemailerError } from "nodemailer";
-import { excerpt, messageOf, redact } from "./errors";
+import { credentialRedactions, excerpt, messageOf, redact } from "./errors";
 
 /** One attachment of an outgoing mail: its bytes, unchanged, under a file name and MIME type. */
 export interface MailAttachment {
@@ -54,6 +54,21 @@ export function isLoopbackHost(host: string): boolean {
   return (isIPv4(host) && host.startsWith("127.")) || (isIPv6(host) && host === "::1");
 }
 
+/**
+ * What a plaintext connection is only allowed to (see {@link isLoopbackHost}), as SMTP, IMAP and
+ * the config say it.
+ */
+export const LOOPBACK_ONLY =
+  "a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost)";
+
+/**
+ * Whether a connection secured as `security` to `host` is refused: plaintext (`plain`) to
+ * anything but a loopback IP address, so credentials never cross a network unencrypted.
+ */
+export function plaintextRefused(security: SmtpSecurity, host: string): boolean {
+  return security === "plain" && !isLoopbackHost(host);
+}
+
 /** Where and as whom the SMTP Mailer sends. */
 export interface SmtpSettings {
   readonly host: string;
@@ -72,12 +87,12 @@ export interface SmtpSettings {
  */
 export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
   const { host, port, security } = settings;
-  if (security === "plain" && !isLoopbackHost(host)) {
+  if (plaintextRefused(security, host)) {
     return Layer.succeed(Mailer, {
       send: ({ to }) =>
         Effect.fail(
           new MailerError({
-            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed to a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name)`,
+            message: `sending to ${to} via ${host}:${port} refused: plaintext SMTP is only allowed to ${LOOPBACK_ONLY}`,
           }),
         ),
     });
@@ -98,19 +113,8 @@ export function smtpMailerLayer(settings: SmtpSettings): Layer.Layer<Mailer> {
     disableUrlAccess: true,
     logger: false,
   });
-  // What an error must never show, should a server echo it back: the credentials as is and in
-  // base64, as AUTH PLAIN and LOGIN send them; base64 forms first, so none is half-replaced. The
-  // password's forms always; the user's only from 8 characters, as `withoutApiKeys` does: a
-  // shorter one is too likely to match ordinary text.
-  const base64 = (text: string) => Buffer.from(text).toString("base64");
-  const userForm = (form: string) => (form.length >= 8 ? [form] : []);
-  const secrets = [
-    base64(`\u0000${user}\u0000${password}`),
-    base64(password),
-    ...userForm(base64(user)),
-    password,
-    ...userForm(user),
-  ].map((form) => [form, "***"] as const);
+  // What an error must never show, should a server echo it back.
+  const secrets = credentialRedactions(user, password);
   return Layer.succeed(Mailer, {
     send: ({ from, to, subject, text, attachments }) =>
       Effect.tryPromise({

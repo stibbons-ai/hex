@@ -32,8 +32,13 @@ export function inputFiles(request: ResponsesRequest): string[] {
   );
 }
 
-/** A fake that answers each request with `answer(request)`. */
-export function fakeOpenAI(answer: (request: ResponsesRequest) => FakeAnswer): FakeOpenAI {
+/**
+ * A fake that answers each request with `answer(request)`; a promise answers once it settles (one
+ * that never does is a model call that hangs).
+ */
+export function fakeOpenAI(
+  answer: (request: ResponsesRequest) => FakeAnswer | Promise<FakeAnswer>,
+): FakeOpenAI {
   const requests: ResponsesRequest[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -44,7 +49,7 @@ export function fakeOpenAI(answer: (request: ResponsesRequest) => FakeAnswer): F
       }
       const body = (await request.json()) as ResponsesRequest;
       requests.push(body);
-      const reply = answer(body);
+      const reply = await answer(body);
       if (typeof reply !== "string") {
         return Response.json(
           { error: { message: reply.message, type: "invalid_request_error", code: null } },

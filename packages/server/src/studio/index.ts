@@ -27,14 +27,16 @@ export const mastra = createHexMastra({
   storage: await createHexStore(paths),
   workflows: {
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({
-      runtime: createIntakeRuntime(
-        paths,
-        dateExtractorLayer(model),
-        forwarding && smtpMailerLayer(forwarding.smtp),
-      ),
+      runtime: createIntakeRuntime(paths, {
+        dateExtractor: dateExtractorLayer(model),
+        mailer: forwarding && smtpMailerLayer(forwarding.smtp),
+      }),
       category,
       forwarding,
     }),
   },
   agents: chatAgent && { [chatAgent.id]: chatAgent },
+  // hex's server restarts the runs left active and watches the mailbox; Studio, on the same data,
+  // does neither (its runs have no mailbox: they move no mail).
+  recovery: { workflows: "off" },
 });

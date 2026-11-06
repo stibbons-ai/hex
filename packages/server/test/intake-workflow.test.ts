@@ -3,23 +3,20 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DateExtractionError,
-  DateExtractor,
-  IntakeLedger,
-  LedgerError,
-  intakeLedgerLayer,
-  readEml,
-} from "@hex/adapters";
-import type { DocumentFile, Intake, OutgoingMail } from "@hex/adapters";
+import { IntakeLedger, LedgerError, Mailbox, intakeLedgerLayer, readEml } from "@hex/adapters";
+import type { Intake, OutgoingMail } from "@hex/adapters";
 import { MIN_IMAGE_DOCUMENT_BYTES } from "@hex/domain";
 import { Effect, Layer } from "effect";
 import { loadForwardingConfig } from "../src/config";
 import { IntakeRunError, runIntake } from "../src/intake-workflow";
 import type { IntakeForwarding } from "../src/intake-workflow";
-import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes } from "./eml";
+import { recordFailedRun } from "../src/mail-fate";
+import { buildEml, bytes, invoiceMail, jpegBytes, pdf, pdfBytes, pdfMail } from "./eml";
 import type { Mail } from "./eml";
+import { memoryMailbox } from "./memory-mailbox";
 import { recordingMailer } from "./recording-mailer";
+import { scriptedDateExtractor } from "./scripted-extractor";
+import type { Script } from "./scripted-extractor";
 
 let directory: string;
 let instances = 0;
@@ -38,35 +35,28 @@ const received = "Sat, 31 Oct 2026 23:30:00 +0000";
 /** The model's answer when a Document shows no date. */
 const NO_DATE = { year: null, month: null, day: null };
 
-/**
- * What the scripted DateExtractor answers for a Document, standing in for the model's answer;
- * an Error fails the call as a failed model call would.
- */
-type Script = (document: DocumentFile) => unknown;
+/** What happens to the mail of an Intake that isn't in the watched folder: nothing. */
+const NOT_IN_MAILBOX = { status: "not-in-mailbox", to: "processed" } as const;
+
+/** The end of a failed run's error when the Intake has runs left (its first failed run). */
+const FIRST_FAILED_RUN =
+  "; failed run 1 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now";
 
 /**
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
- * DateExtractor that answers by `script` and records every Document it was asked about, and a
- * recording Mailer forwarding as `forwarding` says (off when absent). The real ledger records
- * Forwardings, except that the next `failing.forwardingRecords` attempts fail, as a ledger that
- * can't write would.
+ * DateExtractor that answers by `script` and records every Document it was asked about, a
+ * recording Mailer forwarding as `forwarding` says (off when absent), and an in-memory Mailbox
+ * watching INBOX. The real ledger records Forwardings, except that the next
+ * `failing.forwardingRecords` attempts fail, as a ledger that can't write would; so do the next
+ * `failing.failedRunRecords` calls counting a failed run.
  */
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
-  const asked: DocumentFile[] = [];
-  const dateExtractor = Layer.succeed(DateExtractor, {
-    extract: (document) =>
-      Effect.suspend(() => {
-        asked.push(document);
-        const answer = script(document);
-        return answer instanceof Error
-          ? Effect.fail(new DateExtractionError({ message: answer.message }))
-          : Effect.succeed({ answer, usage: undefined });
-      }),
-  });
+  const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
   const mailer = recordingMailer();
-  const failing = { forwardingRecords: 0 };
+  const mailbox = memoryMailbox();
+  const failing = { forwardingRecords: 0, failedRunRecords: 0 };
   const ledger = Layer.effect(
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
@@ -76,6 +66,12 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
           if (failing.forwardingRecords <= 0) return real.recordForwarding(messageId, target);
           failing.forwardingRecords--;
           return Effect.fail(new LedgerError({ message: "Intake ledger: disk I/O error" }));
+        }),
+      recordFailedRun: (messageId: string, runId: string) =>
+        Effect.suspend(() => {
+          if (failing.failedRunRecords <= 0) return real.recordFailedRun(messageId, runId);
+          failing.failedRunRecords--;
+          return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
         }),
     })),
   ).pipe(Layer.provide(intakeLedgerLayer(paths.databasePath)));
@@ -89,12 +85,14 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
       dateExtractor,
       mailer: mailer.layer,
       ledger,
+      mailbox: mailbox.layer,
       forwarding: config.forwarding,
     });
   return {
     ...paths,
     asked,
     mailer,
+    mailbox,
     config,
     /** How many Forwarding records fail next (`Infinity`: every one). */
     failing,
@@ -102,6 +100,10 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
     /** Runs the workflow once on `mail` read as an `.eml`. */
     async process(mail: Mail) {
       return run(await Effect.runPromise(readEml(buildEml(mail), "test.eml")));
+    },
+    /** Delivers `mail` as an `.eml` into the watched folder (INBOX). */
+    deliver(mail: Mail) {
+      mailbox.deliver(buildEml(mail));
     },
     /** Every file in the Outbox, relative, with its content. */
     async outbox(): Promise<Record<string, string>> {
@@ -130,10 +132,37 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
         ),
       );
     },
+    /** The failed runs recorded for a Message-ID, read through the ledger itself. */
+    failedRuns(messageId: string) {
+      return Effect.runPromise(
+        IntakeLedger.use((ledger) => ledger.failedRuns(messageId)).pipe(
+          Effect.provide(intakeLedgerLayer(paths.databasePath)),
+        ),
+      );
+    },
+    /** Runs `program` on the ledger and the Mailbox, as the workflow's steps would. */
+    on<A, E>(program: Effect.Effect<A, E, IntakeLedger | Mailbox>) {
+      return Effect.runPromise(
+        program.pipe(
+          Effect.provide(Layer.mergeAll(intakeLedgerLayer(paths.databasePath), mailbox.layer)),
+        ),
+      );
+    },
   };
 }
 
 describe("Intake workflow", () => {
+  const SEVDESK = "autobox@sevdesk.example";
+  const PAPERLESS = "bill@paperless.example";
+  const FROM = "hex@example.com";
+  const both: IntakeForwarding = {
+    from: FROM,
+    targets: [
+      { name: "sevdesk", to: SEVDESK },
+      { name: "paperless", to: PAPERLESS },
+    ],
+  };
+
   test("happy path: files each Document by its Document date, records the Intake", async () => {
     const dates: Record<string, unknown> = {
       a: { year: 2026, month: 9, day: 15 },
@@ -169,6 +198,7 @@ describe("Intake workflow", () => {
       status: "processed",
       filings,
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     const text = (content: Uint8Array) => new TextDecoder().decode(content);
     expect(await hex.outbox()).toEqual({
@@ -208,6 +238,7 @@ describe("Intake workflow", () => {
       status: "processed",
       filings,
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Rechnung.pdf"]);
     expect(await hex.ledger("fallback@shop.example")).toMatchObject({ filings });
@@ -280,6 +311,7 @@ describe("Intake workflow", () => {
       status: "already-processed",
       filings: [{ index: 0, path: "2026-10/ER/a.pdf" }],
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(result.filings[0]).not.toHaveProperty("fellBack");
     expect(hex.asked).toEqual([]);
@@ -398,6 +430,7 @@ describe("Intake workflow", () => {
       status: "processed",
       filings: [{ index: 6, path: "2026-11/ER/Scan.pdf", fellBack: true }],
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(Object.keys(await hex.outbox())).toEqual(["2026-11/ER/Scan.pdf"]);
   });
@@ -421,6 +454,7 @@ describe("Intake workflow", () => {
       status: "processed",
       filings: [],
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(await hex.outbox()).toEqual({});
     expect(await hex.ledger("<nothing@shop.example>")).toMatchObject({
@@ -440,6 +474,7 @@ describe("Intake workflow", () => {
       status: "already-processed",
       filings: [{ index: 0, path: "2026-11/ER/Rechnung.pdf", fellBack: true }],
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(hex.asked).toHaveLength(1);
     expect(first).toMatchObject({ status: "processed" });
@@ -482,6 +517,7 @@ describe("Intake workflow", () => {
       status: "processed",
       filings: paths.map((path, index) => ({ index, path, fellBack: true })),
       forwardings: [],
+      mail: NOT_IN_MAILBOX,
     });
     expect(Object.keys(await hex.outbox()).sort()).toEqual([...paths].sort());
     // Nothing next to the Outbox either: only the database (and its WAL files) and the Outbox.
@@ -557,16 +593,6 @@ describe("Intake workflow", () => {
   });
 
   describe("Forwarding", () => {
-    const SEVDESK = "autobox@sevdesk.example";
-    const PAPERLESS = "bill@paperless.example";
-    const FROM = "hex@example.com";
-    const both: IntakeForwarding = {
-      from: FROM,
-      targets: [
-        { name: "sevdesk", to: SEVDESK },
-        { name: "paperless", to: PAPERLESS },
-      ],
-    };
     const INVOICE = pdfBytes(600, "i");
     const CREDIT_NOTE = pdfBytes(700, "c");
     const dated = () => ({ year: 2026, month: 10, day: 1 });
@@ -624,6 +650,7 @@ describe("Intake workflow", () => {
           { target: "sevdesk", status: "forwarded" },
           { target: "paperless", status: "forwarded" },
         ],
+        mail: NOT_IN_MAILBOX,
       });
       expect(hex.mailer.sent.map(delivered)).toEqual([mailTo(SEVDESK), mailTo(PAPERLESS)]);
       expect(hex.mailer.sent[0]?.text).toContain("forward@shop.example from billing@shop.example");
@@ -643,7 +670,7 @@ describe("Intake workflow", () => {
       const failed = await hex.process(mail).catch((error: unknown) => error);
       expect(failed).toBeInstanceOf(IntakeRunError);
       expect((failed as IntakeRunError).message).toBe(
-        `the Intake workflow did not finish: forwarding to paperless: sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later`,
+        `the Intake workflow did not finish: forwarding to paperless: sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later${FIRST_FAILED_RUN}`,
       );
       expect((failed as IntakeRunError).forwardings).toEqual([
         { target: "sevdesk", status: "forwarded" },
@@ -671,6 +698,7 @@ describe("Intake workflow", () => {
           { target: "sevdesk", status: "forwarded-earlier" },
           { target: "paperless", status: "forwarded" },
         ],
+        mail: NOT_IN_MAILBOX,
       });
       // SevDesk never sees the Intake twice; nothing filed or read again.
       expect(hex.mailer.sent.map(delivered)).toEqual([mailTo(SEVDESK), mailTo(PAPERLESS)]);
@@ -788,6 +816,7 @@ describe("Intake workflow", () => {
         status: "processed",
         filings: [],
         forwardings: [],
+        mail: NOT_IN_MAILBOX,
       });
       expect(hex.mailer.sent).toEqual([]);
       expect(await hex.ledger("no-documents@shop.example")).toMatchObject({ forwardings: [] });
@@ -806,6 +835,7 @@ describe("Intake workflow", () => {
           { target: "paperless", status: "forwarded-earlier" },
           { target: "sevdesk", status: "forwarded-earlier" },
         ],
+        mail: NOT_IN_MAILBOX,
       });
       expect(hex.mailer.sent).toHaveLength(2);
     });
@@ -836,7 +866,7 @@ describe("Intake workflow", () => {
       const failed = await hex.process(invoice("unrecorded@shop.example")).catch((e: unknown) => e);
       expect(failed).toBeInstanceOf(IntakeRunError);
       expect((failed as IntakeRunError).message).toBe(
-        "the Intake workflow did not finish: forwarding to sevdesk: sent, but recording it failed (Intake ledger: disk I/O error); running this Intake again sends it again",
+        `the Intake workflow did not finish: forwarding to sevdesk: sent, but recording it failed (Intake ledger: disk I/O error); running this Intake again sends it again${FIRST_FAILED_RUN}`,
       );
       expect((failed as IntakeRunError).forwardings).toEqual([
         { target: "sevdesk", status: "sent-unrecorded", reason: "Intake ledger: disk I/O error" },
@@ -966,6 +996,196 @@ describe("Intake workflow", () => {
         contentType: "application/pdf",
         content: new TextDecoder().decode(INVOICE),
       });
+    });
+  });
+
+  describe("the mail in the mailbox", () => {
+    const dated = () => ({ year: 2026, month: 10, day: 1 });
+    const mailOf = (messageId: string) => pdfMail(messageId);
+
+    test("a processed Intake's mail goes to hex/processed", async () => {
+      const hex = freshHex(dated);
+      const mail = mailOf("moved@shop.example");
+      hex.deliver(mail);
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        mail: { status: "moved", to: "processed", copies: 1 },
+      });
+      expect(hex.mailbox.messageIds()).toEqual([]);
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["moved@shop.example"]);
+    });
+
+    test("an already processed Intake's mail goes to hex/processed; nothing forwarded or filed again", async () => {
+      const hex = freshHex(dated, both);
+      const mail = mailOf("again@shop.example");
+      await hex.process(mail);
+      // Re-delivered after the first run.
+      hex.deliver(mail);
+      const outbox = await hex.outbox();
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "already-processed",
+        mail: { status: "moved", to: "processed", copies: 1 },
+      });
+      expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK, PAPERLESS]);
+      expect(await hex.outbox()).toEqual(outbox);
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["again@shop.example"]);
+    });
+
+    test("a failed run with runs left keeps the mail and counts the failure", async () => {
+      const hex = freshHex(() => new Error("reading the Document date failed: 429"));
+      const mail = mailOf("kept@shop.example");
+      hex.deliver(mail);
+      const failed = await hex.process(mail).catch((error: unknown) => error);
+      expect(failed).toBeInstanceOf(IntakeRunError);
+      expect((failed as IntakeRunError).message).toBe(
+        `the Intake workflow did not finish: filing: reading the Document date failed: 429${FIRST_FAILED_RUN}`,
+      );
+      expect((failed as IntakeRunError).mail).toEqual({ status: "kept-for-retry" });
+      expect(hex.mailbox.messageIds()).toEqual(["kept@shop.example"]);
+      expect(hex.mailbox.moves).toEqual([]);
+      expect(await hex.failedRuns("kept@shop.example")).toMatchObject({ count: 1 });
+    });
+
+    test("a failed run the ledger can't count says so; the failure stays the run's error", async () => {
+      const hex = freshHex(() => new Error("reading the Document date failed: 429"));
+      hex.failing.failedRunRecords = 1;
+      const mail = mailOf("uncounted@shop.example");
+      hex.deliver(mail);
+      const failed = await hex.process(mail).catch((error: unknown) => error);
+      expect(failed).toBeInstanceOf(IntakeRunError);
+      expect((failed as IntakeRunError).message).toBe(
+        "the Intake workflow did not finish: filing: reading the Document date failed: 429; counting the failed run failed: Intake ledger: database is locked",
+      );
+      expect((failed as IntakeRunError).mail).toBeUndefined();
+      expect(hex.mailbox.messageIds()).toEqual(["uncounted@shop.example"]);
+      expect(await hex.failedRuns("uncounted@shop.example")).toBeUndefined();
+    });
+
+    test("the 5th failed run moves the mail to hex/failed; moved back, the Intake runs afresh and only its failed branch repeats", async () => {
+      const hex = freshHex(dated, both);
+      const mail = mailOf("flaky@shop.example");
+      hex.deliver(mail);
+      hex.mailer.failNext(PAPERLESS, 5);
+      const errors: IntakeRunError[] = [];
+      for (let run = 1; run <= 5; run++) {
+        errors.push((await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError);
+      }
+      expect(errors.map(({ mail }) => mail?.status)).toEqual([
+        "kept-for-retry",
+        "kept-for-retry",
+        "kept-for-retry",
+        "kept-for-retry",
+        "moved",
+      ]);
+      expect(errors[3]?.message).toContain("; failed run 4 of 5: ");
+      expect(errors[3]?.message).toContain("no sooner than 40 min from now");
+      expect(errors[4]?.message).toContain(
+        "; failed run 5 of 5, so the Intake failed permanently: its mail was moved to hex/failed",
+      );
+      expect(errors[4]?.mail).toEqual({ status: "moved", to: "failed", copies: 1 });
+      expect(hex.mailbox.messageIds()).toEqual([]);
+      expect(hex.mailbox.messageIds("hex/failed")).toEqual(["flaky@shop.example"]);
+      // Failing permanently forgot the count: moved back, the Intake gets its 5 runs again.
+      expect(await hex.failedRuns("flaky@shop.example")).toBeUndefined();
+
+      hex.mailbox.moveBack("hex/failed");
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        forwardings: [
+          { target: "sevdesk", status: "forwarded-earlier" },
+          { target: "paperless", status: "forwarded" },
+        ],
+        mail: { status: "moved", to: "processed", copies: 1 },
+      });
+      // SevDesk got the Intake once, PaperLess once it accepted it; filed once.
+      expect(hex.mailer.sent.map(({ to }) => to)).toEqual([SEVDESK, PAPERLESS]);
+      expect(Object.keys(await hex.outbox())).toEqual(["2026-10/ER/Rechnung.pdf"]);
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["flaky@shop.example"]);
+    });
+
+    test("an Intake not in the mailbox moves nothing; other mail stays", async () => {
+      const hex = freshHex(dated);
+      hex.deliver(mailOf("other@shop.example"));
+      const result = await hex.process(mailOf("elsewhere@shop.example"));
+      expect(result).toMatchObject({ status: "processed", mail: NOT_IN_MAILBOX });
+      expect(hex.mailbox.moves).toEqual([]);
+      expect(hex.mailbox.messageIds()).toEqual(["other@shop.example"]);
+    });
+
+    test("every copy of a re-delivered mail moves, matched by Message-ID however it is bracketed", async () => {
+      const hex = freshHex(dated);
+      hex.deliver(mailOf("twice@shop.example"));
+      hex.deliver(mailOf("other@shop.example"));
+      hex.deliver(mailOf("twice@shop.example"));
+      const result = await hex.run({
+        ...(await Effect.runPromise(readEml(buildEml(mailOf("x@y")), "test.eml"))),
+        messageId: " <twice@shop.example> ",
+      });
+      expect(result.mail).toEqual({ status: "moved", to: "processed", copies: 2 });
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual([
+        "twice@shop.example",
+        "twice@shop.example",
+      ]);
+      expect(hex.mailbox.messageIds()).toEqual(["other@shop.example"]);
+    });
+
+    test("a move that fails leaves the mail where it is; the Intake stays processed", async () => {
+      const hex = freshHex(dated);
+      const mail = mailOf("stuck@shop.example");
+      hex.deliver(mail);
+      hex.mailbox.refuse("moving mail to hex/processed");
+      const result = await hex.process(mail);
+      expect(result).toMatchObject({
+        status: "processed",
+        mail: {
+          status: "not-moved",
+          to: "processed",
+          reason: expect.stringContaining("[NOPERM] not allowed"),
+        },
+      });
+      expect(hex.mailbox.messageIds()).toEqual(["stuck@shop.example"]);
+      expect(await hex.ledger("stuck@shop.example")).toBeDefined();
+    });
+
+    test("a 5th failed run whose move fails leaves the mail, the Intake failed permanently", async () => {
+      const hex = freshHex(() => new Error("reading the Document date failed: 429"));
+      const mail = mailOf("stuck-failed@shop.example");
+      hex.deliver(mail);
+      for (let run = 1; run <= 4; run++) await hex.process(mail).catch(() => {});
+      hex.mailbox.refuse("moving mail to hex/failed");
+      const failed = (await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError;
+      expect(failed.mail).toMatchObject({ status: "not-moved", to: "failed" });
+      expect(failed.message).toContain(
+        "; failed run 5 of 5, so the Intake failed permanently: moving its mail to hex/failed failed (",
+      );
+      expect(hex.mailbox.messageIds()).toEqual(["stuck-failed@shop.example"]);
+      // Ended: moved back by hand or not, the Intake has its full number of runs again.
+      expect(await hex.failedRuns("stuck-failed@shop.example")).toBeUndefined();
+    });
+
+    test("the 5th failed run's step repeated after a restart still fails the Intake permanently", async () => {
+      const hex = freshHex(dated);
+      const id = "repeated@shop.example";
+      hex.deliver(mailOf(id));
+      // Runs 1 to 5 failed; the 5th ended the failed runs, then the process died before its
+      // move, and the step runs again with the same run id.
+      await hex.on(
+        Effect.gen(function* () {
+          const ledger = yield* IntakeLedger;
+          for (const run of ["r1", "r2", "r3", "r4", "r5"]) yield* ledger.recordFailedRun(id, run);
+          yield* ledger.endFailedRuns(id, "r5");
+        }),
+      );
+      const repeated = await hex.on(recordFailedRun(id, "r5"));
+      expect(repeated).toEqual({
+        failedRuns: 5,
+        mail: { status: "moved", to: "failed", copies: 1 },
+      });
+      expect(hex.mailbox.messageIds("hex/failed")).toEqual([id]);
+      expect(await hex.failedRuns(id)).toBeUndefined();
     });
   });
 });

@@ -1,8 +1,13 @@
 import { resolve } from "node:path";
-import { dateExtractorLayer, isLoopbackHost, smtpMailerLayer } from "@hex/adapters";
+import {
+  dateExtractorLayer,
+  imapMailboxLayer,
+  isLoopbackHost,
+  smtpMailerLayer,
+} from "@hex/adapters";
 import { closeInOrder } from "./close";
 import { loadChatConfig } from "./channels";
-import { loadForwardingConfig, loadIntakeConfig } from "./config";
+import { loadForwardingConfig, loadIntakeConfig, loadMailboxConfig } from "./config";
 import { startServer } from "./index";
 import { INTAKE_WORKFLOW_ID, createIntakeRuntime, createIntakeWorkflow } from "./intake-workflow";
 import { shutdownOnce } from "./lifecycle";
@@ -16,7 +21,8 @@ if (!isLoopbackHost(hostname)) {
     `hex: listening on ${hostname}, beyond loopback: the server has no authentication, so anyone who can reach this address can use it; in a container, publish the port on 127.0.0.1 only (ADR 0005)`,
   );
 }
-// HEX_CONFIG names the config file (chat and Intake settings); unset or empty runs without chat.
+// HEX_CONFIG names the config file (chat, Intake, Forwarding and mailbox settings); unset or
+// empty runs without chat, Forwarding or the mailbox watcher.
 const configPath = process.env.HEX_CONFIG ? resolve(process.env.HEX_CONFIG) : undefined;
 const chat = configPath ? await loadChatConfig(configPath, process.env) : undefined;
 if (!chat) {
@@ -29,21 +35,31 @@ if (!chat) {
 const { category, model } = await loadIntakeConfig(configPath);
 // Off without targets; with one enabled, missing SMTP settings fail startup, naming the variable.
 const forwarding = await loadForwardingConfig(configPath, process.env);
+// Off without a mailbox section; with one, missing IMAP settings fail startup, naming the variable.
+const mailbox = await loadMailboxConfig(configPath, process.env);
+if (!mailbox) {
+  console.log(
+    configPath
+      ? `hex: mailbox off: ${process.env.HEX_CONFIG} configures no mailbox`
+      : "hex: mailbox off: HEX_CONFIG is not set",
+  );
+}
 const paths = dataPaths(process.env);
-// Built now, so a ledger that can't be opened fails startup instead of every later Intake run
-// (the runtime keeps a failed build); disposed after the server stopped.
-const intakeRuntime = createIntakeRuntime(
-  paths,
-  dateExtractorLayer(model),
-  forwarding && smtpMailerLayer(forwarding.smtp),
-);
+// Built now, so a ledger that can't be opened, or a mailbox that can't be reached or logged into
+// (within 60 s), fails startup instead of every later Intake run (the runtime keeps a failed
+// build); disposed after the server stopped.
+const intakeRuntime = createIntakeRuntime(paths, {
+  dateExtractor: dateExtractorLayer(model),
+  mailer: forwarding && smtpMailerLayer(forwarding.smtp),
+  mailbox: mailbox && imapMailboxLayer(mailbox.imap),
+});
 /** Disposes the Intake runtime after a failed start; a failure there is logged, not rethrown. */
 const disposeAfterFailure = (error: unknown) =>
   intakeRuntime
     .dispose()
     .catch((disposeError: unknown) => {
       console.error(
-        "hex: closing the Intake ledger after a failed start also failed",
+        "hex: closing the Intake ledger and mailbox after a failed start also failed",
         disposeError,
       );
     })
@@ -60,6 +76,7 @@ const starting = startServer({
     [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime: intakeRuntime, category, forwarding }),
   },
   ...(chat ? { chat } : {}),
+  ...(mailbox ? { mailbox: { runtime: intakeRuntime, pollMs: mailbox.pollMs } } : {}),
 }).then(
   (server) => ({
     ...server,
@@ -78,4 +95,11 @@ process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
 const server = await starting;
+// Printed, not logged: Mastra's logger drops info lines in production, as the "off" line would be.
+if (mailbox) {
+  const { host, port: imapPort, folder } = mailbox.imap;
+  console.log(
+    `hex: mailbox on: watching ${folder} on ${host}:${imapPort}, looking again ${mailbox.pollMs / 1000} s after a look without news`,
+  );
+}
 console.log(`hex listening on ${server.url}`);

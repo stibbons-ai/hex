@@ -29,7 +29,10 @@ export type IntakeAttachment = typeof IntakeAttachment.Type;
 
 /** One incoming email: what the Intake workflow processes once, keyed by its Message-ID. */
 export const Intake = Schema.Struct({
-  /** Not blank once trimmed and unbracketed (see `normalizeMessageId`). */
+  /**
+   * Not blank once trimmed and unbracketed. As given (`workflows.start` may pass `<a@b>`): any
+   * comparison or key must go through `normalizeMessageId` first.
+   */
   messageId: Schema.String.check(
     Schema.makeFilter(
       (value) => normalizeMessageId(value) !== "" || "a Message-ID that is not blank",
@@ -164,7 +167,7 @@ function parseMailDate(value: string): Date | undefined {
  * topmost `Received:` header (added by the receiving server) when that parses
  * ({@link parseMailDate}), else the `Date:` header. An attached mail (`message/rfc822`) stays one
  * attachment, never unpacked. Fails, naming `source`, when the bytes are no mail, or the mail
- * has no Message-ID or no usable date.
+ * has no usable Message-ID (missing, or blank without its brackets) or no usable date.
  */
 export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake, IntakeReadError> {
   return Effect.gen(function* () {
@@ -184,7 +187,7 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
     const messageId = normalizeMessageId(email.messageId ?? "");
     if (!messageId) {
       return yield* new IntakeReadError({
-        message: `${source}: no Message-ID, so the Intake can't be processed exactly once`,
+        message: `${source}: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once`,
       });
     }
     // Comments first: a `;` inside a trailing comment must not split the header.

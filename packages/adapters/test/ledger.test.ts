@@ -36,7 +36,7 @@ const success = <A, E>(exit: Exit.Exit<A, E>): A => {
 };
 
 /** `program` run with the clock at `millis`. */
-const at = <E>(millis: number, program: Effect.Effect<void, E>) =>
+const at = <A, E>(millis: number, program: Effect.Effect<A, E>) =>
   TestClock.setTime(millis).pipe(Effect.andThen(program), Effect.provide(TestClock.layer()));
 
 describe("IntakeLedger", () => {
@@ -132,17 +132,23 @@ describe("IntakeLedger", () => {
     }
   });
 
-  test("recording an Intake twice fails instead of replacing the first entry", async () => {
+  test("recording an Intake again (a resumed run) keeps the first entry and succeeds", async () => {
     const databasePath = freshDatabase();
     success(
       await withLedger(databasePath, (ledger) =>
-        ledger.record("c@x", [{ index: 0, path: "2026-11/ER/c.pdf" }]),
+        at(
+          Date.UTC(2026, 10, 5, 12, 30),
+          ledger.record("c@x", [{ index: 0, path: "2026-11/ER/c.pdf" }]),
+        ),
       ),
     );
-    const again = await withLedger(databasePath, (ledger) => ledger.record("<c@x>", []));
-    expect(Exit.isFailure(again)).toBe(true);
-    expect(String(again)).toContain("Intake ledger: recording c@x");
+    success(
+      await withLedger(databasePath, (ledger) =>
+        at(Date.UTC(2026, 10, 5, 13, 0), ledger.record("<c@x>", [])),
+      ),
+    );
     expect(success(await withLedger(databasePath, (ledger) => ledger.find("c@x")))).toMatchObject({
+      processedAt: "2026-11-05T12:30:00.000Z",
       documentCount: 1,
     });
   });
@@ -212,4 +218,154 @@ describe("IntakeLedger", () => {
       filings: [{ index: 0, path: "2026-11/ER/b.pdf", fellBack: false }],
     });
   });
+
+  describe("failed runs", () => {
+    const T1 = Date.UTC(2026, 10, 5, 10, 0);
+    const T2 = Date.UTC(2026, 10, 5, 10, 5);
+
+    test("count once per run, bracketed or not, with the last failure's time", async () => {
+      const databasePath = freshDatabase();
+      const record = (id: string, run: string, millis: number) =>
+        withLedger(databasePath, (ledger) => at(millis, ledger.recordFailedRun(id, run)));
+      expect(success(await withLedger(databasePath, (ledger) => ledger.failedRuns("f@x")))).toBe(
+        undefined,
+      );
+      expect(success(await record("f@x", "run-1", T1))).toEqual({ count: 1, ended: false });
+      // The same run again (its step repeated after a restart): still one.
+      expect(success(await record("<f@x>", "run-1", T2))).toEqual({ count: 1, ended: false });
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.failedRuns(" f@x"))),
+      ).toEqual({
+        count: 1,
+        lastFailedAt: "2026-11-05T10:00:00.000Z",
+      });
+      expect(success(await record("f@x", "run-2", T2))).toEqual({ count: 2, ended: false });
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.failedRuns("<f@x>"))),
+      ).toEqual({
+        count: 2,
+        lastFailedAt: "2026-11-05T10:05:00.000Z",
+      });
+    });
+
+    test("ending them: none count any more, but the ending run still knows it ended them", async () => {
+      const databasePath = freshDatabase();
+      success(
+        await withLedger(databasePath, (ledger) =>
+          Effect.gen(function* () {
+            yield* ledger.recordFailedRun("g@x", "run-1");
+            yield* ledger.recordFailedRun("g@x", "run-2");
+            yield* ledger.endFailedRuns("g@x", "run-2");
+          }),
+        ),
+      );
+      expect(success(await withLedger(databasePath, (ledger) => ledger.failedRuns("g@x")))).toBe(
+        undefined,
+      );
+      // run-2's step repeated: it still sees the Intake failed permanently on it.
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("g@x", "run-2"))),
+      ).toEqual({ count: 0, ended: true });
+      // A later run (the mail moved back) starts the count afresh.
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("g@x", "run-3"))),
+      ).toEqual({ count: 1, ended: false });
+    });
+
+    test("ending them without a run keeps none", async () => {
+      const databasePath = freshDatabase();
+      success(
+        await withLedger(databasePath, (ledger) =>
+          ledger.recordFailedRun("h@x", "run-1").pipe(Effect.andThen(ledger.endFailedRuns("h@x"))),
+        ),
+      );
+      expect(
+        success(await withLedger(databasePath, (ledger) => ledger.recordFailedRun("h@x", "run-1"))),
+      ).toEqual({ count: 1, ended: false });
+    });
+
+    test.each(["UPDATE", "DELETE"])(
+      "ending them is one transaction: a failing %s changes nothing",
+      async (failing) => {
+        const databasePath = freshDatabase();
+        success(
+          await withLedger(databasePath, (ledger) =>
+            ledger
+              .recordFailedRun("i@x", "run-1")
+              .pipe(Effect.andThen(ledger.recordFailedRun("i@x", "run-2"))),
+          ),
+        );
+        // One of its statements fails, as a busy database would.
+        const client = createClient({ url: await localDatabaseUrl(databasePath) });
+        const sql = (statement: string) => client.execute(statement);
+        try {
+          await sql(
+            `CREATE TRIGGER fail_step BEFORE ${failing} ON hex_intake_failed_runs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`,
+          );
+          const ending = await withLedger(databasePath, (ledger) =>
+            ledger.endFailedRuns("i@x", "run-2"),
+          );
+          expect(String(ending)).toContain("ending the failed runs of i@x");
+          // Nothing changed: both runs still count, none is ended.
+          expect(
+            success(await withLedger(databasePath, (ledger) => ledger.failedRuns("i@x"))),
+          ).toMatchObject({
+            count: 2,
+          });
+          await sql("DROP TRIGGER fail_step");
+        } finally {
+          client.close();
+        }
+        // Ended now; run-2's step repeated still sees the Intake failed permanently on it.
+        success(await withLedger(databasePath, (ledger) => ledger.endFailedRuns("i@x", "run-2")));
+        expect(
+          success(
+            await withLedger(databasePath, (ledger) => ledger.recordFailedRun("i@x", "run-2")),
+          ),
+        ).toEqual({ count: 0, ended: true });
+      },
+    );
+  });
+
+  test("every pooled connection waits for a lock another process holds instead of failing", async () => {
+    const databasePath = freshDatabase();
+    success(
+      await withLedger(databasePath, (ledger) =>
+        Effect.gen(function* () {
+          // Two reads at once: the client's pool opens a second connection, the one it hands out
+          // next. libsql runs statements synchronously, so only a lock held by another process
+          // shows its busy timeout.
+          yield* Effect.all([ledger.find("<a@x>"), ledger.find("<b@x>")], {
+            concurrency: "unbounded",
+          });
+          yield* Effect.promise(() => lockFor(databasePath, 300));
+          yield* ledger.recordFailedRun("lock@x", "run-1");
+        }),
+      ),
+    );
+    expect(
+      success(await withLedger(databasePath, (ledger) => ledger.failedRuns("lock@x"))),
+    ).toMatchObject({ count: 1 });
+  });
 });
+
+/** Has another process hold an exclusive lock on the database for `millis`, once it holds it. */
+async function lockFor(databasePath: string, millis: number) {
+  const holder = Bun.spawn(
+    [
+      process.execPath,
+      "-e",
+      `const db = new (require("bun:sqlite").Database)(process.argv[1]);
+      db.run("BEGIN EXCLUSIVE"); console.log("locked");
+      Bun.sleepSync(Number(process.argv[2])); db.run("COMMIT");`,
+      databasePath,
+      String(millis),
+    ],
+    { stdout: "pipe", stderr: "inherit" },
+  );
+  const reader = holder.stdout.getReader();
+  const { value } = await reader.read();
+  if (!new TextDecoder().decode(value).includes("locked"))
+    throw new Error("the lock holder failed");
+  reader.releaseLock();
+}

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { isLoopbackHost } from "@hex/adapters";
-import type { SmtpSecurity, SmtpSettings } from "@hex/adapters";
+import { LOOPBACK_ONLY, plaintextRefused } from "@hex/adapters";
+import type { ImapSettings, SmtpSettings } from "@hex/adapters";
 import { CATEGORIES, DEFAULT_CATEGORY } from "@hex/domain";
 import type { Category } from "@hex/domain";
 import { Config, ConfigProvider, Effect, Option, Result, Schema } from "effect";
@@ -41,6 +41,20 @@ const Address = Schema.String.check(
 /** A Forwarding target's name, the key the ledger records its Forwardings under. */
 const TargetName = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/));
 
+/**
+ * The watched folder: not blank, and none of hex's outcome folders (`hex/processed`,
+ * `hex/failed`, with either delimiter, under an `INBOX` namespace or not, in any letter case),
+ * since mail moved there would be watched again.
+ */
+const WatchedFolder = Schema.String.check(
+  Schema.makeFilter((folder) => folder.trim() !== "" || "a folder name that is not blank"),
+  Schema.makeFilter(
+    (folder) =>
+      !/^(inbox[./])?hex[./](processed|failed)$/i.test(folder.trim()) ||
+      "a folder other than hex's outcome folders hex/processed and hex/failed",
+  ),
+);
+
 const ConfigFile = Schema.Struct({
   chat: Schema.Struct({
     /** Mastra model-router id, `provider/model`. */
@@ -73,6 +87,21 @@ const ConfigFile = Schema.Struct({
     Schema.Struct({
       from: Address,
       targets: Schema.Record(TargetName, Schema.Struct({ to: Address, enabled: Schema.Boolean })),
+    }),
+  ),
+  /**
+   * The intake mailbox hex watches over IMAP, its server and login from the environment: the
+   * folder it takes mail from and how long it waits after a look without news before it looks
+   * again. Off when absent.
+   */
+  mailbox: Schema.optionalKey(
+    Schema.Struct({
+      /** The watched folder; INBOX when absent. */
+      folder: Schema.optionalKey(WatchedFolder),
+      /** Seconds to wait after a look without news, 1 to 3600; 60 when absent. */
+      pollSeconds: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3600 })),
+      ),
     }),
   ),
   /** The eval (`bun run eval`): the models it compares; `intake.model` alone when absent. */
@@ -150,16 +179,15 @@ export interface IntakeConfig {
   model: string;
 }
 
-/** The SMTP variables without a default. */
-const REQUIRED_SMTP_VARIABLES = ["HEX_SMTP_HOST", "HEX_SMTP_USER", "HEX_SMTP_PASSWORD"] as const;
-
-const SmtpEnv = Config.all({
-  host: Config.NonEmptyString("HEX_SMTP_HOST"),
-  port: Config.Port("HEX_SMTP_PORT").pipe(Config.withDefault(465)),
-  security: Config.option(Config.Literals(["tls", "starttls", "plain"], "HEX_SMTP_SECURITY")),
-  user: Config.Redacted("HEX_SMTP_USER"),
-  password: Config.Redacted("HEX_SMTP_PASSWORD"),
-});
+/** The variables of a mail server's connection, by prefix (`HEX_SMTP`, `HEX_IMAP`). */
+const mailServerEnv = (prefix: string, tlsPort: number) =>
+  Config.all({
+    host: Config.NonEmptyString(`${prefix}_HOST`),
+    port: Config.Port(`${prefix}_PORT`).pipe(Config.withDefault(tlsPort)),
+    security: Config.option(Config.Literals(["tls", "starttls", "plain"], `${prefix}_SECURITY`)),
+    user: Config.Redacted(`${prefix}_USER`),
+    password: Config.Redacted(`${prefix}_PASSWORD`),
+  });
 
 /**
  * `config` read from `env` through Effect `Config`: the value, or the `ConfigError` saying which
@@ -173,17 +201,22 @@ export function readEnvConfig<A>(
 }
 
 /**
- * The SMTP settings from `env`: `HEX_SMTP_HOST`, `HEX_SMTP_PORT` (465 when unset),
- * `HEX_SMTP_SECURITY` (`tls` on port 465, else `starttls`, when unset; `plain` only for a
- * loopback IP address, see `isLoopbackHost`), `HEX_SMTP_USER` and `HEX_SMTP_PASSWORD`, both
- * redacted. Throws naming the variable, never its value.
+ * A mail server's settings from `env`: `<prefix>_HOST`, `<prefix>_PORT` (`tlsPort` when unset),
+ * `<prefix>_SECURITY` (`tls` on `tlsPort`, else `starttls`, when unset; `plain` only for a
+ * loopback IP address, see `isLoopbackHost`), `<prefix>_USER` and `<prefix>_PASSWORD`, both
+ * redacted. Calls `fail` naming the variable, never its value. IMAP shares SMTP's settings but
+ * for the watched folder.
  */
-function smtpSettings(path: string, env: Env): SmtpSettings {
-  const fail = (problem: string): never => configError(path, `forwarding: ${problem}`);
-  for (const name of REQUIRED_SMTP_VARIABLES) {
+function mailServerSettings(
+  prefix: "HEX_SMTP" | "HEX_IMAP",
+  tlsPort: number,
+  env: Env,
+  fail: (problem: string) => never,
+): SmtpSettings {
+  for (const name of ["HOST", "USER", "PASSWORD"].map((suffix) => `${prefix}_${suffix}`)) {
     if (!env[name]) fail(`environment variable ${name} is not set`);
   }
-  const result = readEnvConfig(SmtpEnv, env);
+  const result = readEnvConfig(mailServerEnv(prefix, tlsPort), env);
   if (Result.isFailure(result)) {
     // E.g. `Expected a value between 1 and 65535 at ["HEX_SMTP_PORT"]`: the variable, never a value.
     return fail(
@@ -191,15 +224,22 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
     );
   }
   const { security: chosen, ...settings } = result.success;
-  const security: SmtpSecurity = Option.getOrElse(chosen, () =>
-    settings.port === 465 ? "tls" : "starttls",
+  const security = Option.getOrElse(chosen, () =>
+    settings.port === tlsPort ? ("tls" as const) : ("starttls" as const),
   );
-  if (security === "plain" && !isLoopbackHost(settings.host)) {
+  if (plaintextRefused(security, settings.host)) {
     fail(
-      `HEX_SMTP_SECURITY=plain is only allowed for a loopback IP address (127.x.x.x or ::1; use 127.0.0.1, not a name such as localhost); use tls or starttls for ${settings.host}`,
+      `${prefix}_SECURITY=plain is only allowed for ${LOOPBACK_ONLY}; use tls or starttls for ${settings.host}`,
     );
   }
   return { ...settings, security };
+}
+
+/** The SMTP settings from `env` ({@link mailServerSettings}, port 465 for TLS). */
+function smtpSettings(path: string, env: Env): SmtpSettings {
+  return mailServerSettings("HEX_SMTP", 465, env, (problem) =>
+    configError(path, `forwarding: ${problem}`),
+  );
 }
 
 /**
@@ -254,4 +294,42 @@ export async function loadForwardingConfig(
     .map(([name, { to }]) => ({ name, to }));
   if (targets.length === 0) return undefined;
   return { from: forwarding.from, targets, smtp: smtpSettings(path, env) };
+}
+
+/** The intake mailbox: the IMAP settings (with the watched folder) and the poll interval. */
+export interface MailboxConfig {
+  imap: ImapSettings;
+  /** Milliseconds to wait after a look at the watched folder without news before looking again. */
+  pollMs: number;
+}
+
+/** The watched folder when the config names none. */
+const DEFAULT_MAILBOX_FOLDER = "INBOX";
+/** Seconds to wait after a look without news when the config says nothing. */
+const DEFAULT_POLL_SECONDS = 60;
+
+/**
+ * The intake mailbox settings from the hex config file at `path`: undefined (no watcher) without
+ * a file or without a `mailbox` section, so no IMAP setting is needed then. Otherwise the watched
+ * folder (`INBOX` when unset), the wait after a look without news (60 s when unset) and the IMAP
+ * server from `env`:
+ * `HEX_IMAP_HOST`, `HEX_IMAP_PORT` (993 when unset), `HEX_IMAP_SECURITY` (`tls` on port 993,
+ * else `starttls`, when unset; `plain` only for a loopback IP address), `HEX_IMAP_USER` and
+ * `HEX_IMAP_PASSWORD`, both redacted. Fails like {@link readConfigFile} on a file it can't use,
+ * and on IMAP settings it can't use, naming the variable, never its value.
+ */
+export async function loadMailboxConfig(
+  path: string | undefined,
+  env: Env,
+): Promise<MailboxConfig | undefined> {
+  if (path === undefined) return undefined;
+  const { mailbox } = await readConfigFile(path);
+  if (!mailbox) return undefined;
+  const server = mailServerSettings("HEX_IMAP", 993, env, (problem) =>
+    configError(path, `mailbox: ${problem}`),
+  );
+  return {
+    imap: { ...server, folder: mailbox.folder ?? DEFAULT_MAILBOX_FOLDER },
+    pollMs: (mailbox.pollSeconds ?? DEFAULT_POLL_SECONDS) * 1000,
+  };
 }
