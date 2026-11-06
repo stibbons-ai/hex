@@ -2,6 +2,7 @@ import { IntakeLedger, Mailbox, MailboxError, messageOf, readEml } from "@hex/ad
 import type { Intake, MailOutcome } from "@hex/adapters";
 import { normalizeMessageId } from "@hex/domain";
 import { Cause, Effect, Exit, Fiber, Option, Schema } from "effect";
+import { HeldBack } from "./held-back";
 import type { IntakeResult, IntakeRuntime } from "./intake-workflow";
 import {
   MAX_FAILED_RUNS,
@@ -17,8 +18,6 @@ import {
   retryDelayMs,
 } from "./mail-fate";
 import type { DescribeOptions, FailedRun, MailFate, MoveFate } from "./mail-fate";
-import { reportFateOf } from "./report-fate";
-import type { ReportFate } from "./report-fate";
 
 /** One run of the Intake workflow, as the watcher starts it. */
 interface IntakeRun {
@@ -214,7 +213,7 @@ export function watchMailbox({
     describe: (settled: MoveFate<To>, options: DescribeOptions) => string | undefined,
   ) =>
     Effect.gen(function* () {
-      heldBack.delete(messageId);
+      (yield* HeldBack).delete(messageId);
       const [settled, ending] = yield* settle(messageId, uid, fate);
       const afterFailedMove = fate.status === "not-moved" && settled.status === "not-in-mailbox";
       const line = describe(settled, { afterFailedMove });
@@ -234,40 +233,35 @@ export function watchMailbox({
       );
     });
 
-  /**
-   * Intakes whose failed runs the ledger couldn't count, by Message-ID: how many it missed and
-   * when the last one failed. Its effective failed runs, the ones every decision goes by, are
-   * the ledger's plus `count`. Dropped once processed or failed permanently, or after a full
-   * look that didn't list its Message-ID.
-   */
-  const heldBack = new Map<string, { count: number; lastAt: number }>();
   /** Intakes whose effective failed runs reached {@link MAX_FAILED_RUNS}: not run until hex restarts. */
   const stoppedUntilRestart = new Set<string>();
 
   /** The Intake `messageId` runs no more until hex restarts, after `what`, logged as an error. */
-  const stopUntilRestart = (messageId: string, what: string) => {
-    heldBack.delete(messageId);
-    stoppedUntilRestart.add(messageId);
-    log.error(
-      `hex: Intake ${messageId}: ${what}, but the ledger can't record failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it`,
-    );
-  };
+  const stopUntilRestart = (messageId: string, what: string) =>
+    HeldBack.useSync((heldBack) => {
+      heldBack.delete(messageId);
+      stoppedUntilRestart.add(messageId);
+      log.error(
+        `hex: Intake ${messageId}: ${what}, but the ledger can't record failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it`,
+      );
+    });
 
   /**
    * The warning after a failed run the ledger counted (`counted` its count now) and kept for a
    * retry, for an Intake with failed runs counted in memory too: by its effective count, at the
    * limit failed permanently by the next look. `undefined` without any in memory.
    */
-  const heldLine = (messageId: string, counted: number) => {
-    const held = heldBack.get(messageId);
-    if (held === undefined) return undefined;
-    const failedRuns = counted + held.count;
-    const next =
-      failedRuns >= MAX_FAILED_RUNS
-        ? "the mailbox watcher fails it permanently at its next look"
-        : `any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
-    return `hex: Intake ${messageId}: failed run ${failedRuns} of ${MAX_FAILED_RUNS}, ${held.count} of them counted in memory: ${next}`;
-  };
+  const heldLine = (messageId: string, counted: number) =>
+    HeldBack.useSync((heldBack) => {
+      const held = heldBack.get(messageId);
+      if (held === undefined) return undefined;
+      const failedRuns = counted + held.count;
+      const next =
+        failedRuns >= MAX_FAILED_RUNS
+          ? "the mailbox watcher fails it permanently at its next look"
+          : `any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
+      return `hex: Intake ${messageId}: failed run ${failedRuns} of ${MAX_FAILED_RUNS}, ${held.count} of them counted in memory: ${next}`;
+    });
 
   /**
    * The failed run `runId` recorded, the mail at `uid` settled, the consequence warned of. A
@@ -281,7 +275,7 @@ export function watchMailbox({
         `hex: Intake ${messageId}: ${describeFailedRun({ ...failed, mail }, options)}`;
       // Kept for a retry, or moved to (or failing to move to) `hex/failed`: a warning either way.
       if (failed.mail.status === "kept-for-retry") {
-        return log.warn(heldLine(messageId, failed.failedRuns) ?? line(failed.mail));
+        return log.warn((yield* heldLine(messageId, failed.failedRuns)) ?? line(failed.mail));
       }
       if (failed.mail.status === "not-moved") {
         log.warn(line(failed.mail, { retryPending: true }));
@@ -301,6 +295,7 @@ export function watchMailbox({
    */
   const holdBack = (messageId: string, message: string) =>
     Effect.gen(function* () {
+      const heldBack = yield* HeldBack;
       const read = yield* Effect.result(IntakeLedger.use((ledger) => ledger.failedRuns(messageId)));
       const counted = read._tag === "Success" ? (read.success?.count ?? 0) : 0;
       if (counted >= MAX_FAILED_RUNS) {
@@ -313,7 +308,7 @@ export function watchMailbox({
       const unreadable =
         read._tag === "Failure" ? ` (its ledger count unreadable: ${read.failure.message})` : "";
       const uncounted = `its failed run could not be counted (${message}); failed run ${failedRuns} of ${MAX_FAILED_RUNS}${unreadable}`;
-      if (failedRuns >= MAX_FAILED_RUNS) return stopUntilRestart(messageId, uncounted);
+      if (failedRuns >= MAX_FAILED_RUNS) return yield* stopUntilRestart(messageId, uncounted);
       heldBack.set(messageId, { count, lastAt: now() });
       log.error(
         `hex: Intake ${messageId}: ${uncounted}, held back ${retryDelayMs(failedRuns) / 60_000} min in memory`,
@@ -342,13 +337,6 @@ export function watchMailbox({
       );
     });
 
-  /** Warns when the run's Intake report could not be posted; the Intake's outcome stands. */
-  const warnUnreported = (messageId: string, report: ReportFate | undefined) => {
-    if (report?.status === "not-sent") {
-      log.warn(`hex: Intake ${messageId}: its Intake report was not posted: ${report.reason}`);
-    }
-  };
-
   /** Runs the workflow on `intake`, the mail at `uid`, and logs what came of it. */
   const process = (intake: Intake, uid: number) =>
     Effect.gen(function* () {
@@ -370,36 +358,31 @@ export function watchMailbox({
       }
       const result = started.success;
       if (result.status === "success" && "result" in result) {
-        const { status, mail, report } = result.result;
-        // After the settle, so a logger that throws can't keep the mail from it; as a finalizer,
-        // so a settle that ends the look still logs the report it didn't post.
+        const { status, mail } = result.result;
         yield* settleLogged(
           messageId,
           uid,
           mail,
           (settled, options) =>
             `hex: Intake ${messageId}: ${status}; ${describeMove(settled, options)}`,
-        ).pipe(Effect.ensuring(Effect.sync(() => warnUnreported(messageId, report))));
+        );
         return;
       }
       // Mastra's failed result carries the step's error as it serialised it, `message` included.
       const error = "error" in result ? result.error : undefined;
       const reason = error ? error.message : `the run ended ${result.status}`;
       log.warn(`hex: Intake ${messageId}: the run failed: ${reason}`);
-      // Before the settle: the unguarded line above already precedes it, so deferring this one
-      // would not keep a throwing logger from the settle.
-      warnUnreported(messageId, reportFateOf(error));
       const fate = mailFateOf(error);
       if (fate) {
         if (fate.status === "kept-for-retry") {
           // The run's line counted the ledger's failed runs only; with some in memory too, the
           // effective count gets a line of its own (none when the ledger can't be read now).
-          if (heldBack.has(messageId)) {
+          if ((yield* HeldBack).has(messageId)) {
             const failed = yield* Effect.option(
               IntakeLedger.use((ledger) => ledger.failedRuns(messageId)),
             );
             const line = Option.isSome(failed)
-              ? heldLine(messageId, failed.value?.count ?? 0)
+              ? yield* heldLine(messageId, failed.value?.count ?? 0)
               : undefined;
             if (line !== undefined) log.warn(line);
           }
@@ -423,6 +406,7 @@ export function watchMailbox({
   const scan = Effect.gen(function* () {
     const mailbox = yield* Mailbox;
     const ledger = yield* IntakeLedger;
+    const heldBack = yield* HeldBack;
     const mails = yield* mailbox.list;
     if (mails.length === 0) {
       heldBack.clear();
@@ -483,7 +467,7 @@ export function watchMailbox({
         const ended = yield* Effect.result(failPermanently(messageId));
         if (ended._tag === "Failure") {
           if (inMemory === 0) return yield* Effect.fail(ended.failure);
-          stopUntilRestart(
+          yield* stopUntilRestart(
             messageId,
             `failing it permanently failed (${ended.failure.message}); failed run ${failedRuns} of ${MAX_FAILED_RUNS}, ${inMemory} of them counted in memory`,
           );

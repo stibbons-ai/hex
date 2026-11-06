@@ -1,5 +1,5 @@
-// What becomes of an Intake run's Intake report: shared by the Intake workflow, which posts it,
-// and the mailbox watcher, which warns when it wasn't posted.
+// What becomes of an Intake run's Intake report: posted by the Intake workflow, its fate in the
+// run's result.
 import { messageOf } from "@hex/adapters";
 import type { Intake } from "@hex/adapters";
 import { normalizeMessageId, renderIntakeReport } from "@hex/domain";
@@ -19,17 +19,30 @@ export const ReportFate = Schema.Union([
 ]);
 export type ReportFate = typeof ReportFate.Type;
 
-/** A failed run's consequence for its Intake, as the Intake report tells it. */
-export function reportConsequence({ failedRuns, mail }: FailedRun): ReportConsequence {
-  if (mail.status === "kept-for-retry") {
-    return {
-      status: "retry",
-      failedRuns,
-      maxFailedRuns: MAX_FAILED_RUNS,
-      retryInMinutes: retryDelayMs(failedRuns) / 60_000,
-    };
+/**
+ * A failed run's consequence for its Intake, as the Intake report tells it: by its effective
+ * failed runs, the ledger's plus `inMemory` (those the mailbox watcher held back in memory, the
+ * ledger failing to count them), the count the watcher retries and fails it by. Kept for a retry
+ * by the ledger but at the limit by that count, the Intake fails permanently at the watcher's next
+ * look.
+ */
+export function reportConsequence(
+  { failedRuns, mail }: FailedRun,
+  inMemory: number,
+): ReportConsequence {
+  if (mail.status !== "kept-for-retry") {
+    return { status: "failed-permanently", failedRuns, maxFailedRuns: MAX_FAILED_RUNS, mail };
   }
-  return { status: "failed-permanently", failedRuns, maxFailedRuns: MAX_FAILED_RUNS, mail };
+  const effective = failedRuns + inMemory;
+  if (effective >= MAX_FAILED_RUNS) {
+    return { status: "failing-permanently", failedRuns: effective, maxFailedRuns: MAX_FAILED_RUNS };
+  }
+  return {
+    status: "retry",
+    failedRuns: effective,
+    maxFailedRuns: MAX_FAILED_RUNS,
+    retryInMinutes: retryDelayMs(effective) / 60_000,
+  };
 }
 
 /**

@@ -543,9 +543,9 @@ folder or the active runs or to wait for news (all at warn, naming the mail when
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
 is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too, as is an
-Intake report that couldn't be posted (`hex: Intake <id>: its Intake report was not posted:
-<reason>`). For a run of
+consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake
+report that couldn't be posted is warned of by the run that posted it, also one resumed at boot
+(`hex: Intake <id>: its Intake report was not posted: <reason>`). For a run of
 the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
 by UID, and after one that went through, the mail the watcher looked at goes too if still there
 (a copy whose Message-ID the server reads differently). When the retries fail too (or the run
@@ -664,13 +664,19 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   Signal `user` that isn't an ACI. Slack's member ID form is not checked: a wrong one fails at the
   first post, with a warning. The
   report names the Intake by subject and sender, counts the Documents per `YYYY-MM/<Category>`
-  folder, names each one filed by the received date, lists the Forwarding targets, and for a failed
-  run each failed branch, what was done nonetheless and what comes next (`failed run n of 5`, or
-  failed permanently with the mail in `hex/failed`). Text from the mail goes in code spans,
+  folder (at most 10 folders, then `and N more in M folders`), names each one filed by the
+  received date (at most 10, then `and N more`), lists the Forwarding targets, and for a failed
+  run each failed branch, what was done nonetheless and what comes next (`failed run n of 5`,
+  counted as the mailbox watcher does, with the failed runs it held back in memory; at 5 failed
+  permanently with the mail in `hex/failed`, or failing so at the watcher's next look). What
+  was done includes a Forwarding the server accepted but the ledger couldn't record, and a
+  Document written to the Outbox whose record failed (`Filed, but recording it failed, …`: a
+  run again files it again). When earlier runs' Filings and Forwardings can't be read, the report
+  says so and lists this run's alone. So bounded, a report stays a few thousand characters,
+  within the platform's message limit. Text from the mail goes in code spans,
   escaped for Slack, so it forms no mention or link. A report that can't be posted is logged as a
   warning and changes nothing about the Intake; one the platform hasn't confirmed within 30
-  seconds counts as not posted, though it may still arrive. A run whose result Mastra loses after
-  every step ran is settled by the watcher as processed without that warning. No report goes out
+  seconds counts as not posted, though it may still arrive. No report goes out
   for an Intake
   already processed, for a run that ends before step 7 of the [Intake workflow](#intake-dev-command)
   (an unreadable ledger, a defect), or for mail that never becomes an Intake (an unreadable

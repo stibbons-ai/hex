@@ -56,6 +56,16 @@ export type ReportConsequence =
       readonly maxFailedRuns: number;
       readonly mail: ReportFailedMail;
     }
+  /**
+   * Runs left by the ledger's count, none by the effective one (failed runs the mailbox watcher
+   * counted in memory, the ledger failing, included): the watcher fails the Intake permanently at
+   * its next look of the mailbox, its mail going to `hex/failed` then.
+   */
+  | {
+      readonly status: "failing-permanently";
+      readonly failedRuns: number;
+      readonly maxFailedRuns: number;
+    }
   /** The failed run could not be recorded (counted, or its Intake failed permanently). */
   | {
       readonly status: "uncounted";
@@ -73,11 +83,21 @@ export interface IntakeReportInput {
   };
   /**
    * Every Filing of the Intake so far, also those an earlier run made (only this run's when the
-   * ledger can't be read).
+   * ledger can't be read: then `earlierRunsUnreadable` says so).
    */
   readonly filings: readonly ReportFiling[];
-  /** The targets that have the Documents. */
+  /**
+   * The Documents this run wrote to the Outbox but couldn't record in the ledger: running the
+   * Intake again files them again.
+   */
+  readonly unrecordedFilings?: readonly ReportFiling[] | undefined;
+  /** The targets that have the Documents (only this run's when the ledger can't be read). */
   readonly forwardings: readonly ReportForwarding[];
+  /**
+   * Why earlier runs' Filings and Forwardings could not be read, if they couldn't: the report
+   * then lists this run's alone. Untrusted (from a server), quoted.
+   */
+  readonly earlierRunsUnreadable?: string | undefined;
   readonly outcome:
     | { readonly status: "processed" }
     | {
@@ -89,6 +109,9 @@ export interface IntakeReportInput {
 
 /** How long a quoted value may get before it is cut. */
 const MAX_QUOTED = 200;
+
+/** How many folders, and how many file names, a line lists before it counts the rest. */
+const MAX_LISTED = 10;
 
 /**
  * Line breaks and other control characters, and format characters: the bidi controls that can
@@ -127,7 +150,7 @@ function failedMailLine(mail: ReportFailedMail): string {
     case "moved":
       return "its mail was moved to hex/failed";
     case "not-in-mailbox":
-      return "no mail of it was in the watched folder";
+      return "its mail was not found by its Message-ID in the watched folder; see the hex log";
     case "not-moved":
       return `moving its mail to hex/failed failed (${quote(mail.reason)}); see the hex log`;
   }
@@ -139,9 +162,18 @@ function splitPath(path: string): { folder: string; fileName: string } {
   return { folder: path.slice(0, slash), fileName: path.slice(slash + 1) };
 }
 
+/** `items` joined by commas, at most {@link MAX_LISTED} of them, then "and N more". */
+function listBounded(items: readonly string[]): string {
+  const listed = items.slice(0, MAX_LISTED);
+  const rest = items.length - listed.length;
+  return [...listed, ...(rest > 0 ? [`and ${rest} more`] : [])].join(", ");
+}
+
 /**
  * The Filings: how many went into each folder, in order of first appearance, e.g. "3 Documents
- * filed under 2026-10/ER, 1 under 2026-09/ER"; then those filed by the received date, each named.
+ * filed under 2026-10/ER, 1 under 2026-09/ER" (at most {@link MAX_LISTED} folders, then "and N
+ * more in M folders"); then those filed by the received date, each named (at most
+ * {@link MAX_LISTED}, then "and N more").
  */
 function filingLines(filings: readonly ReportFiling[]): string[] {
   if (filings.length === 0) return [];
@@ -150,21 +182,41 @@ function filingLines(filings: readonly ReportFiling[]): string[] {
     const { folder } = splitPath(path);
     counts.set(folder, (counts.get(folder) ?? 0) + 1);
   }
-  const lines = [
-    [...counts]
-      .map(([folder, count], position) =>
-        position === 0
-          ? `${count === 1 ? "1 Document" : `${count} Documents`} filed under ${folder}`
-          : `${count} under ${folder}`,
-      )
-      .join(", "),
-  ];
+  const folders = [...counts];
+  const listed = folders
+    .slice(0, MAX_LISTED)
+    .map(([folder, count], position) =>
+      position === 0
+        ? `${count === 1 ? "1 Document" : `${count} Documents`} filed under ${folder}`
+        : `${count} under ${folder}`,
+    );
+  const rest = folders.slice(MAX_LISTED);
+  if (rest.length > 0) {
+    const more = rest.reduce((sum, [, count]) => sum + count, 0);
+    listed.push(`and ${more} more in ${rest.length === 1 ? "1 folder" : `${rest.length} folders`}`);
+  }
+  const lines = [listed.join(", ")];
   const fellBack = filings.filter((filing) => filing.fellBack);
   if (fellBack.length > 0) {
-    const names = fellBack.map(({ path }) => quote(splitPath(path).fileName)).join(", ");
+    const names = listBounded(fellBack.map(({ path }) => quote(splitPath(path).fileName)));
     lines.push(`${fellBack.length} without a detected date, filed by received date: ${names}`);
   }
   return lines;
+}
+
+/**
+ * The Documents written to the Outbox but not recorded, each by its folder and name (at most
+ * {@link MAX_LISTED}, then "and N more").
+ */
+function unrecordedLines(filings: readonly ReportFiling[]): string[] {
+  if (filings.length === 0) return [];
+  const paths = filings.map(({ path }) => {
+    const { folder, fileName } = splitPath(path);
+    return `${folder}/${quote(fileName)}`;
+  });
+  return [
+    `Filed, but recording it failed, so running this Intake again files it again: ${listBounded(paths)}`,
+  ];
 }
 
 /** The targets that have the Documents, e.g. "Forwarded to sevdesk, paperless (earlier run)". */
@@ -184,6 +236,8 @@ function consequenceLine(consequence: ReportConsequence): string {
       const { failedRuns, maxFailedRuns, mail } = consequence;
       return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${failedMailLine(mail)}.`;
     }
+    case "failing-permanently":
+      return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.`;
     case "uncounted":
       return `Recording the failed run failed (${quote(consequence.reason)}); see the hex log.`;
   }
@@ -193,27 +247,50 @@ function consequenceLine(consequence: ReportConsequence): string {
  * The Intake report for one run, as plain text: the Intake by its subject and sender (else its
  * Message-ID), then what was filed and where, each Document filed by the received date named,
  * and the targets forwarded to. A failed run is marked FAILED, names each failed branch, what was
- * done nonetheless, and what comes next: a retry, or the Intake failed permanently. Every value
- * from the mail or a server is quoted as a code span (see {@link quote}).
+ * done nonetheless (a Document written but not recorded among it), and what comes next: a retry,
+ * or the Intake failed permanently. Earlier runs' work that could not be read is said so, never
+ * told as nothing done. Every value from the mail or a server is quoted as a code span (see
+ * {@link quote}).
+ *
+ * The report stays short whatever the Intake: each quoted value is cut at {@link MAX_QUOTED}
+ * characters, each list at {@link MAX_LISTED} entries, and the failure and Forwarding lines grow
+ * only with the configured targets; with a handful of targets it stays within a few thousand
+ * characters, far below a chat platform's message limit, so its last line, the consequence, is
+ * never cut.
  */
 export function renderIntakeReport({
   intake,
   filings,
+  unrecordedFilings = [],
   forwardings,
+  earlierRunsUnreadable,
   outcome,
 }: IntakeReportInput): string {
-  const done = [...filingLines(filings), ...forwardingLines(forwardings)];
+  const done = [
+    ...filingLines(filings),
+    ...unrecordedLines(unrecordedFilings),
+    ...forwardingLines(forwardings),
+  ];
+  const unread =
+    earlierRunsUnreadable === undefined
+      ? []
+      : [
+          `${done.length === 0 ? "This run filed and forwarded nothing; earlier" : "Earlier"} runs' Filings and Forwardings could not be read (${quote(earlierRunsUnreadable)}), so they are not listed.`,
+        ];
   if (outcome.status === "processed") {
     return [
       `Intake processed: ${identify(intake)}`,
-      ...(filings.length === 0 ? ["No Documents; nothing filed."] : []),
+      ...(filings.length === 0 && unread.length === 0 ? ["No Documents; nothing filed."] : []),
       ...done,
+      ...unread,
     ].join("\n");
   }
+  const nothingDone = unread.length === 0 ? ["Nothing filed or forwarded."] : [];
   return [
     `Intake FAILED: ${identify(intake)}`,
     ...outcome.failures.map(({ branch, reason }) => `Failed: ${branch}: ${quote(reason)}`),
-    ...(done.length === 0 ? ["Nothing filed or forwarded."] : ["Done nonetheless:", ...done]),
+    ...(done.length === 0 ? nothingDone : ["Done nonetheless:", ...done]),
+    ...unread,
     consequenceLine(outcome.consequence),
   ].join("\n");
 }

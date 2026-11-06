@@ -27,6 +27,7 @@ import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
 import { closeInOrder } from "./close";
+import { HeldBack, heldBackLayer } from "./held-back";
 import type { DataPaths } from "./paths";
 import { mainChannelOff } from "./main-channel";
 import type { MainChannel } from "./main-channel";
@@ -125,16 +126,25 @@ const RunFiling = Schema.Struct({ ...Filing.fields, fellBack: Schema.Boolean });
 export type RunFiling = typeof RunFiling.Type;
 /**
  * This run's Filings, each in the ledger as soon as it was made, and, when the Filing branch
- * failed, why (the Filings made before the failure stay).
+ * failed, why (the Filings made before the failure stay), and the Filing it failed to record, if
+ * the Document was written to the Outbox before recording it failed.
  */
 const Filed = Schema.Struct({
   filings: Schema.Array(RunFiling),
   failure: Schema.optionalKey(Schema.String),
+  unrecorded: Schema.optionalKey(RunFiling),
 });
 /** The Intake recorded as processed, or why the run failed (each failed branch). */
 const Recorded = Schema.Union([IntakeOutcome, Schema.Struct({ failure: Schema.String })]);
 
-type IntakeServices = Outbox | IntakeLedger | DateExtractor | Mailer | Mailbox | MainChannel;
+type IntakeServices =
+  | Outbox
+  | IntakeLedger
+  | DateExtractor
+  | Mailer
+  | Mailbox
+  | MainChannel
+  | HeldBack;
 
 /** The services the workflow's steps run on, in one shared runtime (ADR 0002). */
 export type IntakeRuntime = ManagedRuntime.ManagedRuntime<
@@ -200,8 +210,14 @@ export function createIntakeRuntime(
       mailer,
       mainChannel,
       mailbox,
+      heldBackLayer,
     ),
   );
+}
+
+/** Where the workflow warns of an Intake report it could not post. */
+export interface IntakeLog {
+  warn(message: string): void;
 }
 
 export interface IntakeWorkflowOptions {
@@ -210,6 +226,8 @@ export interface IntakeWorkflowOptions {
   category: Category;
   /** Absent or without targets: Forwarding is off. */
   forwarding?: IntakeForwarding | undefined;
+  /** The logger of the Mastra running the workflow when absent, the mailbox watcher's too. */
+  log?: IntakeLog | undefined;
 }
 
 /** The subject of a forwarded mail when the Intake had none. */
@@ -284,13 +302,41 @@ function failedBranches(
   ];
 }
 
-/** The targets that have the Intake's Documents, by this run or an earlier one. */
+/** The targets that have the Intake's Documents, by this run (sent, recorded or not) or an earlier one. */
 const reportedForwardings = (attempts: readonly ForwardingAttempt[]): ReportForwarding[] =>
   attempts.flatMap(({ target, status }) =>
-    status === "forwarded" || status === "forwarded-earlier"
-      ? [{ target, earlier: status === "forwarded-earlier" }]
-      : [],
+    status === "failed" ? [] : [{ target, earlier: status === "forwarded-earlier" }],
   );
+
+/**
+ * This run's attempts in configured order, then every other target the ledger recorded as
+ * `forwarded-earlier` (e.g. a target disabled since an earlier run forwarded to it).
+ */
+function withEarlierForwardings(
+  attempts: readonly ForwardingAttempt[],
+  recorded: readonly { readonly target: string }[],
+): ForwardingAttempt[] {
+  const attempted = new Set(attempts.map(({ target }) => target));
+  return [
+    ...attempts,
+    ...recorded
+      .filter(({ target }) => !attempted.has(target))
+      .map(({ target }) => ({ target, status: "forwarded-earlier" as const })),
+  ];
+}
+
+/**
+ * Warns on `log` when the run's Intake report wasn't posted (`report`); a logger that throws
+ * changes nothing: the Intake's outcome stands.
+ */
+function warnUnposted(log: IntakeLog, messageId: string, report: ReportFate | undefined) {
+  if (report?.status !== "not-sent") return;
+  try {
+    log.warn(`hex: Intake ${messageId}: its Intake report was not posted: ${report.reason}`);
+  } catch {
+    // A logger that fails here has no caller to tell.
+  }
+}
 
 /** Filings as the Intake report tells them, from the ledger or this run. */
 const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
@@ -314,7 +360,9 @@ const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
  * `hex/failed`), then posts its Intake report, saying what comes next. No copy in the folder
  * moves nothing; a move that fails is reported in the result, the outcome standing. So is a report
  * that can't be posted: in the result's `report`, or for a failed run in its
- * {@link IntakeRunError}'s `report`; an Intake already processed gets none.
+ * {@link IntakeRunError}'s `report`, and warned of on `log`; an Intake already processed gets
+ * none. A failed run's report counts its failed runs as the mailbox watcher does: the ledger's
+ * plus those the watcher held back in memory ({@link HeldBack}).
  *
  * Forwarding per target and Filing (date extraction, then Filing) are branches: each is attempted
  * on every run even when another failed, and recorded in the ledger as it succeeds (a Forwarding
@@ -332,7 +380,12 @@ const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
  * no Filings. Every ledger call takes the Intake's
  * Message-ID as given (the ledger normalises it). Each step decodes its own output.
  */
-export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWorkflowOptions) {
+export function createIntakeWorkflow({
+  runtime,
+  category,
+  forwarding,
+  log,
+}: IntakeWorkflowOptions) {
   /** Runs `program` on the services, then decodes its result as the step's output. */
   const run = <A, I>(
     schema: Schema.Codec<A, I>,
@@ -498,13 +551,19 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           const outbox = yield* Outbox;
           // This run's Filings, also those made before a failure.
           const filings: RunFiling[] = [];
+          // The Filing whose Document went to the Outbox but whose record failed, if one did.
+          let unrecorded: RunFiling | undefined;
           return yield* Effect.forEach(
             inputData.documents,
             ({ index, fileName, documentDate }) => {
               const { folder, fellBack } = planFiling(documentDate, received, category);
               return outbox.file(folder, fileName, contentOf(intake, index)).pipe(
                 Effect.map((path) => ({ index, path, fellBack })),
-                Effect.tap((filing) => ledger.recordFiling(intake.messageId, filing)),
+                Effect.tap((filing) =>
+                  ledger
+                    .recordFiling(intake.messageId, filing)
+                    .pipe(Effect.tapError(() => Effect.sync(() => (unrecorded = filing)))),
+                ),
                 Effect.map((filing) => filings.push(filing)),
               );
             },
@@ -512,7 +571,11 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           ).pipe(
             Effect.match({
               onSuccess: () => ({ filings }),
-              onFailure: ({ message }) => ({ filings, failure: message }),
+              onFailure: ({ message }) => ({
+                filings,
+                failure: message,
+                ...(unrecorded && { unrecorded }),
+              }),
             }),
           );
         }),
@@ -540,19 +603,11 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           // Every branch as recorded, this run's and earlier runs'.
           const { filings, forwardings } = yield* ledger.branches(rawMessageId);
           yield* ledger.record(rawMessageId, filings);
-          // This run's targets in configured order, then any other recorded one (e.g. a target
-          // disabled since an earlier run forwarded to it).
-          const attempted = new Set(attempts.map(({ target }) => target));
           return {
             messageId: normalizeMessageId(rawMessageId),
             status: "processed",
             filings,
-            forwardings: [
-              ...attempts,
-              ...forwardings
-                .filter(({ target }) => !attempted.has(target))
-                .map(({ target }) => ({ target, status: "forwarded-earlier" })),
-            ],
+            forwardings: withEarlierForwardings(attempts, forwardings),
           };
         }),
       );
@@ -564,9 +619,10 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
     id: "move-mail",
     inputSchema: toMastraSchema(Recorded),
     outputSchema: toMastraSchema(IntakeResult),
-    execute: async ({ inputData, getInitData, getStepResult, runId }) => {
+    execute: async ({ inputData, getInitData, getStepResult, runId, mastra }) => {
       const intake = getInitData<Intake>();
       const { messageId } = intake;
+      const logger = log ?? mastra.getLogger();
       if ("failure" in inputData) {
         const attempts = getStepResult(forward).forwardings;
         const filed = getStepResult(file);
@@ -575,11 +631,18 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
         const { text, mail, report } = await runtime.runPromise(
           Effect.gen(function* () {
             const counted = yield* recordFailedRun(messageId, runId).pipe(
-              Effect.map((failed) => ({
-                text: describeFailedRun(failed, { retryPending: true }),
-                mail: failed.mail,
-                consequence: reportConsequence(failed),
-              })),
+              Effect.flatMap((failed) =>
+                // By the effective count the mailbox watcher goes by: failed runs it held back
+                // in memory, the ledger failing, count too.
+                HeldBack.useSync((heldBack) => ({
+                  text: describeFailedRun(failed, { retryPending: true }),
+                  mail: failed.mail,
+                  consequence: reportConsequence(
+                    failed,
+                    heldBack.get(normalizeMessageId(messageId))?.count ?? 0,
+                  ),
+                })),
+              ),
               Effect.catchTag("LedgerError", ({ message }) =>
                 Effect.succeed({
                   text: `counting the failed run failed: ${message}`,
@@ -588,14 +651,26 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
                 }),
               ),
             );
-            // Every Filing so far, also an earlier run's; this run's alone if the ledger fails.
-            const filings = yield* IntakeLedger.use((ledger) => ledger.branches(messageId)).pipe(
-              Effect.map((branches) => reportedFilings(branches.filings)),
-              Effect.catchTag("LedgerError", () => Effect.succeed(reportedFilings(filed.filings))),
+            // Every Filing and Forwarding so far, also an earlier run's; this run's alone, said
+            // so, if the ledger fails.
+            const done = yield* IntakeLedger.use((ledger) => ledger.branches(messageId)).pipe(
+              Effect.map((branches) => ({
+                filings: reportedFilings(branches.filings),
+                forwardings: reportedForwardings(
+                  withEarlierForwardings(attempts, branches.forwardings),
+                ),
+              })),
+              Effect.catchTag("LedgerError", ({ message }) =>
+                Effect.succeed({
+                  filings: reportedFilings(filed.filings),
+                  forwardings: reportedForwardings(attempts),
+                  earlierRunsUnreadable: message,
+                }),
+              ),
             );
             const report = yield* postReport(intake, {
-              filings,
-              forwardings: reportedForwardings(attempts),
+              ...done,
+              unrecordedFilings: reportedFilings(filed.unrecorded ? [filed.unrecorded] : []),
               outcome: {
                 status: "failed",
                 failures: failedBranches(attempts, filed),
@@ -605,9 +680,10 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
             return { ...counted, report };
           }),
         );
+        warnUnposted(logger, normalizeMessageId(messageId), report);
         throw Object.assign(new Error(`${inputData.failure}; ${text}`), { mail, report });
       }
-      return run(
+      const result = await run(
         IntakeResult,
         Effect.gen(function* () {
           // Spec order: the Intake report, then the IMAP move. A run resumed in this step posts
@@ -621,6 +697,8 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
           return { ...inputData, mail, report };
         }),
       );
+      warnUnposted(logger, result.messageId, result.report);
+      return result;
     },
   });
 
@@ -682,11 +760,13 @@ export async function runIntake(
     paths,
     category,
     forwarding,
+    log,
     ...services
   }: IntakeServiceLayers & {
     paths: IntakePaths;
     category: Category;
     forwarding?: IntakeForwarding | undefined;
+    log?: IntakeLog | undefined;
   },
 ): Promise<IntakeResult> {
   const storage = await createLocalStore(paths.databasePath);
@@ -694,7 +774,9 @@ export async function runIntake(
   const mastra = new Mastra({
     storage,
     logger: false,
-    workflows: { [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category, forwarding }) },
+    workflows: {
+      [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category, forwarding, log }),
+    },
   });
   try {
     await storage.init();

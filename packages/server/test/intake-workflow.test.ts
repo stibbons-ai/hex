@@ -52,11 +52,13 @@ const FIRST_FAILED_RUN =
  * A fresh data directory and Outbox, and the real Intake workflow on them with a scripted
  * DateExtractor that answers by `script` and records every Document it was asked about, a
  * recording Mailer forwarding as `forwarding` says (off when absent), an in-memory Mailbox
- * watching INBOX, and a recording Main channel. The real ledger records Forwardings, except that
- * the next `failing.forwardingRecords` attempts fail, as a ledger that can't write would; so do
- * the next `failing.failedRunRecords` calls counting a failed run. With
- * `failing.branchesAfterFailedRun` set, reading the Intake's branches fails once a failed run
- * has been counted, as a ledger that locks up then would.
+ * watching INBOX, and a recording Main channel. The real ledger records Forwardings and Filings,
+ * except that the next `failing.forwardingRecords` Forwarding records and `failing.filingRecords`
+ * Filing records fail, as a ledger that can't write would; so do the next
+ * `failing.failedRunRecords` calls counting a failed run. With `failing.branchesAfterFailedRun`
+ * set, reading the Intake's branches fails once a failed run has been counted, as a ledger that
+ * locks up then would. The workflow's warnings go to `warnings`; with `failing.log` set, the
+ * logger throws instead.
  */
 function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding) {
   const root = join(directory, `hex-${instances++}`);
@@ -65,8 +67,14 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
   const mailer = recordingMailer();
   const mainChannel = recordingMainChannel();
   const mailbox = memoryMailbox();
-  const failing = { forwardingRecords: 0, failedRunRecords: 0, branchesAfterFailedRun: false };
-  let failedRunCounted = false;
+  const failing = {
+    forwardingRecords: 0,
+    filingRecords: 0,
+    failedRunRecords: 0,
+    branchesAfterFailedRun: false,
+    log: false,
+  };
+  let branchesLocked = false;
   const ledger = Layer.effect(
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
@@ -77,18 +85,28 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
           failing.forwardingRecords--;
           return Effect.fail(new LedgerError({ message: "Intake ledger: disk I/O error" }));
         }),
+      recordFiling: (...args: Parameters<typeof real.recordFiling>) =>
+        Effect.suspend(() => {
+          if (failing.filingRecords <= 0) return real.recordFiling(...args);
+          failing.filingRecords--;
+          return Effect.fail(new LedgerError({ message: "Intake ledger: disk I/O error" }));
+        }),
       recordFailedRun: (messageId: string, runId: string) =>
         Effect.suspend(() => {
           if (failing.failedRunRecords <= 0)
             return real
               .recordFailedRun(messageId, runId)
-              .pipe(Effect.tap(() => Effect.sync(() => (failedRunCounted = true))));
+              .pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => (branchesLocked ||= failing.branchesAfterFailedRun)),
+                ),
+              );
           failing.failedRunRecords--;
           return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
         }),
       branches: (messageId: string) =>
         Effect.suspend(() =>
-          failing.branchesAfterFailedRun && failedRunCounted
+          branchesLocked
             ? Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }))
             : real.branches(messageId),
         ),
@@ -99,6 +117,7 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
     forwarding: IntakeForwarding | undefined;
     mainChannel: Layer.Layer<MainChannel> | undefined;
   } = { forwarding, mainChannel: mainChannel.layer };
+  const warnings: string[] = [];
   /** Runs the workflow once on `intake`, as the dev command does, and returns its result. */
   const run = (intake: Intake) =>
     runIntake(intake, {
@@ -110,6 +129,12 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
       mailbox: mailbox.layer,
       mainChannel: config.mainChannel,
       forwarding: config.forwarding,
+      log: {
+        warn(message) {
+          if (failing.log) throw new Error("the logger broke");
+          warnings.push(message);
+        },
+      },
     });
   return {
     ...paths,
@@ -118,8 +143,9 @@ function freshHex(script: Script = () => NO_DATE, forwarding?: IntakeForwarding)
     mailbox,
     mainChannel,
     config,
-    /** How many Forwarding records fail next (`Infinity`: every one). */
+    /** What fails next, as described above. */
     failing,
+    warnings,
     run,
     /** Runs the workflow once on `mail` read as an `.eml`. */
     async process(mail: Mail) {
@@ -731,6 +757,14 @@ describe("Intake workflow", () => {
         mail: NOT_IN_MAILBOX,
         report: SENT,
       });
+      // The report tells the whole Intake: the earlier run's Forwarding too.
+      expect(hex.mainChannel.posted.at(-1)).toBe(
+        [
+          "Intake processed: `Rechnung` from `billing@shop.example`",
+          "2 Documents filed under 2026-10/ER",
+          "Forwarded to sevdesk (earlier run), paperless",
+        ].join("\n"),
+      );
       // SevDesk never sees the Intake twice; nothing filed or read again.
       expect(hex.mailer.sent.map(delivered)).toEqual([mailTo(SEVDESK), mailTo(PAPERLESS)]);
       expect(await hex.outbox()).toEqual(outbox);
@@ -961,6 +995,21 @@ describe("Intake workflow", () => {
       expect(hex.mailer.sent).toHaveLength(1);
     });
 
+    test("a still failing retry's report names an earlier run's Forwarding to a target disabled since", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      await mkdir(join(hex.outboxDirectory, ".."), { recursive: true });
+      await writeFile(hex.outboxDirectory, "not a folder");
+      const mail = invoice("disabled-failing@shop.example");
+      await expect(hex.process(mail)).rejects.toThrow("filing: ");
+      // SevDesk is off now, and Filing fails again.
+      hex.config.forwarding = undefined;
+      await expect(hex.process(mail)).rejects.toThrow("filing: ");
+      const lines = hex.mainChannel.posted[1]!.split("\n");
+      expect(lines).toContain("Forwarded to sevdesk (earlier run)");
+      expect(lines).not.toContain("Nothing filed or forwarded.");
+      expect(hex.mailer.sent).toHaveLength(1);
+    });
+
     test("a partly filed Intake: the retry reads and files only the Document still unfiled", async () => {
       const hex = freshHex(
         ({ fileName }) =>
@@ -997,6 +1046,14 @@ describe("Intake workflow", () => {
         { index: 3, path: "2026-09/ER/Gutschrift.pdf", fellBack: false },
       ];
       expect(retried).toMatchObject({ status: "processed", filings: allFilings });
+      // The report tells the whole Intake: the earlier run's Filing and Forwardings too.
+      expect(hex.mainChannel.posted.at(-1)).toBe(
+        [
+          "Intake processed: `Rechnung` from `billing@shop.example`",
+          "1 Document filed under 2026-10/ER, 1 under 2026-09/ER",
+          "Forwarded to sevdesk (earlier run), paperless (earlier run)",
+        ].join("\n"),
+      );
       // The model was asked about the credit note only; nothing was filed twice.
       expect(hex.asked.map(({ fileName }) => fileName)).toEqual([
         "Rechnung 4711.pdf",
@@ -1315,7 +1372,7 @@ describe("Intake workflow", () => {
       );
     });
 
-    test("a failed run whose Filings can't be read back reports this run's Filings, its error unchanged", async () => {
+    test("a failed run whose Filings can't be read back reports this run's Filings, saying so, its error unchanged", async () => {
       const hex = freshHex(dated, both);
       hex.mailer.failNext(PAPERLESS);
       hex.failing.branchesAfterFailedRun = true;
@@ -1335,6 +1392,66 @@ describe("Intake workflow", () => {
           "Done nonetheless:",
           "1 Document filed under 2026-10/ER",
           "Forwarded to sevdesk",
+          "Earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+        ].join("\n"),
+      ]);
+    });
+
+    test("a retry that did nothing and can't read earlier runs' work says so, never that nothing was done", async () => {
+      const hex = freshHex(dated, { from: FROM, targets: [{ name: "paperless", to: PAPERLESS }] });
+      hex.mailer.failNext(PAPERLESS, 2);
+      const mail = pdfMail("unknown-history@shop.example");
+      // Run 1 files the Document; paperless fails.
+      await hex.process(mail).catch(() => {});
+      // Run 2 fails paperless again, filing nothing new; then the ledger locks up.
+      hex.failing.branchesAfterFailedRun = true;
+      const failed = (await hex.process(mail).catch((error: unknown) => error)) as IntakeRunError;
+      const reason = `sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later`;
+      expect(failed.message).toBe(
+        `the Intake workflow did not finish: forwarding to paperless: ${reason}; failed run 2 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 10 min from now`,
+      );
+      expect(hex.mainChannel.posted[1]).toBe(
+        [
+          failedHead,
+          `Failed: forwarding to paperless: \`${reason}\``,
+          "This run filed and forwarded nothing; earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
+          "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+        ].join("\n"),
+      );
+    });
+
+    test("a send the ledger can't record is reported as forwarded beside its failure", async () => {
+      const hex = freshHex(failing, { from: FROM, targets: [{ name: "sevdesk", to: SEVDESK }] });
+      hex.failing.forwardingRecords = Infinity;
+      await hex.process(pdfMail("sent-unrecorded@shop.example")).catch(() => {});
+      expect(hex.mailer.sent).toHaveLength(1);
+      expect(hex.mainChannel.posted).toEqual([
+        [
+          failedHead,
+          "Failed: forwarding to sevdesk: `sent, but recording it failed (Intake ledger: disk I/O error); running this Intake again sends it again`",
+          "Failed: filing: `reading the Document date failed: 429`",
+          "Done nonetheless:",
+          "Forwarded to sevdesk",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+        ].join("\n"),
+      ]);
+    });
+
+    test("a Document written to the Outbox but not recorded is reported as filed but unrecorded", async () => {
+      const hex = freshHex(dated);
+      hex.failing.filingRecords = 1;
+      const failed = (await hex
+        .process(pdfMail("filed-unrecorded@shop.example"))
+        .catch((error: unknown) => error)) as IntakeRunError;
+      expect(failed.filings).toEqual([]);
+      expect(Object.keys(await hex.outbox())).toEqual(["2026-10/ER/Rechnung.pdf"]);
+      expect(hex.mainChannel.posted).toEqual([
+        [
+          failedHead,
+          "Failed: filing: `Intake ledger: disk I/O error`",
+          "Done nonetheless:",
+          "Filed, but recording it failed, so running this Intake again files it again: 2026-10/ER/`Rechnung.pdf`",
           "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
         ].join("\n"),
       ]);
@@ -1383,6 +1500,23 @@ describe("Intake workflow", () => {
       expect(await hex.ledger("unposted@shop.example")).toMatchObject({ documentCount: 1 });
       expect(hex.mailbox.messageIds("hex/processed")).toEqual(["unposted@shop.example"]);
       expect(hex.mainChannel.posted).toEqual([]);
+      expect(hex.warnings).toEqual([
+        "hex: Intake unposted@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
+      ]);
+    });
+
+    test("a logger that throws on the warning leaves the processed Intake and its move as they are", async () => {
+      const hex = freshHex(dated);
+      hex.mainChannel.failNext();
+      hex.failing.log = true;
+      const mail = pdfMail("unposted-unlogged@shop.example");
+      hex.deliver(mail);
+      expect(await hex.process(mail)).toMatchObject({
+        status: "processed",
+        mail: { status: "moved", to: "processed", copies: 1 },
+        report: NOT_SENT,
+      });
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["unposted-unlogged@shop.example"]);
     });
 
     test("a failed run's report that can't be posted leaves its error, count and mail as they are", async () => {
@@ -1398,6 +1532,9 @@ describe("Intake workflow", () => {
       expect(failed.mail).toEqual({ status: "kept-for-retry" });
       expect(await hex.failedRuns("unposted-failure@shop.example")).toMatchObject({ count: 1 });
       expect(hex.mailbox.messageIds()).toEqual(["unposted-failure@shop.example"]);
+      expect(hex.warnings).toEqual([
+        "hex: Intake unposted-failure@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
+      ]);
     });
 
     const DIED = {

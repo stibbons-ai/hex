@@ -114,14 +114,19 @@ describe("renderIntakeReport", () => {
       "Failed run 5 of 5: failed permanently, its mail was moved to hex/failed.",
     ],
     [
-      "permanently, its mail not in the folder",
+      "permanently, its mail not found by its Message-ID",
       {
         status: "failed-permanently",
         failedRuns: 5,
         maxFailedRuns: 5,
         mail: { status: "not-in-mailbox" },
       },
-      "Failed run 5 of 5: failed permanently, no mail of it was in the watched folder.",
+      "Failed run 5 of 5: failed permanently, its mail was not found by its Message-ID in the watched folder; see the hex log.",
+    ],
+    [
+      "at the limit only with failed runs counted in memory: failing permanently at the next look",
+      { status: "failing-permanently", failedRuns: 5, maxFailedRuns: 5 },
+      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.",
     ],
     [
       "permanently, its move failed",
@@ -153,6 +158,73 @@ describe("renderIntakeReport", () => {
     });
     expect(report.split("\n")).toContain("Nothing filed or forwarded.");
     expect(report).not.toContain("Done nonetheless");
+  });
+
+  test("earlier runs' work that can't be read is said so, never told as nothing done", () => {
+    const unreadable = "Intake ledger: database is locked";
+    const nothing = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 2, maxFailedRuns: 5, retryInMinutes: 10 }),
+      filings: [],
+      forwardings: [],
+      earlierRunsUnreadable: unreadable,
+    }).split("\n");
+    expect(nothing).not.toContain("Nothing filed or forwarded.");
+    expect(nothing.slice(-2)).toEqual([
+      "This run filed and forwarded nothing; earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
+      "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+    ]);
+    const some = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 2, maxFailedRuns: 5, retryInMinutes: 10 }),
+      earlierRunsUnreadable: unreadable,
+    }).split("\n");
+    expect(some.slice(-2)).toEqual([
+      "Earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
+      "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+    ]);
+  });
+
+  test("a Document written but not recorded is told as done, by its folder and quoted name", () => {
+    const report = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 }),
+      filings: [],
+      forwardings: [],
+      unrecordedFilings: [{ path: "2026-10/ER/Rechnung.pdf", fellBack: false }],
+    }).split("\n");
+    expect(report).not.toContain("Nothing filed or forwarded.");
+    expect(report.slice(-3, -1)).toEqual([
+      "Done nonetheless:",
+      "Filed, but recording it failed, so running this Intake again files it again: 2026-10/ER/`Rechnung.pdf`",
+    ]);
+  });
+
+  test("a bulk Intake's report stays short: lists are bounded, the consequence comes last", () => {
+    // 230 Documents without a date, each with a long name, across 23 folders of 10.
+    const filings = Array.from({ length: 230 }, (_, n) => ({
+      path: `2026-${String((n % 23) + 1).padStart(2, "0")}/ER/${"x".repeat(180)}-${n}.pdf`,
+      fellBack: true,
+    }));
+    const consequence = "Failed run 1 of 5: hex tries again in 5 min at the earliest.";
+    const report = renderIntakeReport({
+      ...failed({ status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 }),
+      filings,
+    });
+    expect(report.length).toBeLessThan(4_000);
+    const lines = report.split("\n");
+    expect(lines.at(-1)).toBe(consequence);
+    // The first 10 folders, 10 each; the other 13 folders' 130 counted.
+    expect(lines[4]).toBe(
+      [
+        "10 Documents filed under 2026-01/ER",
+        ...Array.from(
+          { length: 9 },
+          (_, n) => `10 under 2026-${String(n + 2).padStart(2, "0")}/ER`,
+        ),
+        "and 130 more in 13 folders",
+      ].join(", "),
+    );
+    expect(lines[5]).toStartWith("230 without a detected date, filed by received date: `xxx");
+    expect(lines[5]).toEndWith("-9.pdf`, and 220 more");
+    expect(lines[5]!.match(/`/g)).toHaveLength(20);
   });
 
   test("untrusted text stays inside one code span on one line, cut when long", () => {

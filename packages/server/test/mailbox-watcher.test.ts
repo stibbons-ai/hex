@@ -152,21 +152,6 @@ async function freshWatcher({
     mainChannel: mainChannel.layer,
     ledger,
   });
-  const storage = await createLocalStore(paths.databasePath);
-  await storage.init();
-  const mastra = new Mastra({
-    storage,
-    logger: false,
-    workflows: {
-      [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({ runtime, category: "ER", forwarding }),
-    },
-  });
-  cleanups.push(
-    () => runtime.dispose(),
-    () => storage.close(),
-    () => mastra.shutdown(),
-  );
-  const registered: IntakeWorkflow = mastra.getWorkflow(INTAKE_WORKFLOW_ID);
   const log: { level: string; message: string }[] = [];
   /** Lines containing it throw, once each time it is set. */
   const failing = { line: undefined as string | undefined };
@@ -190,6 +175,27 @@ async function freshWatcher({
       this.write("error", message);
     },
   };
+  const storage = await createLocalStore(paths.databasePath);
+  await storage.init();
+  const mastra = new Mastra({
+    storage,
+    logger: false,
+    workflows: {
+      // The workflow warns on the watcher's logger, as on the server, where both use Mastra's.
+      [INTAKE_WORKFLOW_ID]: createIntakeWorkflow({
+        runtime,
+        category: "ER",
+        forwarding,
+        log: logger,
+      }),
+    },
+  });
+  cleanups.push(
+    () => runtime.dispose(),
+    () => storage.close(),
+    () => mastra.shutdown(),
+  );
+  const registered: IntakeWorkflow = mastra.getWorkflow(INTAKE_WORKFLOW_ID);
   let watcher: MailboxWatcher | undefined;
   /** Each run the watcher started, settled (either way) when the run ends. */
   const starts: Promise<unknown>[] = [];
@@ -539,9 +545,16 @@ describe("watchMailbox", () => {
       expect(hex.log()).toContainEqual(
         expect.stringMatching(/^warn: hex: mailbox: UID 1 .*UIDVALIDITY.*\(attempt 1\)$/),
       );
-      expect(hex.log()).toContain(
-        "warn: hex: Intake diverging-unreported@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
-      );
+      // Warned once, by the run that posted it.
+      expect(
+        hex
+          .log()
+          .filter(
+            (line) =>
+              line ===
+              "warn: hex: Intake diverging-unreported@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
+          ),
+      ).toHaveLength(1);
     });
 
     test("its 5th failed run moves it to hex/failed by UID; no 6th run", async () => {
@@ -560,6 +573,10 @@ describe("watchMailbox", () => {
       expect(hex.mailbox.messageIds("hex/failed")).toEqual(["server-view@shop.example"]);
       expect(hex.log()).toContain(
         "warn: hex: Intake diverging-failing@shop.example: failed permanently; its mail was moved to hex/failed",
+      );
+      // The run found no mail by its Message-ID; the watcher moved it by UID after the report.
+      expect(hex.mainChannel.posted.at(-1)?.split("\n").at(-1)).toBe(
+        "Failed run 5 of 5: failed permanently, its mail was not found by its Message-ID in the watched folder; see the hex log.",
       );
     });
   });
@@ -842,6 +859,15 @@ describe("watchMailbox", () => {
     await hex.lookAfter(60_000);
     expect(hex.asked).toHaveLength(5);
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["flapping@shop.example"]);
+    // Each report counts as the watcher does: runs 3 to 5 by their effective count, the 5th
+    // failing permanently at the next look, as it did.
+    expect(hex.mainChannel.posted.map((report) => report.split("\n").at(-1))).toEqual([
+      "Recording the failed run failed (`Intake ledger: disk full`); see the hex log.",
+      "Recording the failed run failed (`Intake ledger: disk full`); see the hex log.",
+      "Failed run 3 of 5: hex tries again in 20 min at the earliest.",
+      "Failed run 4 of 5: hex tries again in 40 min at the earliest.",
+      "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then.",
+    ]);
     // Moved back: run at once, its failure the first of a fresh series, nothing left in memory.
     hex.mailbox.moveBack("hex/failed");
     await hex.lookAfter(60_000);
@@ -1197,7 +1223,7 @@ describe("watchMailbox", () => {
     await hex.scanned();
     const warning =
       "warn: hex: Intake unreported@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found";
-    expect(hex.log()).toContain(warning);
+    expect(hex.log().filter((line) => line === warning)).toHaveLength(1);
     expect(hex.log().some((line) => line.includes("failed run 1 of 5"))).toBe(true);
     expect(hex.mailbox.messageIds()).toEqual(["unreported@shop.example"]);
 
