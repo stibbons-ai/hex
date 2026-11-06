@@ -21,25 +21,24 @@ import {
   documentMediaType,
   normalizeMessageId,
   planFiling,
-  renderIntakeReport,
 } from "@hex/domain";
-import type { Category, IntakeReportInput, ReportConsequence, ReportFailure } from "@hex/domain";
+import type { Category, ReportFailure, ReportForwarding } from "@hex/domain";
 import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
 import { closeInOrder } from "./close";
 import type { DataPaths } from "./paths";
-import { MainChannel, mainChannelOff } from "./main-channel";
+import { mainChannelOff } from "./main-channel";
+import type { MainChannel } from "./main-channel";
 import {
-  MAX_FAILED_RUNS,
   ProcessedMailFate,
   describeFailedRun,
   mailFateOf,
   moveMail,
   recordFailedRun,
-  retryDelayMs,
 } from "./mail-fate";
-import type { FailedRun, FailedRunMailFate } from "./mail-fate";
+import type { FailedRunMailFate } from "./mail-fate";
+import { ReportFate, postReport, reportConsequence, reportFateOf } from "./report-fate";
 
 /** The data the Intake workflow works on: the ledger's LibSQL file and the Outbox. */
 type IntakePaths = Pick<DataPaths, "databasePath" | "outboxDirectory">;
@@ -74,16 +73,6 @@ const IntakeOutcome = Schema.Struct({
   /** One per target the Documents went to, by this run or an earlier one. */
   forwardings: Schema.Array(ForwardingOutcome),
 });
-
-/**
- * What became of the run's Intake report: posted to the Main channel, not posted since no Main
- * channel is configured, or not posted since posting failed (the Intake's outcome stands).
- */
-export const ReportFate = Schema.Union([
-  Schema.Struct({ status: Schema.Literals(["sent", "off"]) }),
-  Schema.Struct({ status: Schema.Literal("not-sent"), reason: Schema.String }),
-]);
-export type ReportFate = typeof ReportFate.Type;
 
 /**
  * What the Intake workflow did with one Intake, with its mail, and with its Intake report (none
@@ -295,39 +284,13 @@ function failedBranches(
   ];
 }
 
-/** A failed run's consequence for its Intake, as the Intake report tells it. */
-function reportConsequence({ failedRuns, mail }: FailedRun): ReportConsequence {
-  if (mail.status === "kept-for-retry") {
-    return {
-      status: "retry",
-      failedRuns,
-      maxFailedRuns: MAX_FAILED_RUNS,
-      retryInMinutes: retryDelayMs(failedRuns) / 60_000,
-    };
-  }
-  return {
-    status: "failed-permanently",
-    failedRuns,
-    maxFailedRuns: MAX_FAILED_RUNS,
-    mail: mail.status === "not-moved" ? mail : { status: mail.status },
-  };
-}
-
-/** Posts the Intake report on `input` to the Main channel; a post that fails is only its fate. */
-const postReport = (input: IntakeReportInput) =>
-  MainChannel.use((channel) => channel.post(renderIntakeReport(input))).pipe(
-    Effect.map((status): ReportFate => ({ status })),
-    Effect.catchTag("MainChannelError", ({ message }) =>
-      Effect.succeed<ReportFate>({ status: "not-sent", reason: message }),
-    ),
+/** The targets that have the Intake's Documents, by this run or an earlier one. */
+const reportedForwardings = (attempts: readonly ForwardingAttempt[]): ReportForwarding[] =>
+  attempts.flatMap(({ target, status }) =>
+    status === "forwarded" || status === "forwarded-earlier"
+      ? [{ target, earlier: status === "forwarded-earlier" }]
+      : [],
   );
-
-/** The Intake as its report names it: Message-ID, subject and sender. */
-const reportedIntake = ({ messageId, subject, sender }: Intake) => ({
-  messageId: normalizeMessageId(messageId),
-  subject,
-  sender,
-});
 
 /**
  * The Intake workflow: ledger check (an Intake already processed ends the run, nothing filed or
@@ -615,14 +578,9 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
                 }),
               ),
             );
-            const report = yield* postReport({
-              intake: reportedIntake(intake),
+            const report = yield* postReport(intake, {
               filings: filed.filings,
-              forwardings: attempts.flatMap(({ target, status }) =>
-                status === "forwarded" || status === "forwarded-earlier"
-                  ? [{ target, earlier: status === "forwarded-earlier" }]
-                  : [],
-              ),
+              forwardings: reportedForwardings(attempts),
               outcome: {
                 status: "failed",
                 failures: failedBranches(attempts, filed),
@@ -638,16 +596,12 @@ export function createIntakeWorkflow({ runtime, category, forwarding }: IntakeWo
         IntakeResult,
         Effect.gen(function* () {
           // Spec order: the Intake report, then the IMAP move.
-          const report = yield* postReport({
-            intake: reportedIntake(intake),
+          const report = yield* postReport(intake, {
             filings: inputData.filings.map(({ path, fellBack }) => ({
               path,
               fellBack: fellBack === true,
             })),
-            forwardings: inputData.forwardings.map(({ target, status }) => ({
-              target,
-              earlier: status === "forwarded-earlier",
-            })),
+            forwardings: reportedForwardings(inputData.forwardings),
             outcome: { status: "processed" },
           });
           const mail = yield* moveMail(messageId, "processed");
@@ -689,13 +643,6 @@ export class IntakeRunError extends Error {
   ) {
     super(message);
   }
-}
-
-/** What became of a failed run's Intake report, as its error carries it, if it does. */
-export function reportFateOf(error: unknown): ReportFate | undefined {
-  return error instanceof Object && "report" in error
-    ? Option.getOrUndefined(Schema.decodeUnknownOption(ReportFate)(error.report))
-    : undefined;
 }
 
 /** The output of a step in `steps` decoded as `schema`, if the step succeeded with one. */

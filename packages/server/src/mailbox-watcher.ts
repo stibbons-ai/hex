@@ -2,8 +2,7 @@ import { IntakeLedger, Mailbox, MailboxError, messageOf, readEml } from "@hex/ad
 import type { Intake, MailOutcome } from "@hex/adapters";
 import { normalizeMessageId } from "@hex/domain";
 import { Cause, Effect, Exit, Fiber, Option, Schema } from "effect";
-import { reportFateOf } from "./intake-workflow";
-import type { IntakeResult, IntakeRuntime, ReportFate } from "./intake-workflow";
+import type { IntakeResult, IntakeRuntime } from "./intake-workflow";
 import {
   MAX_FAILED_RUNS,
   describeFailedRun,
@@ -18,6 +17,8 @@ import {
   retryDelayMs,
 } from "./mail-fate";
 import type { DescribeOptions, FailedRun, MailFate, MoveFate } from "./mail-fate";
+import { reportFateOf } from "./report-fate";
+import type { ReportFate } from "./report-fate";
 
 /** One run of the Intake workflow, as the watcher starts it. */
 interface IntakeRun {

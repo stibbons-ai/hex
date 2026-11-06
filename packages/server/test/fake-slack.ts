@@ -27,7 +27,7 @@ export interface FakeSlackOptions {
   postError?: string;
 }
 
-/** The DM channel `conversations.open` answers for every user. */
+/** Daniel's DM with hex: where his messages come from, and what `conversations.open` answers. */
 export const DM_CHANNEL = "D0DANIEL";
 
 export function fakeSlack({
@@ -127,7 +127,7 @@ export function directMessage(sender: string, text: string) {
       event_id: `event-${sender}`,
       event: {
         type: "message",
-        channel: "D0DANIEL",
+        channel: DM_CHANNEL,
         channel_type: "im",
         user: sender,
         text,

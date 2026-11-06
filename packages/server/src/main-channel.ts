@@ -45,9 +45,9 @@ export const mainChannelOff = Layer.succeed(MainChannel, {
 const POST_TIMEOUT = "30 seconds";
 
 /**
- * The Main channel on `target`'s adapter: opens the user's DM, then posts there. Posting works
- * once the server has started the channel. A failure, or a post that takes longer than
- * {@link POST_TIMEOUT}, is a {@link MainChannelError}.
+ * The Main channel on `target`'s adapter: opens the user's DM on the first post (kept once
+ * opened), then posts there. Posting works once the server has started the channel. A failure, or
+ * a post that takes longer than {@link POST_TIMEOUT}, is a {@link MainChannelError}.
  */
 export function mainChannelLayer({
   channel,
@@ -55,12 +55,14 @@ export function mainChannelLayer({
   adapter,
   message,
 }: MainChannelTarget): Layer.Layer<MainChannel> {
+  let dm: string | undefined;
   return Layer.succeed(MainChannel, {
     post: (text) =>
       Effect.tryPromise({
         try: async () => {
           if (!adapter.openDM) throw new Error(`the ${channel} adapter cannot open a DM`);
-          await adapter.postMessage(await adapter.openDM(user), message(text));
+          dm ??= await adapter.openDM(user);
+          await adapter.postMessage(dm, message(text));
           return "sent" as const;
         },
         catch: (cause) =>

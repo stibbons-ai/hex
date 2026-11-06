@@ -68,7 +68,7 @@ test("answers a Slack DM over socket mode and closes the socket on stop()", asyn
       const socket = await slack.connected();
       socket.send(directMessage(DANIEL, "hi hex"));
       const reply = await slack.posted();
-      expect(reply.get("channel")).toBe("D0DANIEL");
+      expect(reply.get("channel")).toBe(DM_CHANNEL);
       expect(reply.get("markdown_text")).toBe(REPLY);
       expect(reply.get("token")).toBe("xoxb-test");
     } finally {

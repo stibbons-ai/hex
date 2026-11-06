@@ -91,14 +91,23 @@ const present = (value: string | undefined): value is string =>
 
 /** The Intake by its subject and sender when it has them, else by its Message-ID. */
 function identify({ messageId, subject, sender }: IntakeReportInput["intake"]): string {
-  const parts = [
-    ...(present(subject) ? [quote(subject)] : []),
-    ...(present(sender) ? [`from ${quote(sender)}`] : []),
-  ];
+  const parts: string[] = [];
+  if (present(subject)) parts.push(quote(subject));
+  if (present(sender)) parts.push(`from ${quote(sender)}`);
   return parts.length > 0 ? parts.join(" ") : quote(messageId);
 }
 
-const documents = (count: number) => (count === 1 ? "1 Document" : `${count} Documents`);
+/** Where a failed Intake's mail went, as the end of the consequence line. */
+function failedMailLine(mail: ReportFailedMail): string {
+  switch (mail.status) {
+    case "moved":
+      return "its mail was moved to hex/failed";
+    case "not-in-mailbox":
+      return "no mail of it was in the watched folder";
+    case "not-moved":
+      return `moving its mail to hex/failed failed (${quote(mail.reason)}); see the hex log`;
+  }
+}
 
 /** The folder of a Filing's path, `YYYY-MM/<Category>`, and its file name. */
 function splitPath(path: string): { folder: string; fileName: string } {
@@ -111,26 +120,27 @@ function splitPath(path: string): { folder: string; fileName: string } {
  * filed under 2026-10/ER, 1 under 2026-09/ER"; then those filed by the received date, each named.
  */
 function filingLines(filings: readonly ReportFiling[]): string[] {
+  if (filings.length === 0) return [];
   const counts = new Map<string, number>();
   for (const { path } of filings) {
     const { folder } = splitPath(path);
     counts.set(folder, (counts.get(folder) ?? 0) + 1);
   }
-  const [first, ...rest] = [...counts].map(([folder, count], position) =>
-    position === 0 ? `${documents(count)} filed under ${folder}` : `${count} under ${folder}`,
-  );
-  if (first === undefined) return [];
-  const fellBack = filings.filter((filing) => filing.fellBack);
-  return [
-    [first, ...rest].join(", "),
-    ...(fellBack.length === 0
-      ? []
-      : [
-          `${fellBack.length} without a detected date, filed by received date: ${fellBack
-            .map(({ path }) => quote(splitPath(path).fileName))
-            .join(", ")}`,
-        ]),
+  const lines = [
+    [...counts]
+      .map(([folder, count], position) =>
+        position === 0
+          ? `${count === 1 ? "1 Document" : `${count} Documents`} filed under ${folder}`
+          : `${count} under ${folder}`,
+      )
+      .join(", "),
   ];
+  const fellBack = filings.filter((filing) => filing.fellBack);
+  if (fellBack.length > 0) {
+    const names = fellBack.map(({ path }) => quote(splitPath(path).fileName)).join(", ");
+    lines.push(`${fellBack.length} without a detected date, filed by received date: ${names}`);
+  }
+  return lines;
 }
 
 /** The targets that have the Documents, e.g. "Forwarded to sevdesk, paperless (earlier run)". */
@@ -148,13 +158,7 @@ function consequenceLine(consequence: ReportConsequence): string {
       return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex tries again in ${consequence.retryInMinutes} min at the earliest.`;
     case "failed-permanently": {
       const { failedRuns, maxFailedRuns, mail } = consequence;
-      const where =
-        mail.status === "moved"
-          ? "its mail was moved to hex/failed"
-          : mail.status === "not-in-mailbox"
-            ? "no mail of it was in the watched folder"
-            : `moving its mail to hex/failed failed (${quote(mail.reason)}); see the hex log`;
-      return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${where}.`;
+      return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${failedMailLine(mail)}.`;
     }
     case "uncounted":
       return `Counting the failed run failed (${quote(consequence.reason)}); see the hex log.`;

@@ -1,6 +1,7 @@
 // The chat channels the hex config file names, built with their adapters. Apart from config.ts so
 // that reading the config file (Mastra Studio does) never loads an adapter package.
 import { createSlackAdapter } from "@chat-adapter/slack";
+import { escapeSlackText } from "@chat-adapter/slack/format";
 import { createSignalAdapter } from "@stibbons/chat-adapter-signal";
 import type { AdapterPostableMessage } from "chat";
 import { Config, Redacted, Result, Schema } from "effect";
@@ -65,9 +66,7 @@ function requireToken(env: Env, name: string, prefix: string): Redacted.Redacted
  * `<!channel>` or `<url|label>` forms from it. Bare `@names` and URLs stay plain only inside code
  * spans (Slack links neither there, and the adapter rewrites no mention there).
  */
-const slackPlainText = (text: string) => ({
-  raw: text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
-});
+const slackPlainText = (text: string) => ({ raw: escapeSlackText(text) });
 
 // Only socket mode: webhook mode needs a public route, which hex does not serve.
 const SlackOptions = Schema.Struct({ mode: Schema.Literal("socket") });
