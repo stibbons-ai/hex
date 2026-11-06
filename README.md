@@ -669,7 +669,8 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
   run each failed branch, what was done nonetheless and what comes next (`Failed run n of 5`,
   counted as the mailbox watcher does, with the failed runs it held back in memory; at 5 failed
   permanently, with what became of the mail: moved to `hex/failed`, not found by its Message-ID,
-  or not moved; or failing so at the watcher's next look). What
+  or not moved; or failing so at the watcher's next look; or, when the ledger can't record or end
+  the failed runs, that it couldn't, with the reason, in place of `Failed run n of 5`). What
   was done includes a Forwarding the server accepted but the ledger couldn't record, and a
   Document written to the Outbox whose record failed (`Filed, but recording it failed, …`: a
   run again files it again). When earlier runs' Filings and Forwardings can't be read, the report

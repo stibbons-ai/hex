@@ -247,7 +247,7 @@ function forwardingLines(forwardings: readonly ReportForwarding[]): string[] {
 function consequenceLine(consequence: ReportConsequence): string {
   switch (consequence.status) {
     case "retry":
-      return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex tries again in ${consequence.retryInMinutes} min at the earliest.`;
+      return `Failed run ${consequence.failedRuns} of ${consequence.maxFailedRuns}: hex tries again in ${consequence.retryInMinutes} min at the earliest, if its mail is still in the watched folder.`;
     case "failed-permanently": {
       const { failedRuns, maxFailedRuns, mail } = consequence;
       return `Failed run ${failedRuns} of ${maxFailedRuns}: failed permanently, ${failedMailLine(mail)}.`;

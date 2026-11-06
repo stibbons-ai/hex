@@ -659,7 +659,9 @@ export function createIntakeWorkflow({
             const unreadable = (reason: string) =>
               Effect.succeed({
                 filings: reportedFilings(filed.filings),
-                forwardings: reportedForwardings(attempts),
+                forwardings: reportedForwardings(
+                  attempts.filter(({ status }) => status !== "forwarded-earlier"),
+                ),
                 earlierRunsUnreadable: reason,
               });
             const done = yield* IntakeLedger.use((ledger) => ledger.branches(messageId)).pipe(

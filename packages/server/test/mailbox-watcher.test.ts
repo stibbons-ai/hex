@@ -864,8 +864,8 @@ describe("watchMailbox", () => {
     expect(hex.mainChannel.posted.map((report) => report.split("\n").at(-1))).toEqual([
       "Recording or ending the failed runs failed (`Intake ledger: disk full`); see the hex log.",
       "Recording or ending the failed runs failed (`Intake ledger: disk full`); see the hex log.",
-      "Failed run 3 of 5: hex tries again in 20 min at the earliest.",
-      "Failed run 4 of 5: hex tries again in 40 min at the earliest.",
+      "Failed run 3 of 5: hex tries again in 20 min at the earliest, if its mail is still in the watched folder.",
+      "Failed run 4 of 5: hex tries again in 40 min at the earliest, if its mail is still in the watched folder.",
       "Failed run 5 of 5: hex fails it permanently at its next look of the mailbox, its mail going to hex/failed then, unless that fails; see the hex log.",
     ]);
     // Moved back: run at once, its failure the first of a fresh series, nothing left in memory.
@@ -907,6 +907,9 @@ describe("watchMailbox", () => {
     expect(hex.asked).toHaveLength(5);
     expect(hex.log()).toContain(
       "error: hex: Intake unended@shop.example: failing it permanently failed (Intake ledger: disk full); the next look tries again",
+    );
+    expect(hex.mainChannel.posted.at(-1)?.split("\n").at(-1)).toBe(
+      "Recording or ending the failed runs failed (`Intake ledger: disk full`); see the hex log.",
     );
     // A look while ending still fails: a warning, the mail stays; once it works, `hex/failed`.
     await hex.lookAfter(60_000);

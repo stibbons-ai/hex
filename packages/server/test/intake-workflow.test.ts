@@ -1355,7 +1355,7 @@ describe("Intake workflow", () => {
           "Done nonetheless:",
           "1 Document filed under 2026-10/ER",
           "Forwarded to sevdesk",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });
@@ -1373,7 +1373,7 @@ describe("Intake workflow", () => {
           "Done nonetheless:",
           "1 Document filed under 2026-10/ER",
           "Forwarded to sevdesk (earlier run)",
-          "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+          "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       );
     });
@@ -1399,7 +1399,7 @@ describe("Intake workflow", () => {
           "1 Document filed under 2026-10/ER",
           "Forwarded to sevdesk",
           "Earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });
@@ -1425,7 +1425,7 @@ describe("Intake workflow", () => {
           "1 Document filed under 2026-10/ER",
           "Forwarded to sevdesk",
           "Earlier runs' Filings and Forwardings could not be read (`the ledger connection died`), so they are not listed.",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });
@@ -1448,7 +1448,27 @@ describe("Intake workflow", () => {
           failedHead,
           `Failed: forwarding to paperless: \`${reason}\``,
           "This run filed and forwarded nothing; earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
-          "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+          "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
+        ].join("\n"),
+      );
+    });
+
+    test("a retry that can't read earlier runs' work never lists an earlier run's Forwarding", async () => {
+      const hex = freshHex(dated, both);
+      hex.mailer.failNext(PAPERLESS, 2);
+      const mail = pdfMail("earlier-forwarding@shop.example");
+      // Run 1 files the Document and forwards to sevdesk; paperless fails.
+      await hex.process(mail).catch(() => {});
+      // Run 2 finds sevdesk forwarded earlier, fails paperless again; then the ledger locks up.
+      hex.failing.branchesAfterFailedRun = "fail";
+      await hex.process(mail).catch(() => {});
+      const reason = `sending to ${PAPERLESS} failed (EENVELOPE at RCPT TO): 451 try again later`;
+      expect(hex.mainChannel.posted[1]).toBe(
+        [
+          failedHead,
+          `Failed: forwarding to paperless: \`${reason}\``,
+          "This run filed and forwarded nothing; earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
+          "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       );
     });
@@ -1465,7 +1485,7 @@ describe("Intake workflow", () => {
           "Failed: filing: `reading the Document date failed: 429`",
           "Done nonetheless:",
           "Forwarded to sevdesk",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });
@@ -1484,7 +1504,7 @@ describe("Intake workflow", () => {
           "Failed: filing: `Intake ledger: disk I/O error`",
           "Done nonetheless:",
           "Filed, but recording it failed, so running this Intake again files it again: 2026-10/ER/`Rechnung.pdf`",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });
@@ -1508,7 +1528,7 @@ describe("Intake workflow", () => {
           "Done nonetheless:",
           "1 Document filed under 2026-10/ER",
           "Filed, but recording it failed, so running this Intake again files it again: 2026-10/ER/`Gutschrift.pdf`",
-          "Failed run 1 of 5: hex tries again in 5 min at the earliest.",
+          "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.",
         ].join("\n"),
       ]);
     });

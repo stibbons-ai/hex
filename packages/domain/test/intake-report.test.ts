@@ -143,7 +143,7 @@ describe("renderIntakeReport", () => {
     [
       "with runs left: retried later",
       { status: "retry", failedRuns: 2, maxFailedRuns: 5, retryInMinutes: 10 },
-      "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+      "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
     ],
     [
       "permanently: its mail to hex/failed",
@@ -208,7 +208,7 @@ describe("renderIntakeReport", () => {
     expect(nothing).not.toContain("Nothing filed or forwarded.");
     expect(nothing.slice(-2)).toEqual([
       "This run filed and forwarded nothing; earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
-      "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+      "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
     ]);
     const some = renderIntakeReport({
       ...failed({ status: "retry", failedRuns: 2, maxFailedRuns: 5, retryInMinutes: 10 }),
@@ -216,7 +216,7 @@ describe("renderIntakeReport", () => {
     }).split("\n");
     expect(some.slice(-2)).toEqual([
       "Earlier runs' Filings and Forwardings could not be read (`Intake ledger: database is locked`), so they are not listed.",
-      "Failed run 2 of 5: hex tries again in 10 min at the earliest.",
+      "Failed run 2 of 5: hex tries again in 10 min at the earliest, if its mail is still in the watched folder.",
     ]);
   });
 
@@ -240,7 +240,8 @@ describe("renderIntakeReport", () => {
       path: `2026-${String((n % 23) + 1).padStart(2, "0")}/ER/${"x".repeat(180)}-${n}.pdf`,
       fellBack: true,
     }));
-    const consequence = "Failed run 1 of 5: hex tries again in 5 min at the earliest.";
+    const consequence =
+      "Failed run 1 of 5: hex tries again in 5 min at the earliest, if its mail is still in the watched folder.";
     const report = renderIntakeReport({
       ...failed({ status: "retry", failedRuns: 1, maxFailedRuns: 5, retryInMinutes: 5 }),
       filings,
