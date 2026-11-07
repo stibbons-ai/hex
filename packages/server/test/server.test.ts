@@ -380,6 +380,8 @@ describe("a cyclic output", () => {
   const mapsSafely: unknown[] = [];
   mapsSafely.push(mapsSafely);
   Object.defineProperty(mapsSafely, "map", { value: () => ["safe"] });
+  // A Map whose entries, which oRPC's serializer reads, yields an item that is no entry.
+  const badEntry = Object.defineProperty(new Map(), "entries", { value: () => [5].values() });
   // Who reads the getter, by the caller's stack frame; the result is the last read.
   const readers: string[] = [];
   const counted = {
@@ -412,6 +414,7 @@ describe("a cyclic output", () => {
         mapsItself: returning("mapsItself", mapsItself),
         mapsSafely: returning("mapsSafely", mapsSafely),
         counted: returning("counted", counted),
+        badEntry: returning("badEntry", badEntry),
         encoder: returning("encoder", { date: unencodableDate }),
       },
     });
@@ -510,6 +513,25 @@ describe("a cyclic output", () => {
       const [message, fault] = logged.mock.calls[0]!;
       expect(message).toBe("hex: oRPC call failed");
       expect(fault).toEqual(new TypeError("no time"));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  test("fails on a Map entry that isn't one as a 500, logged once, naming the procedure", async () => {
+    const logged = spyOn(server.mastra.getLogger(), "error");
+    try {
+      const { error } = await safe(
+        client(server).workflows.start({ workflowId: "badEntry", inputData: { message: "x" } }),
+      );
+      expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const [message, fault] = logged.mock.calls[0]!;
+      expect(message).toBe("hex: oRPC call failed");
+      expect(fault).toBeInstanceOf(Error);
+      expect((fault as Error).message).toBe(
+        "hex: the output of workflows.start has a Map entry that isn't a [key, value] pair",
+      );
     } finally {
       logged.mockRestore();
     }

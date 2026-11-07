@@ -88,6 +88,15 @@ test("keeps a class instance as a leaf, as oRPC's serializer does", () => {
   expect((snapshot({ box }) as { box: Box }).box).toBe(box);
 });
 
+test("keeps a Date as a leaf even when its prototype has no constructor, as oRPC does", () => {
+  const prototype = Object.create(Date.prototype, { constructor: { value: undefined } }) as Date;
+  const date = Object.setPrototypeOf(new Date(0), prototype) as Date;
+  const output = { date };
+  const encoded = encode(output);
+  expect(encoded).toContain("1970-01-01T00:00:00.000Z");
+  expect(encode(snapshot(output))).toBe(encoded);
+});
+
 test("accepts an acyclic chain deeper than oRPC's serializer can encode", () => {
   let value: unknown = 1;
   for (let i = 0; i < 25_000; i++) value = { n: value };
@@ -150,7 +159,7 @@ test("walks an array through its own map, as oRPC does, not its indices or itera
   expect(encoded).toBe(encode(["safe"]));
 });
 
-test("unwraps a `map` callback's result wherever the override nests it", () => {
+test("copies a `map` callback's result wherever the override puts it, even inside a leaf", () => {
   const nested: unknown[] = [];
   rejects(mapping(nested, (visit) => [[visit(nested)]]));
   const item = { x: 1 };
@@ -158,6 +167,14 @@ test("unwraps a `map` callback's result wherever the override nests it", () => {
   const encoded = encode(snapshot(wrapped));
   expect(encoded).toBe(encode(wrapped));
   expect(encoded).toBe(encode({ wrapped: { x: 1 } }));
+  class Box {
+    constructor(readonly v: unknown) {}
+  }
+  const boxedItem = { x: 1 };
+  const boxed = mapping([boxedItem], (visit) => [new Box(visit(boxedItem))]);
+  const encodedBox = encode(snapshot(boxed));
+  expect(encodedBox).toBe(encode(boxed));
+  expect(encodedBox).toBe(encode([{ v: { x: 1 } }]));
 });
 
 test("walks a Map by its entries, as oRPC does, not by its own iterator", () => {
@@ -174,9 +191,21 @@ test("fails on a Map entry that isn't one, naming the procedure", () => {
   expect(() => snapshot(broken)).toThrow(
     "hex: the output of test.procedure has a Map entry that isn't a [key, value] pair",
   );
+  let thrown: unknown;
   try {
     snapshot(broken);
   } catch (error) {
-    expect((error as Error).cause).toBeInstanceOf(TypeError);
+    thrown = error;
   }
+  expect((thrown as Error).cause).toBeInstanceOf(TypeError);
+});
+
+test("returns an async iterator output as is, which oRPC streams instead of encoding", () => {
+  const iterator = {
+    next: async () => ({ done: true, value: undefined }),
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+  expect(snapshot(iterator)).toBe(iterator);
 });
