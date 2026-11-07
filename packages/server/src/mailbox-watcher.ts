@@ -222,6 +222,27 @@ export function watchMailbox({
       if (ending) return yield* Effect.fail(ending);
     });
 
+  /**
+   * {@link settleLogged} for an Intake failed permanently, a failed move warned of before it is
+   * tried again. A logger that throws on that warning doesn't keep the mail from settling: its
+   * defect surfaces afterwards, unless settling fails too, whose failure then wins.
+   */
+  const settleFailed = (
+    messageId: string,
+    uid: number,
+    fate: MoveFate<"failed">,
+    describe: (settled: MoveFate<"failed">, options: DescribeOptions) => string,
+  ) =>
+    Effect.gen(function* () {
+      const warned = yield* Effect.exit(
+        fate.status === "not-moved"
+          ? Effect.sync(() => log.warn(describe(fate, { retryPending: true })))
+          : Effect.void,
+      );
+      yield* settleLogged(messageId, uid, fate, describe);
+      yield* warned;
+    });
+
   /** The mail at `uid` of the processed Intake `messageId` moved to `hex/processed`, logged. */
   const settleProcessed = (messageId: string, uid: number, what: string) =>
     Effect.gen(function* () {
@@ -278,10 +299,7 @@ export function watchMailbox({
       if (failed.mail.status === "kept-for-retry") {
         return log.warn((yield* heldLine(messageId, failed.failedRuns)) ?? line(failed.mail));
       }
-      if (failed.mail.status === "not-moved") {
-        log.warn(line(failed.mail, { retryPending: true }));
-      }
-      yield* settleLogged(messageId, uid, failed.mail, line);
+      yield* settleFailed(messageId, uid, failed.mail, line);
     }).pipe(Effect.catchTag("LedgerError", ({ message }) => holdBack(messageId, message)));
 
   /**
@@ -486,11 +504,7 @@ export function watchMailbox({
         const fate = ended.success;
         const line = (mail: MailFate, options?: DescribeOptions) =>
           `hex: Intake ${messageId}: failed permanently; ${describeMove(mail, options)}`;
-        // A failed move is warned of before it is tried again, as after a counted failed run.
-        if (fate.status === "not-moved") {
-          log.warn(line(fate, { retryPending: true }));
-        }
-        yield* settleLogged(messageId, uid, fate, line);
+        yield* settleFailed(messageId, uid, fate, line);
         return false;
       });
 

@@ -692,6 +692,29 @@ describe("watchMailbox", () => {
     ]);
   });
 
+  test("an Intake at its failed-run limit still goes to hex/failed when the warning of its refused move throws", async () => {
+    const hex = await freshWatcher();
+    await hex.ledger((ledger) =>
+      Effect.forEach(["r1", "r2", "r3", "r4", "r5"], (run) =>
+        ledger.recordFailedRun("limit-broken@shop.example", run),
+      ),
+    );
+    hex.mailbox.refuse("moving mail to hex/failed");
+    hex.failing.line = "tries the move once more";
+    hex.mailbox.deliver(emlOf("limit-broken@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit-broken@shop.example"]);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual([]);
+    expect(hex.asked).toEqual([]);
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^error: hex: mailbox: the watcher failed unexpectedly: .*the logger broke/s,
+      ),
+    );
+  });
+
   /**
    * An always-failing Intake `messageId` driven to its 5th failed run, `atFifth` done to the
    * mailbox just before it.
@@ -1152,6 +1175,31 @@ describe("watchMailbox", () => {
       ),
       "warn: hex: Intake rejected-refused@shop.example: failed run 5 of 5, so the Intake failed permanently: its mail was moved to hex/failed",
     ]);
+  });
+
+  test("a run whose start rejects a 5th time still has its refused move tried again when its warning throws", async () => {
+    const hex = await freshWatcher({
+      workflow: startingWith(() => Promise.reject(new Error("storage write failed"))),
+    });
+    hex.mailbox.deliver(emlOf("rejected-broken@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      if (run === 5) {
+        hex.mailbox.refuse("moving mail to hex/failed");
+        hex.failing.line = "tries the move once more";
+      }
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["rejected-broken@shop.example"]);
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^error: hex: mailbox: the watcher failed unexpectedly: .*the logger broke/s,
+      ),
+    );
   });
 
   test("a run whose start rejects a 5th time moves its mail to hex/failed, said once", async () => {
