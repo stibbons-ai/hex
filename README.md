@@ -274,7 +274,8 @@ settings, and runs it for every mail in the intake mailbox (see [Mailbox](#mailb
 
 The workflow, in order:
 
-1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`) is in the ledger was
+1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>` and without the
+   comments around it, `<a@b> (comment)` being `a@b`) is in the ledger was
    processed before; the run ends there, files or forwards nothing and moves its mail to
    `hex/processed` (as in step 8), and posts no Intake report.
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
@@ -356,7 +357,8 @@ The workflow, in order:
    failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
    restart posts its report again, as it repeats its move.
 8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
-   (compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail moves too), goes
+   (without the comments around it, compared trimmed and without any layers of `<>`, as the ledger
+   does, so a re-delivered mail moves too), goes
    to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
    the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
@@ -475,6 +477,11 @@ three or more layers, or with two through `workflows.start` or Studio, keeps its
 longer matches; such an Intake would run again. None is known to exist (no such Message-ID is
 valid), so the rows aren't rewritten.
 
+Since #50, the comments around a Message-ID are dropped (`<a@b> (comment)` is `a@b`, as the
+server's ENVELOPE reads it); before, they were part of the key. A ledger row of an Intake read
+before from a Message-ID with comments keeps its old key and no longer matches; such a mail would
+run again. The rows aren't rewritten.
+
 ### Mailbox
 
 With a `mailbox` section in the config file, the server watches one folder of an IMAP mailbox
@@ -521,7 +528,7 @@ counts, read or not; hex fetches mail with `BODY.PEEK`, so it never marks one re
 sets or reads flags. Each look goes through the folder's mail in order, one run at a time:
 
 - a mail that can't become an Intake (no usable Message-ID: missing, or blank without its
-  brackets; no usable received date; not a mail) goes
+  brackets and comments; no usable received date; not a mail) goes
   to `hex/failed` at once, without a run, the reason logged;
 - an Intake already processed (in the ledger) only has its mail moved to `hex/processed`;
 - an Intake with a run active in `mastra.db` (one resumed after a restart, say) is left alone,

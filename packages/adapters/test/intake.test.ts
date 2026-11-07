@@ -267,12 +267,35 @@ describe("readEml", () => {
     expect(message).toContain("/mail/no-date.eml: no Received or Date header with a usable date");
   });
 
-  test("no Message-ID fails, naming the file", async () => {
+  test.each([
+    ["no Message-ID", undefined],
+    ["a Message-ID inside an unclosed comment", "Message-ID: (open <a@b>"],
+  ])("%s fails, naming the file", async (_case, messageId) => {
+    const lines = headers.filter((line) => !line.startsWith("Message-ID"));
     const message = await failure(
-      eml(...headers.filter((line) => !line.startsWith("Message-ID")), "", "body"),
+      eml(...lines, ...(messageId ? [messageId] : []), "", "body"),
       "/mail/no-id.eml",
     );
     expect(message).toContain("/mail/no-id.eml: no usable Message-ID (missing or blank)");
+  });
+
+  test.each([
+    ["a trailing comment", ["Message-ID: <a@b> (a comment)"]],
+    ["a leading comment", ["Message-ID: (pre) <a@b>"]],
+    ["a folded comment", ["Message-ID: <a@b>", " (folded", "\tcomment)"]],
+    ["a nested comment", ["Message-ID: <a@b> (x (nested) y)"]],
+    ["an escaped paren in a comment", ["Message-ID: <a@b> (escaped \\) paren)"]],
+    ["an unclosed comment after the id", ["Message-ID: <a@b> (open"]],
+  ])("a Message-ID with %s is keyed without it", async (_case, messageIdLines) => {
+    const intake = await read(
+      eml(
+        ...headers.filter((line) => !line.startsWith("Message-ID")),
+        ...messageIdLines,
+        "",
+        "body",
+      ),
+    );
+    expect(intake.messageId).toBe("a@b");
   });
 
   test("bytes that are no mail fail as not an email, naming the file", async () => {

@@ -4,6 +4,7 @@ import {
   contentIdReferences,
   isCalendarDate,
   normalizeMessageId,
+  withoutMessageIdComments,
 } from "@hex/domain";
 import { Data, Effect, Schema } from "effect";
 import PostalMime from "postal-mime";
@@ -167,7 +168,7 @@ function parseMailDate(value: string): Date | undefined {
  * topmost `Received:` header (added by the receiving server) when that parses
  * ({@link parseMailDate}), else the `Date:` header. An attached mail (`message/rfc822`) stays one
  * attachment, never unpacked. Fails, naming `source`, when the bytes are no mail, or the mail
- * has no usable Message-ID (missing, or blank without its brackets) or no usable date.
+ * has no usable Message-ID (missing, or blank without its brackets and comments) or no usable date.
  */
 export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake, IntakeReadError> {
   return Effect.gen(function* () {
@@ -184,7 +185,7 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
     if (email.headers.length === 0) {
       return yield* new IntakeReadError({ message: `${source}: not an email (no headers)` });
     }
-    const messageId = normalizeMessageId(email.messageId ?? "");
+    const messageId = normalizeMessageId(withoutMessageIdComments(email.messageId ?? ""));
     if (!messageId) {
       return yield* new IntakeReadError({
         message: `${source}: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once`,
