@@ -715,6 +715,40 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("an Intake at its failed-run limit whose move fails for good ends the look with the mailbox error, not the warning's logger defect", async () => {
+    const hex = await freshWatcher();
+    await hex.ledger((ledger) =>
+      Effect.forEach(["r1", "r2", "r3", "r4", "r5"], (run) =>
+        ledger.recordFailedRun("limit-gone@shop.example", run),
+      ),
+    );
+    hex.mailbox.refuse("moving mail to hex/failed");
+    // The warning of the refused move throws, and the connection drops as it does: both moves
+    // that settle the mail (by Message-ID, then by UID) fail with it.
+    let line: string | undefined = "tries the move once more";
+    Object.defineProperty(hex.failing, "line", {
+      get: () => line,
+      set: (next: string | undefined) => {
+        line = next;
+        hex.mailbox.disconnect(2);
+      },
+    });
+    hex.mailbox.deliver(emlOf("limit-gone@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.operations.slice(2, 5)).toEqual([
+      "moving mail to hex/failed",
+      "moving mail to hex/failed",
+      "moving mail to hex/failed",
+    ]);
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^warn: hex: mailbox: UID 1 \(limit-gone@shop\.example as the server reads it\): .*folder INBOX: moving mail to hex\/failed failed: connection lost; trying again in 0 s \(attempt 1\)$/,
+      ),
+    );
+    expect(hex.log().some((line) => line.includes("the logger broke"))).toBe(false);
+  });
+
   /**
    * An always-failing Intake `messageId` driven to its 5th failed run, `atFifth` done to the
    * mailbox just before it.
