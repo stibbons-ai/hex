@@ -274,7 +274,9 @@ settings, and runs it for every mail in the intake mailbox (see [Mailbox](#mailb
 
 The workflow, in order:
 
-1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`) is in the ledger was
+1. **Ledger check**: an Intake whose Message-ID (trimmed, without any layers of `<>`; in mail hex
+   reads, by the watcher or `bun run intake`, also without the comments around it, `<a@b> (comment)`
+   being `a@b`; one given through `workflows.start` or Studio keeps its comments) is in the ledger was
    processed before; the run ends there, files or forwards nothing and moves its mail to
    `hex/processed` (as in step 8), and posts no Intake report.
 2. **Document detection** (`packages/domain/src/document.ts`): a Document is a PDF (also
@@ -317,12 +319,13 @@ The workflow, in order:
    answers blind; HEIC, HEIF, TIFF and BMP images (or AVIF content declared as another image
    type) Mastra would send but OpenAI and Anthropic refuse, failing the run every time. A model
    call that fails (network, missing or wrong API key, rate limit, provider error, a provider
-   refusing the file) fails the Filing branch before any of its Documents is filed, so running
-   the Intake again retries it; transient errors (rate limit, overload, a dropped or refused connection)
-   are retried twice first, at least 3 s apart (longer when the provider asks, up to 30 s). A
-   Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps failing
-   its Intake until it is handled by hand. The error names the Document, the model and the HTTP
-   status, if any, and keeps at most 300 characters of the provider's message.
+   refusing the file, no answer within 2 minutes) fails the Filing branch before any of its
+   Documents is filed, so running the Intake again retries it; transient errors (rate limit,
+   overload, a dropped or refused connection) are retried twice first, at least 3 s apart (longer
+   when the provider asks, up to 30 s), all within those 2 minutes, past which the call is
+   aborted. A Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps
+   failing its Intake until it is handled by hand. The error names the Document, the model and
+   the HTTP status, if any, and keeps at most 300 characters of the provider's message.
 5. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,
@@ -355,9 +358,11 @@ The workflow, in order:
    under [Chat](#chat-slack-signal)) before its mail moves; a failed run's goes after the
    failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
    restart posts its report again, as it repeats its move.
-8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
-   (compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail moves too), goes
-   to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
+8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID,
+   goes to `hex/processed`. For a mail hex read, that Message-ID is without its comments. It is
+   compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail
+   moves too. That holds as long as the server's ENVELOPE drops the comments as well, as
+   Dovecot's does. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
    the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
    nothing. A move to `hex/processed` that fails (the IMAP server unreachable) is reported, the
@@ -475,6 +480,13 @@ three or more layers, or with two through `workflows.start` or Studio, keeps its
 longer matches; such an Intake would run again. None is known to exist (no such Message-ID is
 valid), so the rows aren't rewritten.
 
+Since #50, a Message-ID read from a mail (by the watcher or `bun run intake`) is keyed without the
+comments around it (`<a@b> (comment)` is `a@b`, as Dovecot's ENVELOPE reads it); before, they
+were part of the key. An Intake given through `workflows.start` or Studio keeps its comments in
+the key; only its whitespace and layers of `<>` are dropped.
+Only a ledger row of an Intake read from a mail before #50 whose Message-ID had comments keeps its
+old key and no longer matches; such a mail would run again. The rows aren't rewritten.
+
 ### Mailbox
 
 With a `mailbox` section in the config file, the server watches one folder of an IMAP mailbox
@@ -521,7 +533,7 @@ counts, read or not; hex fetches mail with `BODY.PEEK`, so it never marks one re
 sets or reads flags. Each look goes through the folder's mail in order, one run at a time:
 
 - a mail that can't become an Intake (no usable Message-ID: missing, or blank without its
-  brackets; no usable received date; not a mail) goes
+  brackets and comments; no usable received date; not a mail) goes
   to `hex/failed` at once, without a run, the reason logged;
 - an Intake already processed (in the ledger) only has its mail moved to `hex/processed`;
 - an Intake with a run active in `mastra.db` (one resumed after a restart, say) is left alone,

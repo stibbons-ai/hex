@@ -182,6 +182,17 @@ export interface DateExtractorOptions {
    * refused connection); longer when the provider asks (Retry-After, up to 30 s). Default 3000 ms.
    */
   readonly retryDelayMs?: number;
+  /**
+   * Most time one `extract` call may take, retries included; past it the call (and its HTTP
+   * request) is aborted and fails with a {@link DateExtractionError}. Default 120 000 ms. Nothing
+   * below has a whole-call deadline: Mastra's `modelSettings.timeout` is unset by default, the AI
+   * SDK providers fetch with only the caller's signal, and Bun's `fetch` only has a 5-minute
+   * socket idle timeout that any received byte restarts. A silent provider would hold the mailbox
+   * watcher at least 5 minutes per attempt, one that trickles bytes for good. (@mastra/core 1.80.0
+   * `createTimeoutAbortSignal`; @ai-sdk/provider-utils 4.0.61 `postToApi`; Bun
+   * `BunFetchRequestInit.timeout`)
+   */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -189,12 +200,12 @@ export interface DateExtractorOptions {
  * provider's usual variable, e.g. `OPENAI_API_KEY`) or a model instance (tests pass a mock). Each
  * Document goes to the model natively as a file part with its media type; the answer comes back
  * as structured output. A reply that yields no object matching the schema (see `extract`) is
- * undefined (Mastra's `warn` strategy), not an error. The agent logs nothing: the error carries
- * what went wrong.
+ * undefined (Mastra's `warn` strategy), not an error. A call taking longer than `timeoutMs` is
+ * aborted and fails. The agent logs nothing: the error carries what went wrong.
  */
 export function dateExtractorLayer(
   model: MastraModelConfig,
-  { retryDelayMs = 3000 }: DateExtractorOptions = {},
+  { retryDelayMs = 3000, timeoutMs = 120_000 }: DateExtractorOptions = {},
 ): Layer.Layer<DateExtractor> {
   // Never register this Agent on a Mastra instance: its logger would replace the no-op one and
   // log provider errors, which hold the request and with it the Document.
@@ -213,9 +224,11 @@ export function dateExtractorLayer(
   });
   agent.__setLogger(noopLogger);
   const schema = toMastraSchema(DocumentDateAnswer);
+  const modelShown = modelName(model);
   return Layer.succeed(DateExtractor, {
-    extract: ({ content, mediaType, fileName }) =>
-      Effect.tryPromise({
+    extract: ({ content, mediaType, fileName }) => {
+      const reading = `reading the Document date of ${JSON.stringify(fileName)} with ${modelShown}`;
+      return Effect.tryPromise({
         try: (signal) =>
           agent.generate(
             [
@@ -233,14 +246,24 @@ export function dateExtractorLayer(
           const shown = excerpt(withoutApiKeys(messageOf(cause)));
           const status = httpStatusOf(cause);
           return new DateExtractionError({
-            message: `reading the Document date of ${JSON.stringify(fileName)} with ${modelName(model)} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,
+            message: `${reading} failed${status === undefined ? "" : ` (HTTP ${status})`}: ${shown}`,
           });
         },
       }).pipe(
+        // Interrupting `tryPromise` aborts its signal (and the request) without waiting for the
+        // call to settle.
+        Effect.timeoutOrElse({
+          duration: timeoutMs,
+          orElse: () =>
+            Effect.fail(
+              new DateExtractionError({ message: `${reading} timed out after ${timeoutMs} ms` }),
+            ),
+        }),
         Effect.map(({ object, steps }): DateExtraction => ({
           answer: object,
           usage: tokenUsageOf(steps),
         })),
-      ),
+      );
+    },
   });
 }
