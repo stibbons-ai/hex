@@ -21,7 +21,7 @@ import {
 import type { DescribeOptions, FailedRun, MailFate, MoveFate } from "./mail-fate";
 
 /** One run of the Intake workflow, as the watcher starts it. */
-interface IntakeRun {
+export interface IntakeRun {
   readonly runId: string;
   start(args: {
     inputData: Intake;
@@ -285,8 +285,9 @@ export function watchMailbox({
     }).pipe(Effect.catchTag("LedgerError", ({ message }) => holdBack(messageId, message)));
 
   /**
-   * The Intake `messageId`, whose failed run the ledger couldn't count (`message`), counted in
-   * memory and held back for {@link retryDelayMs} of its effective failed runs. At
+   * The Intake `messageId`, whose failed run the ledger couldn't count (`message`) or, after a
+   * rejected start, couldn't say whether the Intake was processed nonetheless, counted in memory
+   * and held back for {@link retryDelayMs} of its effective failed runs. At
    * {@link MAX_FAILED_RUNS} it runs no more until hex restarts: the ledger can't fail it
    * permanently. A ledger that did count it to the limit (only ending the count failed) holds
    * nothing back: the next look fails it permanently. A ledger count that can't be read counts
@@ -351,8 +352,15 @@ export function watchMailbox({
         log.warn(
           `hex: Intake ${messageId}: its run failed: ${messageOf(started.failure.cause ?? started.failure)}`,
         );
-        // Mastra can fail to store a run's end after every step ran: then it is processed.
-        if (yield* IntakeLedger.use((ledger) => ledger.find(messageId))) {
+        // Mastra can fail to store a run's end after every step ran: then it is processed. A
+        // ledger that can't tell holds it back as a failed run it can't count.
+        const processed = yield* Effect.result(
+          IntakeLedger.use((ledger) => ledger.find(messageId)),
+        );
+        if (processed._tag === "Failure") {
+          return yield* holdBack(messageId, processed.failure.message);
+        }
+        if (processed.success) {
           return yield* settleProcessed(messageId, uid, "processed nonetheless");
         }
         return yield* countFailedRun(messageId, run.runId, uid);

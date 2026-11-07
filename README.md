@@ -587,7 +587,8 @@ its mail goes to `hex/failed`, the count starting afresh: move it back to the fo
 tries it 5 more times, repeating only the branches that failed. A run that fails before it gets
 to step 7 (an unreadable ledger, a defect), or whose start fails, is counted by the watcher
 instead, unless the ledger shows the Intake processed nonetheless: then its mail goes to
-`hex/processed`.
+`hex/processed`. When the ledger can't be read to tell, the watcher counts that failed run in
+memory (see Limits).
 
 **Limits.** One hex process per mailbox and data directory. An Intake whose run stays active in
 `mastra.db` without resuming (Mastra gave up restarting it) waits for the next start; an active
