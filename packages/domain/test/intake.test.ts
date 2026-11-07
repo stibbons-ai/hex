@@ -60,6 +60,14 @@ describe("withoutMessageIdComments", () => {
     ['<"a>(b)"@c> (d)', '"a>(b)"@c'],
     ['<"a\\">(b)"@c> (d)', '"a\\">(b)"@c'],
     ["<a@[x\\]>(y)]> (d)", "a@[x\\]>(y)]"],
+    // A comment in the brackets (obsolete syntax) is part of the id; `>` or `"` in it don't end it.
+    ["<a(x>(1))@b>", "a(x>(1))@b"],
+    ["<a@b (x>(1))> (c)", "a@b (x>(1))"],
+    ['<a(")@b> (c)', 'a(")@b'],
+    ["<a@(x>)b(z)>", "a@(x>)b(z)"],
+    ["<a(x\\)>(1))@b> (c)", "a(x\\)>(1))@b"],
+    // Unclosed in the brackets: the rest of the value stays as it is.
+    ["<a(x> (c)", "<a(x> (c)"],
     // Unclosed: the rest of the value stays as it is.
     ["<a@[x> (c)", "<a@[x> (c)"],
     ['<"a> (c)', '<"a> (c)'],
@@ -101,9 +109,17 @@ describe("withoutMessageIdComments", () => {
     ["100,000 quoted pairs in a domain literal", `a@[${"\\]>(".repeat(100_000)}]`],
     ["100,000 quoted strings in a row", `${'">("'.repeat(100_000)}@x`],
     ["100,000 domain literals in a row", `a@${"[>(]".repeat(100_000)}`],
+    ["100,000 nested comments", `a${"(>".repeat(100_000)}${")".repeat(100_000)}@x`],
   ])("%s in the brackets, as any sender can write, take linear time", (_case, id) => {
     const started = performance.now();
     expect(normalizeMessageId(withoutMessageIdComments(`<${id}> (c)`))).toBe(id);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  test("100,000 unmatched `<`, as any sender can write, take linear time", () => {
+    const raw = `${"<".repeat(100_000)} (c)`;
+    const started = performance.now();
+    expect(normalizeMessageId(withoutMessageIdComments(raw))).toBe(raw);
     expect(performance.now() - started).toBeLessThan(50);
   });
 });

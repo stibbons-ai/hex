@@ -307,6 +307,8 @@ describe("readEml", () => {
     ["<a@[x>(two)]> (relay)", "a@[x>(two)]"],
     ['<"a>(one)"@b> (relay)', '"a>(one)"@b'],
     ['<"a>(two)"@b> (relay)', '"a>(two)"@b'],
+    ["<a(x>(1))@b>", "a(x>(1))@b"],
+    ["<a(x>(2))@b> (relay)", "a(x>(2))@b"],
   ])(
     "a Message-ID %j keeps the parens in its brackets, so it's keyed %j",
     async (messageId, expected) => {
@@ -321,6 +323,18 @@ describe("readEml", () => {
       expect(intake.messageId).toBe(expected);
     },
   );
+
+  test("a stray `)` outside the brackets and any comment stays in the key as text", async () => {
+    const intake = await read(
+      eml(
+        ...headers.filter((line) => !line.startsWith("Message-ID")),
+        "Message-ID: <a@b> )",
+        "",
+        "body",
+      ),
+    );
+    expect(intake.messageId).toBe("<a@b> )");
+  });
 
   test("bytes that are no mail fail as not an email, naming the file", async () => {
     const message = await failure(new Uint8Array([0, 159, 146, 150]), "/mail/garbage.eml");

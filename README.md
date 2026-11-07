@@ -357,11 +357,11 @@ The workflow, in order:
    under [Chat](#chat-slack-signal)) before its mail moves; a failed run's goes after the
    failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
    restart posts its report again, as it repeats its move.
-8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
-   (for a mail hex read, without comments; compared trimmed and without any layers of `<>`, as
-   the ledger does, so a re-delivered mail moves too, as long as the server's ENVELOPE drops the
-   comments too, as Dovecot's does), goes to `hex/processed`. A failed run counts the failure
-   instead (see [Mailbox](#mailbox)); on its
+8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID,
+   goes to `hex/processed`. For a mail hex read, that Message-ID is without its comments. It is
+   compared trimmed and without any layers of `<>`, as the ledger does, so a re-delivered mail
+   moves too. That holds as long as the server's ENVELOPE drops the comments as well, as
+   Dovecot's does. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
    the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
    nothing. A move to `hex/processed` that fails (the IMAP server unreachable) is reported, the
@@ -481,7 +481,8 @@ valid), so the rows aren't rewritten.
 
 Since #50, a Message-ID read from a mail (by the watcher or `bun run intake`) is keyed without the
 comments around it (`<a@b> (comment)` is `a@b`, as Dovecot's ENVELOPE reads it); before, they
-were part of the key. An Intake given through `workflows.start` or Studio is still keyed as given.
+were part of the key. An Intake given through `workflows.start` or Studio keeps its comments in
+the key; only its whitespace and layers of `<>` are dropped.
 Only a ledger row of an Intake read from a mail before #50 whose Message-ID had comments keeps its
 old key and no longer matches; such a mail would run again. The rows aren't rewritten.
 

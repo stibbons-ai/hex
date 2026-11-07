@@ -27,10 +27,13 @@ export function normalizeMessageId(messageId: string): string {
  * `\x` inside one is a quoted pair (`(a \) b)` is one comment). Everything inside angle brackets
  * is part of the id and stays, parens included; there a quoted string (`"…"`) or a domain literal
  * (`[…]`) runs to its unescaped closing `"` or `]`, `\x` inside it being a quoted pair, and a `>`
- * in it doesn't close the brackets (`<a@[x>(y)]>` → `a@[x>(y)]`). An unclosed quoted string or
- * domain literal keeps the rest of the value as it is. An unclosed comment runs to the end of the
- * value; a stray `)` is plain text. For a raw header value only, never a normalised key: without
- * its brackets, parens inside an id would count as a comment (`<a(b)c@d>` → `a(b)c@d` → `a c@d`).
+ * in it doesn't close the brackets (`<a@[x>(y)]>` → `a@[x>(y)]`). A comment inside the brackets
+ * (RFC 5322 obsolete syntax) stays too and is read like one outside, so a `>`, `"` or `[` in it
+ * is comment text (`<a(x>(1))@b>` → `a(x>(1))@b`). An unclosed quoted string, domain literal or
+ * comment inside the brackets keeps the rest of the value as it is. An unclosed comment outside
+ * them runs to the end of the value; a stray `)` is plain text. For a raw header value only,
+ * never a normalised key: without its brackets, parens inside an id would count as a comment
+ * (`<a(b)c@d>` → `a(b)c@d` → `a c@d`).
  */
 export function withoutMessageIdComments(value: string): string {
   // One pass with no backtracking: a sender controls the input.
@@ -50,19 +53,30 @@ export function withoutMessageIdComments(value: string): string {
       if (char === ">") inBrackets = false;
       else if (char === '"') closer = '"';
       else if (char === "[") closer = "]";
+      else if (char === "(") i = afterComment(value, i);
     } else if (char === "(") {
       result += `${value.slice(kept, i - 1)} `;
-      let depth = 1;
-      while (depth > 0 && i < value.length) {
-        const inner = value[i++];
-        if (inner === "\\") i++;
-        else if (inner === "(") depth++;
-        else if (inner === ")") depth--;
-      }
+      i = afterComment(value, i);
       kept = i;
     }
   }
   return result + value.slice(kept);
+}
+
+/**
+ * Where the comment opened just before `start` ends: past its matching `)`, or the end of the
+ * value when it isn't closed. Comments nest; `\x` is a quoted pair.
+ */
+function afterComment(value: string, start: number): number {
+  let depth = 1;
+  let i = start;
+  while (depth > 0 && i < value.length) {
+    const char = value[i++];
+    if (char === "\\") i++;
+    else if (char === "(") depth++;
+    else if (char === ")") depth--;
+  }
+  return i;
 }
 
 /** What `String.prototype.trim` removes. */
