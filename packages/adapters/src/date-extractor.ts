@@ -188,7 +188,9 @@ export interface DateExtractorOptions {
    * below has a whole-call deadline: Mastra's `modelSettings.timeout` is unset by default, the AI
    * SDK providers fetch with only the caller's signal, and Bun's `fetch` only has a 5-minute
    * socket idle timeout that any received byte restarts. A silent provider would hold the mailbox
-   * watcher at least 5 minutes per attempt, one that trickles bytes for good.
+   * watcher at least 5 minutes per attempt, one that trickles bytes for good. (@mastra/core 1.80.0
+   * `createTimeoutAbortSignal`; @ai-sdk/provider-utils 4.0.61 `postToApi`; Bun
+   * `BunFetchRequestInit.timeout`)
    */
   readonly timeoutMs?: number;
 }
@@ -248,7 +250,8 @@ export function dateExtractorLayer(
           });
         },
       }).pipe(
-        // Interrupting `tryPromise` aborts its signal, and with it the request.
+        // Interrupting `tryPromise` aborts its signal (and the request) without waiting for the
+        // call to settle.
         Effect.timeoutOrElse({
           duration: timeoutMs,
           orElse: () =>

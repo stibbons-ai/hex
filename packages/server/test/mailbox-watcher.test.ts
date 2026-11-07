@@ -1084,7 +1084,7 @@ describe("watchMailbox", () => {
       },
     });
     const hex = await freshWatcher({
-      dateExtractor: dateExtractorLayer(model, { retryDelayMs: 0, timeoutMs: 100 }),
+      dateExtractor: dateExtractorLayer(model, { retryDelayMs: 0, timeoutMs: 500 }),
     });
     hex.mailbox.deliver(emlOf("hung@shop.example", "hung.pdf"));
     hex.mailbox.deliver(emlOf("next@shop.example", "next.pdf"));
@@ -1094,7 +1094,7 @@ describe("watchMailbox", () => {
       count: 1,
     });
     expect(hex.log()).toContain(
-      'warn: hex: Intake hung@shop.example: the run failed: filing: reading the Document date of "hung.pdf" with mock-provider/mock-model-id timed out after 100 ms; failed run 1 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now',
+      'warn: hex: Intake hung@shop.example: the run failed: filing: reading the Document date of "hung.pdf" with mock-provider/mock-model-id timed out after 500 ms; failed run 1 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now',
     );
     expect(hex.mailbox.messageIds()).toEqual(["hung@shop.example"]);
     expect(hex.mailbox.messageIds("hex/processed")).toEqual(["next@shop.example"]);
