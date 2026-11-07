@@ -549,15 +549,15 @@ error with a stack Mastra logs for a failing step is left out for the error the 
 ends it with on purpose, once the step has done what it can for the failed run (counted it,
 reported it). Any other run (resumed at boot, started with `workflows.start` or in Studio) keeps
 Mastra's `[WORKFLOW] Error executing step …` line with its stack as its log record, and any other
-step error (a defect) still logs its error and stack. If hex stops (or Mastra fails to store the
-run's end) between that step's failure and the watcher seeing it, the run's failure has no log
-line; the ledger counts it and the Intake report (if on) carries the reason. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake report
-that couldn't be posted
-is warned of by the run that posted it, also one resumed at boot (`hex: Intake <id>: its Intake
-report was not posted: <reason>`). For a run of the watcher's own, a move to `hex/failed` that
-fails is tried once more, by Message-ID and then by UID, and after one that went through, the mail
-the watcher looked at goes too if still there (a copy whose Message-ID the server reads
+step error (a defect) still logs its error and stack. If hex stops between that step's failure and
+the watcher seeing it, the run's failure has no log line; if Mastra fails to store the run's end,
+the watcher's line names that storage error instead of the run's reason. Either way the ledger
+counts the run and the Intake report (if on) carries the reason. Every failed-run consequence (a
+mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake report that couldn't
+be posted is warned of by the run that posted it, also one resumed at boot (`hex: Intake <id>: its
+Intake report was not posted: <reason>`). For a run of the watcher's own, a move to `hex/failed`
+that fails is tried once more, by Message-ID and then by UID, and after one that went through, the
+mail the watcher looked at goes too if still there (a copy whose Message-ID the server reads
 differently). When the retries fail too (or the run was one resumed at boot, which the watcher
 doesn't follow), the Intake's count is ended already, so the next look runs it afresh, a new series
 of 5 runs, as the warning says. When the watcher's retry finds the mail gone, the first move's
