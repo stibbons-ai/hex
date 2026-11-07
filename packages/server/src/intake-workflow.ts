@@ -29,6 +29,7 @@ import { Mastra } from "@mastra/core/mastra";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { Effect, Layer, ManagedRuntime, Option, Schedule, Schema } from "effect";
 import { closeInOrder } from "./close";
+import { FollowedRuns, followedRunsLayer } from "./followed-runs";
 import { HeldBack, heldBackLayer } from "./held-back";
 import type { DataPaths } from "./paths";
 import { mainChannelOff } from "./main-channel";
@@ -146,7 +147,8 @@ type IntakeServices =
   | Mailer
   | Mailbox
   | MainChannel
-  | HeldBack;
+  | HeldBack
+  | FollowedRuns;
 
 /** The services the workflow's steps run on, in one shared runtime (ADR 0002). */
 export type IntakeRuntime = ManagedRuntime.ManagedRuntime<
@@ -213,6 +215,7 @@ export function createIntakeRuntime(
       mainChannel,
       mailbox,
       heldBackLayer,
+      followedRunsLayer,
     ),
   );
 }
@@ -631,7 +634,7 @@ export function createIntakeWorkflow({
         const filed = getStepResult(file);
         // The failure stays the run's error even when the ledger can't count it, and whatever
         // became of its report.
-        const { text, mail, report } = await runtime.runPromise(
+        const { text, mail, report, followed } = await runtime.runPromise(
           Effect.gen(function* () {
             const counted = yield* recordFailedRun(messageId, runId).pipe(
               Effect.flatMap((failed) =>
@@ -683,11 +686,17 @@ export function createIntakeWorkflow({
                 consequence: counted.consequence,
               },
             });
-            return { ...counted, report };
+            const followed = yield* FollowedRuns.useSync((runs) => runs.has(runId));
+            return { ...counted, report, followed };
           }),
         );
         warnUnposted(logger, normalizeMessageId(messageId), report);
-        throw new FailedRunError(`${inputData.failure}; ${text}`, mail, report);
+        const message = `${inputData.failure}; ${text}`;
+        // A run the mailbox watcher follows gets its outcome logged by it: then Mastra's own line
+        // for the step error is left out (FailedRunError); for any other run it stays.
+        throw followed
+          ? new FailedRunError(message, mail, report)
+          : Object.assign(new Error(message), { mail, report });
       }
       const result = await run(
         IntakeResult,
@@ -743,10 +752,13 @@ export class IntakeRunError extends Error {
 }
 
 /**
- * The error the move step ends a failed run with on purpose, once it counted the run and posted
- * its report, so Mastra marks the run failed. Expected, and logged by the run's caller: hex's
- * Mastra logger keeps Mastra's step error line for it out of the log (see `createHexMastra`).
- * Carries what became of the mail and of the run's Intake report, read by
+ * The error the move step ends a failed run with on purpose, once the step has done what it can
+ * for the failed run (counted it, reported it), so Mastra marks the run failed; thrown for a run
+ * the mailbox watcher follows ({@link FollowedRuns}), which logs the outcome itself (`hex: Intake
+ * <id>: the run failed: <reason>`). hex's Mastra logger keeps Mastra's step error line and stack
+ * for it out of the log (see `createHexMastra`). Any other run (resumed at boot, started over oRPC
+ * or in Studio) ends with a plain Error carrying the same, so Mastra's line, with its stack, stays
+ * its log record. Carries what became of the mail and of the run's Intake report, read by
  * {@link mailFateOf} and {@link reportFateOf}.
  */
 export class FailedRunError extends Error {

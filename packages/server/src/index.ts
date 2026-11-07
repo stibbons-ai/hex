@@ -38,8 +38,8 @@ export interface ServerOptions {
   /** TCP port; 0 picks a free one. */
   port: number;
   /**
-   * Mastra's logger, which also logs server faults in requests (not caller errors); omitted keeps
-   * Mastra's default. `false` silences it (tests only).
+   * Mastra's logger, which also logs server faults in requests (not caller errors); omitted or
+   * `false` as `HexMastraOptions.logger` says.
    */
   logger?: IMastraLogger | false;
   /** Workflows to register with Mastra. */
