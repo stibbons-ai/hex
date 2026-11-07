@@ -188,7 +188,7 @@ export function readEml(bytes: Uint8Array, source: string): Effect.Effect<Intake
     const messageId = normalizeMessageId(withoutMessageIdComments(email.messageId ?? ""));
     if (!messageId) {
       return yield* new IntakeReadError({
-        message: `${source}: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once`,
+        message: `${source}: no usable Message-ID (missing, or blank without its brackets and comments), so the Intake can't be processed exactly once`,
       });
     }
     // Comments first: a `;` inside a trailing comment must not split the header.

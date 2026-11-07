@@ -347,10 +347,10 @@ describe("watchMailbox", () => {
     expect(hex.asked).toEqual([]);
     expect(await hex.runs()).toEqual([]);
     expect(hex.log()).toContain(
-      "warn: hex: mailbox: INBOX UID 1: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once; moving it to hex/failed",
+      "warn: hex: mailbox: INBOX UID 1: no usable Message-ID (missing, or blank without its brackets and comments), so the Intake can't be processed exactly once; moving it to hex/failed",
     );
     expect(hex.log()).toContain(
-      "warn: hex: mailbox: INBOX UID 3: no usable Message-ID (missing or blank), so the Intake can't be processed exactly once; moving it to hex/failed",
+      "warn: hex: mailbox: INBOX UID 3: no usable Message-ID (missing, or blank without its brackets and comments), so the Intake can't be processed exactly once; moving it to hex/failed",
     );
   });
 

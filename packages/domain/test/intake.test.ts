@@ -47,8 +47,13 @@ describe("withoutMessageIdComments", () => {
     ["<a@b> (escaped \\) paren)", "a@b"],
     ["<a@b> (escaped \\( paren)", "a@b"],
     ["<a@b> (backslash \\\\) (second)", "a@b"],
+    ["(backslash \\\\) <a@b>", "a@b"],
     ["<a(b)c@d>", "a(b)c@d"],
     ["<<a(b)c@d>> (comment)", "a(b)c@d"],
+    // One unmatched `<` doesn't stop stripping after the next `>`.
+    ["<<a@b> (c)", "<a@b"],
+    // Nor does a stray `>` before a comment.
+    ["> (c) <a@b>", ">   <a@b>"],
     // Unclosed: the rest of the value is comment.
     ["<a@b> (open", "a@b"],
     ["<a@b> (open (nested) \\", "a@b"],
@@ -67,6 +72,7 @@ describe("withoutMessageIdComments", () => {
     ["100,000 nested unclosed comments", `<deep@x> ${"(".repeat(100_000)}`],
     ["100,000 quoted pairs in a comment", `(${"\\(".repeat(100_000)}) <deep@x>`],
     ["100,000 comments in a row", `${"()".repeat(100_000)}<deep@x>`],
+    ["100,000 nested closed comments", `${"(".repeat(100_000)}${")".repeat(100_000)}<deep@x>`],
   ])("%s, as any sender can write, take linear time", (_case, raw) => {
     const started = performance.now();
     expect(normalizeMessageId(withoutMessageIdComments(raw))).toBe("deep@x");

@@ -276,7 +276,9 @@ describe("readEml", () => {
       eml(...lines, ...(messageId ? [messageId] : []), "", "body"),
       "/mail/no-id.eml",
     );
-    expect(message).toContain("/mail/no-id.eml: no usable Message-ID (missing or blank)");
+    expect(message).toContain(
+      "/mail/no-id.eml: no usable Message-ID (missing, or blank without its brackets and comments)",
+    );
   });
 
   test.each([

@@ -259,7 +259,10 @@ describe("bun run intake", () => {
       "a mail without Message-ID",
       async () => {
         const path = await writeMail("no-id.eml", { received: RECEIVED });
-        return { args: [path], message: `${path}: no usable Message-ID (missing or blank)` };
+        return {
+          args: [path],
+          message: `${path}: no usable Message-ID (missing, or blank without its brackets and comments)`,
+        };
       },
     ],
   ])("%s fails with exit code 1 and a clear message", async (_case, setup) => {
