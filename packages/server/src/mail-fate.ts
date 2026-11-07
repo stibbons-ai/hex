@@ -6,6 +6,7 @@ import { Effect, Option, Schema } from "effect";
 
 /** How many copies a move took along: at least the one it was asked to move. */
 const Copies = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+const decodeCopies = Schema.decodeSync(Copies);
 
 /** What a move of the Intake's mail to `to`'s folder did. */
 const moveFates = <To extends MailOutcome>(to: To) =>
@@ -75,7 +76,7 @@ export const retryDelayMs = (failedRuns: number) => 5 * 60_000 * 2 ** (failedRun
  * is not an integer of at least 1.
  */
 export const moved = <To extends MailOutcome>(to: To, copies: number) =>
-  ({ status: "moved", to, copies: Schema.decodeSync(Copies)(copies) }) as MoveFateWith<To, "moved">;
+  ({ status: "moved", to, copies: decodeCopies(copies) }) as MoveFateWith<To, "moved">;
 
 /** A move to `to`'s folder that found no copy in the watched folder. */
 export const notInMailbox = <To extends MailOutcome>(to: To) =>
