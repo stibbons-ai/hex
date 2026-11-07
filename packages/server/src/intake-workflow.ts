@@ -687,7 +687,7 @@ export function createIntakeWorkflow({
           }),
         );
         warnUnposted(logger, normalizeMessageId(messageId), report);
-        throw Object.assign(new Error(`${inputData.failure}; ${text}`), { mail, report });
+        throw new FailedRunError(`${inputData.failure}; ${text}`, mail, report);
       }
       const result = await run(
         IntakeResult,
@@ -735,6 +735,23 @@ export class IntakeRunError extends Error {
     message: string,
     readonly forwardings: readonly ForwardingAttempt[],
     readonly filings: readonly RunFiling[],
+    readonly mail: FailedRunMailFate | undefined,
+    readonly report: ReportFate | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * The error the move step ends a failed run with on purpose, once it counted the run and posted
+ * its report, so Mastra marks the run failed. Expected, and logged by the run's caller: hex's
+ * Mastra logger keeps Mastra's step error line for it out of the log (see `createHexMastra`).
+ * Carries what became of the mail and of the run's Intake report, read by
+ * {@link mailFateOf} and {@link reportFateOf}.
+ */
+export class FailedRunError extends Error {
+  constructor(
+    message: string,
     readonly mail: FailedRunMailFate | undefined,
     readonly report: ReportFate | undefined,
   ) {

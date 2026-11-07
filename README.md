@@ -543,8 +543,12 @@ connection, UIDs that changed meaning since the listing (UIDVALIDITY), a failure
 folder or the active runs or to wait for news (all at warn, naming the mail when there is one),
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
-is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake
+is a warning; a mail of a processed Intake stays and a later look moves it. A failed run is
+logged as a warning (`hex: Intake <id>: the run failed: <reason>`): the error with a stack Mastra logs for a
+failing step is left out for the error the run's last step ends it with on purpose, once the run
+is counted and reported (also in Studio), while any other step error (a defect) still logs its
+error and stack. Every failed-run consequence (a mail moved to `hex/failed`, or kept for a retry)
+is a warning too. An Intake
 report that couldn't be posted is warned of by the run that posted it, also one resumed at boot
 (`hex: Intake <id>: its Intake report was not posted: <reason>`). For a run of
 the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
