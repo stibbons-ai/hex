@@ -555,19 +555,29 @@ connection, UIDs that changed meaning since the listing (UIDVALIDITY), a failure
 folder or the active runs or to wait for news (all at warn, naming the mail when there is one),
 or anything unexpected (at error) ends the look; hex tries again after 1 s, doubling up to 60 s,
 one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A move that fails
-is a warning; a mail of a processed Intake stays and a later look moves it. Every failed-run
-consequence (a mail moved to `hex/failed`, or kept for a retry) is a warning too. An Intake
-report that couldn't be posted is warned of by the run that posted it, also one resumed at boot
-(`hex: Intake <id>: its Intake report was not posted: <reason>`). For a run of
-the watcher's own, a move to `hex/failed` that fails is tried once more, by Message-ID and then
-by UID, and after one that went through, the mail the watcher looked at goes too if still there
-(a copy whose Message-ID the server reads differently). When the retries fail too (or the run
-was one resumed at boot, which the watcher doesn't follow), the Intake's count is ended already,
-so the next look runs it afresh, a new series of 5 runs, as the warning says. When the watcher's
-retry finds the mail gone, the first move's answer was likely lost although it went through: the
-line says so, pointing at `hex/failed`, instead of a fresh series. A failed run the ledger can't
-count (its writes failing while reads work) is an error, and the watcher counts it in memory
-instead (see Limits).
+is a warning; a mail of a processed Intake stays and a later look moves it. A failed run is logged
+as its warning (`hex: Intake <id>: the run failed: <reason>`) by its last step, once that step has
+done what it can for the failed run (counted it, reported it), however the run was started (by the
+watcher, resumed at boot, with `workflows.start` or in Studio); logged from within the step, the
+line carries the step's trace fields after it on Mastra's console logger (`{ trace_id, span_id }`).
+The error with a stack Mastra logs for a failing step (`[WORKFLOW] Error executing step …`) is left
+out for the error that step then ends the run with on purpose. Any other step error (a defect)
+still logs its error and stack, and the watcher logs the warning itself for a run of its own that
+ended failed otherwise. The step's line comes before Mastra stores the run's end: if that fails,
+then for a run of the watcher's own, its warning names the storage error as well
+(`hex: Intake <id>: its run failed: <reason>`). The ledger counts the run and
+the Intake report (if on) carries the reason. Every failed-run consequence (a mail moved to
+`hex/failed`, or kept for a retry) is a warning too. An Intake report that couldn't be posted is
+warned of by the run that posted it, also one resumed at boot (`hex: Intake <id>: its Intake report
+was not posted: <reason>`). For a run of the watcher's own, a move to `hex/failed` that fails is
+tried once more, by Message-ID and then by UID, and after one that went through, the mail the
+watcher looked at goes too if still there (a copy whose Message-ID the server reads differently).
+When the retries fail too (or the run was one resumed at boot, which the watcher doesn't follow),
+the Intake's count is ended already, so the next look runs it afresh, a new series of 5 runs, as the
+warning says. When the watcher's retry finds the mail gone, the first move's answer was likely lost
+although it went through: the line says so, pointing at `hex/failed`, instead of a fresh series. A
+failed run the ledger can't count (its writes failing while reads work) is an error, and the watcher
+counts it in memory instead (see Limits).
 
 **Outcomes and retries.** A processed Intake's mail goes to `hex/processed`. A failed run leaves
 it in the folder and counts the failure; the Intake is run again no sooner than 5 minutes after

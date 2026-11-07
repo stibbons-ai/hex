@@ -3,6 +3,7 @@ import type { Intake, MailOutcome } from "@hex/adapters";
 import { normalizeMessageId } from "@hex/domain";
 import { Cause, Effect, Exit, Fiber, Option, Schema } from "effect";
 import { HeldBack } from "./held-back";
+import { isFailedRunError } from "./intake-workflow";
 import type { IntakeResult, IntakeRuntime } from "./intake-workflow";
 import {
   MAX_FAILED_RUNS,
@@ -369,9 +370,10 @@ export function watchMailbox({
         return;
       }
       // Mastra's failed result carries the step's error as it serialised it, `message` included.
+      // The move step's own failed run warned of itself; any other failure is told here.
       const error = "error" in result ? result.error : undefined;
       const reason = error ? error.message : `the run ended ${result.status}`;
-      log.warn(`hex: Intake ${messageId}: the run failed: ${reason}`);
+      if (!isFailedRunError(error)) log.warn(`hex: Intake ${messageId}: the run failed: ${reason}`);
       const fate = mailFateOf(error);
       if (fate) {
         if (fate.status === "kept-for-retry") {

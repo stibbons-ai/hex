@@ -1070,6 +1070,26 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("a run a defect in a step ended is told once, with that defect, and counted", async () => {
+    // A promise that rejects, not an Error answer: a defect, which no step handles.
+    const hex = await freshWatcher({
+      script: async () => {
+        throw new TypeError("the extractor broke");
+      },
+    });
+    hex.mailbox.deliver(emlOf("defect@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.log().filter((line) => line.includes("the run failed:"))).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake defect@shop\.example: the run failed: .*the extractor broke/s,
+      ),
+    ]);
+    expect(await hex.ledger((ledger) => ledger.failedRuns("defect@shop.example"))).toMatchObject({
+      count: 1,
+    });
+  });
+
   test("a model call that never answers fails its run, counted; the next mail is processed", async () => {
     let calls = 0;
     // The first call holds until it is aborted, as a provider that never answers would; later

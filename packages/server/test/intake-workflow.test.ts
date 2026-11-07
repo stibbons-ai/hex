@@ -1627,6 +1627,7 @@ describe("Intake workflow", () => {
       expect(hex.mailbox.messageIds()).toEqual(["unposted-failure@shop.example"]);
       expect(hex.warnings).toEqual([
         "hex: Intake unposted-failure@shop.example: its Intake report was not posted: posting to slack failed: channel_not_found",
+        `hex: Intake unposted-failure@shop.example: the run failed: filing: reading the Document date failed: 429${FIRST_FAILED_RUN}`,
       ]);
     });
 
