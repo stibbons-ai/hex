@@ -644,9 +644,9 @@ describe("watchMailbox", () => {
     await hex.scanned();
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit@shop.example"]);
     expect(hex.asked).toEqual([]);
-    expect(hex.log()).toContain(
+    expect(hex.log().filter((line) => line.includes("limit@shop.example"))).toEqual([
       "warn: hex: Intake limit@shop.example: failed permanently; its mail was moved to hex/failed",
-    );
+    ]);
   });
 
   test("an Intake at its failed-run limit whose move to hex/failed is refused warns of it before the move is tried again", async () => {
@@ -662,17 +662,34 @@ describe("watchMailbox", () => {
     await hex.scanned();
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit-refused@shop.example"]);
     expect(hex.asked).toEqual([]);
-    const log = hex.log();
-    const refused = log.findIndex((line) =>
-      /^warn: hex: Intake limit-refused@shop\.example: failed permanently; moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s.test(
-        line,
+    expect(hex.log().filter((line) => line.includes("limit-refused@shop.example"))).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake limit-refused@shop\.example: failed permanently; moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s,
+      ),
+      "warn: hex: Intake limit-refused@shop.example: failed permanently; its mail was moved to hex/failed",
+    ]);
+  });
+
+  test("an Intake at its failed-run limit whose move to hex/failed went through though its answer was lost warns of the failed move", async () => {
+    const hex = await freshWatcher();
+    await hex.ledger((ledger) =>
+      Effect.forEach(["r1", "r2", "r3", "r4", "r5"], (run) =>
+        ledger.recordFailedRun("limit-lost@shop.example", run),
       ),
     );
-    const settled = log.indexOf(
-      "warn: hex: Intake limit-refused@shop.example: failed permanently; its mail was moved to hex/failed",
-    );
-    expect(refused).toBeGreaterThanOrEqual(0);
-    expect(settled).toBeGreaterThan(refused);
+    hex.mailbox.loseReply("moving mail to hex/failed");
+    hex.mailbox.deliver(emlOf("limit-lost@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit-lost@shop.example"]);
+    expect(hex.asked).toEqual([]);
+    // The settled line alone would not say why the move failed.
+    expect(hex.log().filter((line) => line.includes("limit-lost@shop.example"))).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake limit-lost@shop\.example: failed permanently; moving its mail to hex\/failed failed \(.+\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s,
+      ),
+      "warn: hex: Intake limit-lost@shop.example: failed permanently; no mail of it was left in the watched folder (the failed move likely went through; see hex/failed)",
+    ]);
   });
 
   /**
@@ -1127,17 +1144,34 @@ describe("watchMailbox", () => {
       await hex.scanned();
     }
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["rejected-refused@shop.example"]);
-    const log = hex.log();
-    const refused = log.findIndex((line) =>
-      /^warn: hex: Intake rejected-refused@shop\.example: failed run 5 of 5, so the Intake failed permanently: moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s.test(
-        line,
+    expect(
+      hex.log().filter((line) => line.includes("rejected-refused@shop.example: failed run 5 of 5")),
+    ).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake rejected-refused@shop\.example: failed run 5 of 5, so the Intake failed permanently: moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s,
       ),
-    );
-    const settled = log.indexOf(
       "warn: hex: Intake rejected-refused@shop.example: failed run 5 of 5, so the Intake failed permanently: its mail was moved to hex/failed",
-    );
-    expect(refused).toBeGreaterThanOrEqual(0);
-    expect(settled).toBeGreaterThan(refused);
+    ]);
+  });
+
+  test("a run whose start rejects a 5th time moves its mail to hex/failed, said once", async () => {
+    const hex = await freshWatcher({
+      workflow: startingWith(() => Promise.reject(new Error("storage write failed"))),
+    });
+    hex.mailbox.deliver(emlOf("rejected-moved@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["rejected-moved@shop.example"]);
+    expect(
+      hex.log().filter((line) => line.includes("rejected-moved@shop.example: failed run 5 of 5")),
+    ).toEqual([
+      "warn: hex: Intake rejected-moved@shop.example: failed run 5 of 5, so the Intake failed permanently: its mail was moved to hex/failed",
+    ]);
   });
 
   test("a run a defect in a step ended is told once, with that defect, and counted", async () => {
