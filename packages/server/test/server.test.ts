@@ -359,6 +359,16 @@ describe("a cyclic output", () => {
       throw new TypeError("no time");
     },
   });
+  // Arrays whose Symbol.iterator disagrees with their indices: oRPC's serializer reads indices.
+  const hiddenCycle: unknown[] = [];
+  hiddenCycle.push(hiddenCycle);
+  Object.defineProperty(hiddenCycle, Symbol.iterator, { value: function* () {} });
+  const iteratesItself: unknown[] = [1, 2];
+  Object.defineProperty(iteratesItself, Symbol.iterator, {
+    *value() {
+      yield iteratesItself;
+    },
+  });
   let server: RunningServer;
   beforeAll(async () => {
     server = await start({
@@ -378,6 +388,8 @@ describe("a cyclic output", () => {
           cyclic((self) => ({ set: new Set([self]) })),
         ),
         dag: returning("dag", { message: "x", first: shared, second: [shared] }),
+        hiddenCycle: returning("hiddenCycle", hiddenCycle),
+        iteratesItself: returning("iteratesItself", iteratesItself),
         encoder: returning("encoder", { date: unencodableDate }),
       },
     });
@@ -389,7 +401,7 @@ describe("a cyclic output", () => {
   // recursing until the stack overflowed, blocking the server for 0.5 s to 6.5 s. Locally the
   // message and logged-once assertions are what pin the check; on a slow CI runner the bound is
   // what tells the fix from the stall.
-  test.each(["self", "array", "map", "set"])(
+  test.each(["self", "array", "map", "set", "hiddenCycle"])(
     "is rejected fast as a 500, logged once (%s)",
     async (workflowId) => {
       const logged = spyOn(server.mastra.getLogger(), "error");
@@ -422,6 +434,18 @@ describe("a cyclic output", () => {
       runId: expect.any(String),
       status: "success",
       result: { message: "x", first: shared, second: [shared] } as typeof Message.Type,
+    });
+  });
+
+  test("walks an array by index, as oRPC does, not by its own iterator", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "iteratesItself",
+      inputData: { message: "x" },
+    });
+    expect(started).toEqual({
+      runId: expect.any(String),
+      status: "success",
+      result: [1, 2] as unknown as typeof Message.Type,
     });
   });
 
