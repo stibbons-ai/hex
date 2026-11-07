@@ -3,8 +3,8 @@
 import { Context, Layer } from "effect";
 
 /**
- * The ids of the Intake runs the mailbox watcher in this process started and awaits; it logs a
- * failed one's outcome itself (`hex: Intake <id>: the run failed: <reason>`). Written by the
+ * The ids of the Intake runs the mailbox watcher on this Intake runtime started and awaits; it
+ * logs a failed one's outcome itself (`hex: Intake <id>: the run failed: <reason>`). Written by the
  * watcher alone; empty after a restart, so a run resumed at boot is not followed.
  */
 export class FollowedRuns extends Context.Service<FollowedRuns, Set<string>>()(

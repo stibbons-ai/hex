@@ -6,12 +6,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readEml } from "@hex/adapters";
-import { MastraBaseError } from "@mastra/core/error";
+import { ErrorCategory, ErrorDomain, MastraBaseError, MastraError } from "@mastra/core/error";
 import { ConsoleLogger, LogLevel, isAdaptableLogger } from "@mastra/core/logger";
 import type { IMastraLogger } from "@mastra/core/logger";
 import { Effect } from "effect";
 import { startServer } from "../src";
 import type { RunningServer, ServerOptions } from "../src";
+import { FollowedRuns } from "../src/followed-runs";
 import {
   FailedRunError,
   INTAKE_WORKFLOW_ID,
@@ -86,7 +87,9 @@ const trackedCauses = (tracked: unknown[]) =>
 
 /**
  * An Intake workflow whose Forwarding to sevdesk is refused, on a mailbox holding the mail of
- * Message-ID `messageId`. `dispose()` the runtime when done.
+ * Message-ID `messageId`. `followedWhileRunning` holds how many runs the runtime's
+ * {@link FollowedRuns} held each time a run reached its date extraction. `dispose()` the runtime
+ * when done.
  */
 function refusedForwarding(messageId: string) {
   const root = join(directory, `intake-${instances++}`);
@@ -96,8 +99,12 @@ function refusedForwarding(messageId: string) {
   mailbox.deliver(eml);
   const mailer = recordingMailer();
   mailer.failNext("autobox@sevdesk.example");
+  const followedWhileRunning: number[] = [];
   const runtime = createIntakeRuntime(paths, {
-    dateExtractor: scriptedDateExtractor(() => ({ year: 2026, month: 10, day: 1 })).layer,
+    dateExtractor: scriptedDateExtractor(async () => {
+      followedWhileRunning.push(await runtime.runPromise(followedCount));
+      return { year: 2026, month: 10, day: 1 };
+    }).layer,
     mailer: mailer.layer,
     mailbox: mailbox.layer,
   });
@@ -109,6 +116,7 @@ function refusedForwarding(messageId: string) {
     mailbox,
     eml,
     runtime,
+    followedWhileRunning,
     /** Registers the workflow, without the mailbox watcher. */
     options: {
       databasePath: paths.databasePath,
@@ -119,8 +127,12 @@ function refusedForwarding(messageId: string) {
   };
 }
 
+/** How many runs the Intake runtime's {@link FollowedRuns} holds. */
+const followedCount = FollowedRuns.useSync((runs) => runs.size);
+
 test("a failed Intake run the watcher follows logs hex's line and no step error or stack from Mastra", async () => {
-  const { mailbox, runtime, options } = refusedForwarding("refused@shop.example");
+  const { mailbox, runtime, followedWhileRunning, options } =
+    refusedForwarding("refused@shop.example");
   try {
     await withServer(
       { ...options, mailbox: { runtime, pollMs: 60_000 } },
@@ -130,6 +142,9 @@ test("a failed Intake run the watcher follows logs hex's line and no step error 
         await within(mailbox.waiting(), "the watcher's first look");
         // Kept for the next run to try again.
         expect(mailbox.messageIds()).toEqual(["refused@shop.example"]);
+        // Followed while it ran, and no longer once it ended.
+        expect(followedWhileRunning).toEqual([1]);
+        expect(await runtime.runPromise(followedCount)).toBe(0);
         expect(printed).toContainEqual(
           expect.stringMatching(
             /^warn: hex: Intake refused@shop\.example: the run failed: forwarding to sevdesk.*failed run 1 of 5/,
@@ -217,6 +232,30 @@ test.each([
     // Tracked as an exception too, for observability.
     expect(trackedCauses(tracked)).toEqual([
       expect.objectContaining({ message: "the step broke" }),
+    ]);
+  });
+});
+
+test("after a failed run's step error is tracked, only the exact line Mastra logs for it is dropped", async () => {
+  await withServer({}, async (server) => {
+    const logger = server.mastra.getLogger();
+    const cause = new FailedRunError("forwarding to sevdesk: refused", undefined, undefined);
+    const stepError = new MastraError(
+      {
+        id: "WORKFLOW_STEP_INVOKE_FAILED",
+        domain: ErrorDomain.MASTRA_WORKFLOW,
+        category: ErrorCategory.USER,
+        details: { workflowId: INTAKE_WORKFLOW_ID, runId: "run-1", stepId: "move-mail" },
+      },
+      cause,
+    );
+    // Mastra logs its step error line right after tracking the error: any other line still prints.
+    logger.trackException(stepError);
+    logger.error("the storage broke");
+    logger.trackException(stepError);
+    logger.error(`Error executing step move-mail: ${cause.stack}`);
+    expect(printed.filter((line) => line.startsWith("error: "))).toEqual([
+      expect.stringContaining("the storage broke"),
     ]);
   });
 });

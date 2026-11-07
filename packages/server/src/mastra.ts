@@ -62,7 +62,8 @@ export interface HexMastraOptions {
    * Mastra's logger; omitted, a copy of Mastra's default (see {@link mastraDefaultLogger}), passed
    * as hex's own, so a file-system routed `logger.ts` would not replace it. Either way without the
    * line Mastra logs for the expected error of a failed Intake run the mailbox watcher follows
-   * (see {@link withoutFailedRunErrors}).
+   * (see {@link withoutFailedRunErrors}). A logger at ERROR level hides hex's failed-run warning
+   * while that line stays dropped, so such a failed run then logs nothing.
    * `false` silences it (tests only).
    */
   logger?: IMastraLogger | false | undefined;
