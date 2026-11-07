@@ -495,6 +495,7 @@ describe("a cyclic output", () => {
       inputData: { message: "x" },
     });
     expect(readers.filter((reader) => reader.includes("@orpc/"))).toEqual([]);
+    expect(readers.at(-1)).toContain("snapshot.ts");
     expect(started.result).toEqual({ value: readers.length } as unknown as typeof Message.Type);
   });
 

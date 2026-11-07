@@ -53,6 +53,21 @@ test("reads each getter once per occurrence, and the copy no more", () => {
   expect(reads).toBe(2);
 });
 
+test("reads a `toJSON` key twice, as oRPC's serializer does", () => {
+  let reads = 0;
+  const output = {
+    get toJSON() {
+      reads++;
+      return "data";
+    },
+  };
+  encode(output);
+  const byEncoder = reads;
+  reads = 0;
+  expect(encode(snapshot(output))).toBe(encode({ toJSON: "data" }));
+  expect(reads).toBe(byEncoder);
+});
+
 test("finds a cycle through a Map key", () => {
   const key: { map?: Map<unknown, unknown> } = {};
   key.map = new Map([[key, "value"]]);
@@ -135,6 +150,16 @@ test("walks an array through its own map, as oRPC does, not its indices or itera
   expect(encoded).toBe(encode(["safe"]));
 });
 
+test("unwraps a `map` callback's result wherever the override nests it", () => {
+  const nested: unknown[] = [];
+  rejects(mapping(nested, (visit) => [[visit(nested)]]));
+  const item = { x: 1 };
+  const wrapped = mapping([item], (visit) => ({ wrapped: visit(item) }));
+  const encoded = encode(snapshot(wrapped));
+  expect(encoded).toBe(encode(wrapped));
+  expect(encoded).toBe(encode({ wrapped: { x: 1 } }));
+});
+
 test("walks a Map by its entries, as oRPC does, not by its own iterator", () => {
   const hidden = new Map<unknown, unknown>();
   hidden.set("self", hidden);
@@ -144,7 +169,14 @@ test("walks a Map by its entries, as oRPC does, not by its own iterator", () => 
   expect(encode(snapshot(iterated))).toBe(encode(iterated));
 });
 
-test("fails on a Map entry that isn't one, which oRPC's client couldn't decode either", () => {
+test("fails on a Map entry that isn't one, naming the procedure", () => {
   const broken = Object.defineProperty(new Map(), "entries", { value: () => [5].values() });
-  expect(() => snapshot(broken)).toThrow(TypeError);
+  expect(() => snapshot(broken)).toThrow(
+    "hex: the output of test.procedure has a Map entry that isn't a [key, value] pair",
+  );
+  try {
+    snapshot(broken);
+  } catch (error) {
+    expect((error as Error).cause).toBeInstanceOf(TypeError);
+  }
 });
