@@ -649,6 +649,32 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("an Intake at its failed-run limit whose move to hex/failed is refused warns of it before the move is tried again", async () => {
+    const hex = await freshWatcher();
+    await hex.ledger((ledger) =>
+      Effect.forEach(["r1", "r2", "r3", "r4", "r5"], (run) =>
+        ledger.recordFailedRun("limit-refused@shop.example", run),
+      ),
+    );
+    hex.mailbox.refuse("moving mail to hex/failed");
+    hex.mailbox.deliver(emlOf("limit-refused@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit-refused@shop.example"]);
+    expect(hex.asked).toEqual([]);
+    const log = hex.log();
+    const refused = log.findIndex((line) =>
+      /^warn: hex: Intake limit-refused@shop\.example: failed permanently; moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s.test(
+        line,
+      ),
+    );
+    const settled = log.indexOf(
+      "warn: hex: Intake limit-refused@shop.example: failed permanently; its mail was moved to hex/failed",
+    );
+    expect(refused).toBeGreaterThanOrEqual(0);
+    expect(settled).toBeGreaterThan(refused);
+  });
+
   /**
    * An always-failing Intake `messageId` driven to its 5th failed run, `atFifth` done to the
    * mailbox just before it.
@@ -1084,6 +1110,34 @@ describe("watchMailbox", () => {
     expect(hex.log().at(-1)).toMatch(
       /^warn: hex: Intake rejected@shop\.example: failed run 1 of 5/,
     );
+  });
+
+  test("a run whose start rejects a 5th time, its move to hex/failed refused, warns of it before the move is tried again", async () => {
+    const hex = await freshWatcher({
+      workflow: startingWith(() => Promise.reject(new Error("storage write failed"))),
+    });
+    hex.mailbox.deliver(emlOf("rejected-refused@shop.example"));
+    hex.start();
+    await hex.scanned();
+    for (let run = 2; run <= 5; run++) {
+      if (run === 5) hex.mailbox.refuse("moving mail to hex/failed");
+      // Well past any retry delay, measured from the real time of the last failure.
+      hex.clock.offset = run * 60 * 60_000;
+      hex.mailbox.tick();
+      await hex.scanned();
+    }
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual(["rejected-refused@shop.example"]);
+    const log = hex.log();
+    const refused = log.findIndex((line) =>
+      /^warn: hex: Intake rejected-refused@shop\.example: failed run 5 of 5, so the Intake failed permanently: moving its mail to hex\/failed failed \(.*NOPERM.*\); the mailbox watcher, if it started the run, tries the move once more; failing that, it runs it afresh \(a new series of 5 runs\) at its next look$/s.test(
+        line,
+      ),
+    );
+    const settled = log.indexOf(
+      "warn: hex: Intake rejected-refused@shop.example: failed run 5 of 5, so the Intake failed permanently: its mail was moved to hex/failed",
+    );
+    expect(refused).toBeGreaterThanOrEqual(0);
+    expect(settled).toBeGreaterThan(refused);
   });
 
   test("a run a defect in a step ended is told once, with that defect, and counted", async () => {

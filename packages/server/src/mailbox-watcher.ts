@@ -483,13 +483,14 @@ export function watchMailbox({
           );
           return false;
         }
-        yield* settleLogged(
-          messageId,
-          uid,
-          ended.success,
-          (settled, options) =>
-            `hex: Intake ${messageId}: failed permanently; ${describeMove(settled, options)}`,
-        );
+        const fate = ended.success;
+        const line = (mail: MailFate, options?: DescribeOptions) =>
+          `hex: Intake ${messageId}: failed permanently; ${describeMove(mail, options)}`;
+        // A failed move is warned of before it is tried again, as after a counted failed run.
+        if (fate.status === "not-moved") {
+          log.warn(line(fate, { retryPending: true }));
+        }
+        yield* settleLogged(messageId, uid, fate, line);
         return false;
       });
 
