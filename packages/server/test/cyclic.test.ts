@@ -45,3 +45,28 @@ test("gives up on a value that hands out a fresh object on every read, fast", ()
   expect(isCyclicOrTooDeep(fresh())).toBe(true);
   expect(performance.now() - started).toBeLessThan(1000);
 });
+
+/** `value` with an own Symbol.iterator yielding `items`, which oRPC's serializer never calls. */
+function iterating<T extends object>(value: T, items: () => unknown[]): T {
+  return Object.defineProperty(value, Symbol.iterator, {
+    *value() {
+      yield* items();
+    },
+  });
+}
+
+test("walks an array by index, as oRPC does, not by its own iterator", () => {
+  const hidden: unknown[] = [];
+  hidden.push(hidden);
+  expect(isCyclicOrTooDeep(iterating(hidden, () => []))).toBe(true);
+  const encodable: unknown[] = [1, 2];
+  expect(isCyclicOrTooDeep(iterating(encodable, () => [encodable]))).toBe(false);
+});
+
+test("walks a Map by its entries, as oRPC does, not by its own iterator", () => {
+  const hidden = new Map<unknown, unknown>();
+  hidden.set("self", hidden);
+  expect(isCyclicOrTooDeep(iterating(hidden, () => []))).toBe(true);
+  const encodable = new Map<unknown, unknown>([["x", 1]]);
+  expect(isCyclicOrTooDeep(iterating(encodable, () => [["self", encodable]]))).toBe(false);
+});

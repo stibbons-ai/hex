@@ -22,14 +22,22 @@ function isWalked(value: unknown): value is object {
 }
 
 /**
- * Pushes what the serializer walks inside `value`: Map keys and values, Set and array values, else
- * the values of for...in keys.
+ * Pushes what oRPC 1.16's RPC serializer walks inside `value`, enumerated the way it does, so an
+ * overridden iterator can't make the two disagree:
+ * - Map: each item of `Array.from(value.entries())` (normally a `[key, value]` array, walked as
+ *   one), honouring an overridden `entries`, not `Symbol.iterator`.
+ * - Set: each item of `Symbol.iterator`, as `Array.from(set)` reads it.
+ * - Array: each present index in `0..length-1`, skipping holes, as `Array.prototype.map` does;
+ *   `Symbol.iterator` is ignored.
+ * - Anything else: the values of its for...in keys.
  */
 function pushChildren(value: object, stack: unknown[]): void {
   if (value instanceof Map) {
-    for (const [key, entry] of value) stack.push(key, entry);
-  } else if (value instanceof Set || Array.isArray(value)) {
+    for (const entry of Array.from(value.entries())) stack.push(entry);
+  } else if (value instanceof Set) {
     for (const child of value) stack.push(child);
+  } else if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) if (i in value) stack.push(value[i]);
   } else {
     for (const key in value) stack.push((value as Record<string, unknown>)[key]);
   }
