@@ -2,6 +2,7 @@ import { IntakeLedger, Mailbox, MailboxError, messageOf, readEml } from "@hex/ad
 import type { Intake, MailOutcome } from "@hex/adapters";
 import { normalizeMessageId } from "@hex/domain";
 import { Cause, Effect, Exit, Fiber, Option, Schema } from "effect";
+import { FollowedRuns } from "./followed-runs";
 import { HeldBack } from "./held-back";
 import type { IntakeResult, IntakeRuntime } from "./intake-workflow";
 import {
@@ -345,7 +346,13 @@ export function watchMailbox({
         try: () => workflow.createRun(),
         catch: (cause) => new Error(`creating its run failed: ${messageOf(cause)}`),
       });
-      const started = yield* startWatched(run, intake);
+      // Followed while it runs: its outcome is logged here, so the run's own failure stays out of
+      // Mastra's log (FailedRunError).
+      const followed = yield* FollowedRuns;
+      followed.add(run.runId);
+      const started = yield* startWatched(run, intake).pipe(
+        Effect.ensuring(Effect.sync(() => followed.delete(run.runId))),
+      );
       if (started._tag === "Failure") {
         log.warn(
           `hex: Intake ${messageId}: its run failed: ${messageOf(started.failure.cause ?? started.failure)}`,

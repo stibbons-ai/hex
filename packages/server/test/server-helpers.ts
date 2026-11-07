@@ -18,15 +18,16 @@ import { within } from "./timeouts";
 
 export const Message = toMastraSchema(Schema.Struct({ message: Schema.String }));
 
-/** A workflow with one step, both named `id`, from Message to Message. */
+/** A workflow with one step, named `id` both unless `stepId` names the step, from Message to Message. */
 export function oneStep(
   id: string,
   execute: (input: typeof Message.Type) => Promise<typeof Message.Type>,
+  stepId = id,
 ) {
   return createWorkflow({ id, inputSchema: Message, outputSchema: Message })
     .then(
       createStep({
-        id,
+        id: stepId,
         inputSchema: Message,
         outputSchema: Message,
         execute: ({ inputData }) => execute(inputData),
