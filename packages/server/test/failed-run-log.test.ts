@@ -278,25 +278,42 @@ test.each([
 });
 
 test("after a failed run's step error is tracked, only the exact line Mastra logs for it is dropped", async () => {
-  await withServer({}, async (server) => {
+  await withServer({}, async (server, tracked) => {
     const logger = server.mastra.getLogger();
     const cause = new FailedRunError("forwarding to sevdesk: refused", undefined, undefined);
-    const stepError = new MastraError(
-      {
-        id: "WORKFLOW_STEP_INVOKE_FAILED",
-        domain: ErrorDomain.MASTRA_WORKFLOW,
-        category: ErrorCategory.USER,
-        details: { workflowId: INTAKE_WORKFLOW_ID, runId: "run-1", stepId: "move-mail" },
-      },
-      cause,
-    );
+    const stepError = (workflowId: string) =>
+      new MastraError(
+        {
+          id: "WORKFLOW_STEP_INVOKE_FAILED",
+          domain: ErrorDomain.MASTRA_WORKFLOW,
+          category: ErrorCategory.USER,
+          details: { workflowId, runId: "run-1", stepId: "move-mail" },
+        },
+        cause,
+      );
+    const line = `Error executing step move-mail: ${cause.stack}`;
     // Mastra logs its step error line right after tracking the error: any other line still prints.
-    logger.trackException(stepError);
+    logger.trackException(stepError(INTAKE_WORKFLOW_ID));
     logger.error("the storage broke");
-    logger.trackException(stepError);
-    logger.error(`Error executing step move-mail: ${cause.stack}`);
-    expect(printed.filter((line) => line.startsWith("error: "))).toEqual([
+    // The same text with more to it is another line.
+    logger.trackException(stepError(INTAKE_WORKFLOW_ID));
+    logger.error(line, "with more");
+    // One line dropped per tracked error: the same line again prints.
+    logger.trackException(stepError(INTAKE_WORKFLOW_ID));
+    logger.error(line);
+    logger.error(line);
+    // Another workflow's FailedRunError is no failed Intake run: tracked and printed.
+    const other = stepError("another-workflow");
+    logger.trackException(other);
+    logger.error(line);
+    logger.trackException(stepError(INTAKE_WORKFLOW_ID));
+    logger.error(line);
+    expect(printed.filter((printedLine) => printedLine.startsWith("error: "))).toEqual([
       expect.stringContaining("the storage broke"),
+      expect.stringMatching(/^error: Error executing step move-mail: FailedRunError: .*with more/s),
+      expect.stringMatching(/^error: Error executing step move-mail: FailedRunError: /),
+      expect.stringMatching(/^error: Error executing step move-mail: FailedRunError: /),
     ]);
+    expect(tracked).toEqual([other]);
   });
 });
