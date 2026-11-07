@@ -317,12 +317,13 @@ The workflow, in order:
    answers blind; HEIC, HEIF, TIFF and BMP images (or AVIF content declared as another image
    type) Mastra would send but OpenAI and Anthropic refuse, failing the run every time. A model
    call that fails (network, missing or wrong API key, rate limit, provider error, a provider
-   refusing the file) fails the Filing branch before any of its Documents is filed, so running
-   the Intake again retries it; transient errors (rate limit, overload, a dropped or refused connection)
-   are retried twice first, at least 3 s apart (longer when the provider asks, up to 30 s). A
-   Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps failing
-   its Intake until it is handled by hand. The error names the Document, the model and the HTTP
-   status, if any, and keeps at most 300 characters of the provider's message.
+   refusing the file, no answer within 2 minutes) fails the Filing branch before any of its
+   Documents is filed, so running the Intake again retries it; transient errors (rate limit,
+   overload, a dropped or refused connection) are retried twice first, at least 3 s apart (longer
+   when the provider asks, up to 30 s), all within those 2 minutes, past which the call is
+   aborted. A Document the provider rejects every time (e.g. an encrypted or oversized PDF) keeps
+   failing its Intake until it is handled by hand. The error names the Document, the model and
+   the HTTP status, if any, and keeps at most 300 characters of the provider's message.
 5. **Filing**: each Document goes to `<Outbox>/YYYY-MM/<Category>/` by its Document date when
    the model answered a real day (four-digit year, month 1–12, a day that exists). Otherwise (no
    date, a reply that yields no object matching the schema: no JSON, a mismatch, an empty reply,

@@ -55,10 +55,14 @@ const pdfDocument: DocumentFile = {
   fileName: "Rechnung.pdf",
 };
 
-const extract = (model: MastraModelConfig, document: DocumentFile) =>
+const extract = (
+  model: MastraModelConfig,
+  document: DocumentFile,
+  options: Parameters<typeof dateExtractorLayer>[1] = {},
+) =>
   Effect.runPromiseExit(
     DateExtractor.use((extractor) => extractor.extract(document)).pipe(
-      Effect.provide(dateExtractorLayer(model, { retryDelayMs: 0 })),
+      Effect.provide(dateExtractorLayer(model, { retryDelayMs: 0, ...options })),
     ),
   );
 
@@ -314,4 +318,27 @@ describe("DateExtractor (live layer on a mock model)", () => {
       );
     });
   });
+
+  test("a model call that never answers fails once its time is up, and is aborted", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    // Honours its abort signal, as the provider's fetch does; without one it never settles.
+    const model = new MastraLanguageModelV2Mock({
+      doGenerate: ({ abortSignal }: { abortSignal?: AbortSignal }) => {
+        signals.push(abortSignal);
+        const { promise, reject } = Promise.withResolvers<never>();
+        abortSignal?.addEventListener("abort", () => reject(abortSignal.reason));
+        return promise;
+      },
+    } as unknown as MockOptions) as unknown as MastraModelConfig;
+    const started = performance.now();
+    const exit = await extract(model, pdfDocument, { timeoutMs: 50 });
+    expect(performance.now() - started).toBeLessThan(1000);
+    const message = String(exit);
+    expect(message).toContain("DateExtractionError");
+    expect(message).toContain(
+      'reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id timed out after 50 ms',
+    );
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+  }, 2000);
 });
