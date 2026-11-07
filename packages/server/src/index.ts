@@ -2,13 +2,13 @@ import { isIP } from "node:net";
 import type { IMastraLogger } from "@mastra/core/logger";
 import type { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
-import { ORPCError, onError, onSuccess } from "@orpc/server";
+import { ORPCError, onError } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { createChatAgent } from "./chat";
 import type { ChatAgent, ChatOptions } from "./chat";
 import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
-import { isCyclicOrTooDeep } from "./cyclic";
+import { snapshotOutput } from "./snapshot";
 import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
 import { DEFAULT_HOST } from "./listen-address";
@@ -231,14 +231,14 @@ export async function startServer({
     const handler = new RPCHandler(router, {
       clientInterceptors: [
         onError(logFault),
-        // A cyclic output fails like the procedure itself, logged once above, and never reaches
-        // oRPC's encoder, which would find the cycle only by overflowing the stack.
-        onSuccess((output, { context, path }) => {
-          if (isCyclicOrTooDeep(output)) {
-            throw new Error(`hex: the output of ${path.join(".")} is cyclic or too deep`);
-          }
+        // oRPC encodes a snapshot of the output, never the output itself (see snapshotOutput): a
+        // cyclic output fails like the procedure itself, logged once above, and never reaches
+        // oRPC's encoder.
+        async ({ next, context, path }) => {
+          const snapshot = snapshotOutput(await next(), path.join("."));
           procedureReturned.add(context);
-        }),
+          return snapshot;
+        },
       ],
       interceptors: [
         onError((error, { context }) => {

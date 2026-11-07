@@ -359,7 +359,8 @@ describe("a cyclic output", () => {
       throw new TypeError("no time");
     },
   });
-  // Arrays whose Symbol.iterator disagrees with their indices: oRPC's serializer reads indices.
+  // Arrays whose Symbol.iterator disagrees with their indices: oRPC's serializer ignores the
+  // iterator, it calls the array's map, which natively reads indices.
   const hiddenCycle: unknown[] = [];
   hiddenCycle.push(hiddenCycle);
   Object.defineProperty(hiddenCycle, Symbol.iterator, { value: function* () {} });
@@ -369,6 +370,24 @@ describe("a cyclic output", () => {
       yield iteratesItself;
     },
   });
+  // Arrays whose map disagrees with their indices.
+  const mapsItself: unknown[] = [];
+  Object.defineProperty(mapsItself, "map", {
+    value(visit: (value: unknown) => unknown) {
+      return [visit(mapsItself)];
+    },
+  });
+  const mapsSafely: unknown[] = [];
+  mapsSafely.push(mapsSafely);
+  Object.defineProperty(mapsSafely, "map", { value: () => ["safe"] });
+  // Who reads the getter, by the caller's stack frame; the result is the last read.
+  const readers: string[] = [];
+  const counted = {
+    get value() {
+      readers.push(new Error().stack?.split("\n")[2] ?? "");
+      return readers.length;
+    },
+  };
   let server: RunningServer;
   beforeAll(async () => {
     server = await start({
@@ -390,6 +409,9 @@ describe("a cyclic output", () => {
         dag: returning("dag", { message: "x", first: shared, second: [shared] }),
         hiddenCycle: returning("hiddenCycle", hiddenCycle),
         iteratesItself: returning("iteratesItself", iteratesItself),
+        mapsItself: returning("mapsItself", mapsItself),
+        mapsSafely: returning("mapsSafely", mapsSafely),
+        counted: returning("counted", counted),
         encoder: returning("encoder", { date: unencodableDate }),
       },
     });
@@ -401,7 +423,7 @@ describe("a cyclic output", () => {
   // recursing until the stack overflowed, blocking the server for 0.5 s to 6.5 s. Locally the
   // message and logged-once assertions are what pin the check; on a slow CI runner the bound is
   // what tells the fix from the stall.
-  test.each(["self", "array", "map", "set", "hiddenCycle"])(
+  test.each(["self", "array", "map", "set", "hiddenCycle", "mapsItself"])(
     "is rejected fast as a 500, logged once (%s)",
     async (workflowId) => {
       const logged = spyOn(server.mastra.getLogger(), "error");
@@ -437,7 +459,7 @@ describe("a cyclic output", () => {
     });
   });
 
-  test("walks an array by index, as oRPC does, not by its own iterator", async () => {
+  test("ignores an array's own iterator, as oRPC does", async () => {
     const started = await client(server).workflows.start({
       workflowId: "iteratesItself",
       inputData: { message: "x" },
@@ -447,6 +469,33 @@ describe("a cyclic output", () => {
       status: "success",
       result: [1, 2] as unknown as typeof Message.Type,
     });
+  });
+
+  test("walks an array through its own map, as oRPC does", async () => {
+    const logged = spyOn(server.mastra.getLogger(), "error");
+    try {
+      const started = await client(server).workflows.start({
+        workflowId: "mapsSafely",
+        inputData: { message: "x" },
+      });
+      expect(started).toEqual({
+        runId: expect.any(String),
+        status: "success",
+        result: ["safe"] as unknown as typeof Message.Type,
+      });
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  test("is read once at the response boundary: oRPC encodes a snapshot, not the output", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "counted",
+      inputData: { message: "x" },
+    });
+    expect(readers.filter((reader) => reader.includes("@orpc/"))).toEqual([]);
+    expect(started.result).toEqual({ value: readers.length } as unknown as typeof Message.Type);
   });
 
   test("is told apart from an output the encoder rejects after the check, logged once", async () => {
