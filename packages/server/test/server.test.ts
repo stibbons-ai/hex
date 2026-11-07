@@ -351,6 +351,14 @@ describe("a cyclic output", () => {
   const shared = { message: "shared" };
   const circular: Record<string, unknown> = {};
   circular.self = circular;
+  // A leaf to the cycle check, but oRPC's serializer calls its getTime, so it fails only in the
+  // encoder, after the procedure returned. Mastra hands the step output back by identity, and its
+  // snapshot store dates it through toJSON, which doesn't call getTime.
+  const unencodableDate = Object.assign(new Date(0), {
+    getTime(): number {
+      throw new TypeError("no time");
+    },
+  });
   let server: RunningServer;
   beforeAll(async () => {
     server = await start({
@@ -370,12 +378,17 @@ describe("a cyclic output", () => {
           cyclic((self) => ({ set: new Set([self]) })),
         ),
         dag: returning("dag", { message: "x", first: shared, second: [shared] }),
+        encoder: returning("encoder", { date: unencodableDate }),
       },
     });
+    // Warm up, so the timed calls below don't pay for the first Mastra run.
+    await client(server).workflows.start({ workflowId: "dag", inputData: { message: "x" } });
   });
 
   // The bound stands in for a concurrent GET /health: oRPC's serializer found the cycle only by
-  // recursing until the stack overflowed, blocking the server for 0.5 s to 6.5 s.
+  // recursing until the stack overflowed, blocking the server for 0.5 s to 6.5 s. Locally the
+  // message and logged-once assertions are what pin the check; on a slow CI runner the bound is
+  // what tells the fix from the stall.
   test.each(["self", "array", "map", "set"])(
     "is rejected fast as a 500, logged once (%s)",
     async (workflowId) => {
@@ -388,9 +401,11 @@ describe("a cyclic output", () => {
         expect(performance.now() - started).toBeLessThan(200);
         expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
         expect(logged).toHaveBeenCalledTimes(1);
-        expect(logged).toHaveBeenCalledWith(
-          "hex: oRPC call failed",
-          expect.objectContaining({ message: "hex: the procedure output is cyclic" }),
+        const [message, fault] = logged.mock.calls[0]!;
+        expect(message).toBe("hex: oRPC call failed");
+        expect(fault).toBeInstanceOf(Error);
+        expect((fault as Error).message).toBe(
+          "hex: the output of workflows.start is cyclic or too deep",
         );
       } finally {
         logged.mockRestore();
@@ -408,6 +423,22 @@ describe("a cyclic output", () => {
       status: "success",
       result: { message: "x", first: shared, second: [shared] } as typeof Message.Type,
     });
+  });
+
+  test("is told apart from an output the encoder rejects after the check, logged once", async () => {
+    const logged = spyOn(server.mastra.getLogger(), "error");
+    try {
+      const { error } = await safe(
+        client(server).workflows.start({ workflowId: "encoder", inputData: { message: "x" } }),
+      );
+      expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const [message, fault] = logged.mock.calls[0]!;
+      expect(message).toBe("hex: oRPC call failed");
+      expect(fault).toEqual(new TypeError("no time"));
+    } finally {
+      logged.mockRestore();
+    }
   });
 });
 
