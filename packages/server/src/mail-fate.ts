@@ -6,6 +6,7 @@ import { Effect, Option, Schema } from "effect";
 
 /** How many copies a move took along: at least the one it was asked to move. */
 const Copies = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+const decodeCopies = Schema.decodeSync(Copies);
 
 /** What a move of the Intake's mail to `to`'s folder did. */
 const moveFates = <To extends MailOutcome>(to: To) =>
@@ -40,8 +41,20 @@ export type FailedRunMailFate = typeof FailedRunMailFate.Type;
 
 export type MailFate = ProcessedMailFate | FailedRunMailFate;
 
-/** What a move to `To`'s folder did. */
-export type MoveFate<To extends MailOutcome> = Extract<MailFate, { readonly to: To }>;
+/** The variant of a move to `To`'s folder with status `Status`. */
+type MoveFateWith<To extends MailOutcome, Status extends MailFate["status"]> = Extract<
+  MailFate,
+  { readonly to: To; readonly status: Status }
+>;
+
+/**
+ * What a move to `To`'s folder did: the union of its variants, so that each constructor's variant
+ * is a member of it for a generic `To` too.
+ */
+export type MoveFate<To extends MailOutcome> =
+  | MoveFateWith<To, "moved">
+  | MoveFateWith<To, "not-in-mailbox">
+  | MoveFateWith<To, "not-moved">;
 
 /** An Intake's failed runs so far (this one included), and what happened to its mail. */
 export interface FailedRun {
@@ -58,17 +71,20 @@ export const MAX_FAILED_RUNS = 5;
  */
 export const retryDelayMs = (failedRuns: number) => 5 * 60_000 * 2 ** (failedRuns - 1);
 
-/** A move that took `copies` copies of the mail to `to`'s folder. */
+/**
+ * A move that took `copies` copies of the mail to `to`'s folder. Throws (a defect) when `copies`
+ * is not an integer of at least 1.
+ */
 export const moved = <To extends MailOutcome>(to: To, copies: number) =>
-  ({ status: "moved", to, copies }) as MoveFate<To>;
+  ({ status: "moved", to, copies: decodeCopies(copies) }) as MoveFateWith<To, "moved">;
 
 /** A move to `to`'s folder that found no copy in the watched folder. */
 export const notInMailbox = <To extends MailOutcome>(to: To) =>
-  ({ status: "not-in-mailbox", to }) as MoveFate<To>;
+  ({ status: "not-in-mailbox", to }) as MoveFateWith<To, "not-in-mailbox">;
 
 /** A move to `to`'s folder that failed for `reason`. */
 export const notMoved = <To extends MailOutcome>(to: To, reason: string) =>
-  ({ status: "not-moved", to, reason }) as MoveFate<To>;
+  ({ status: "not-moved", to, reason }) as MoveFateWith<To, "not-moved">;
 
 /**
  * Moves every copy of the Intake's mail in the watched folder to the outcome's folder. A move
