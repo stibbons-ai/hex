@@ -1183,6 +1183,9 @@ describe("watchMailbox", () => {
     expect(started).toBe(1);
     await hex.lookAfter(60_000);
     expect(started).toBe(2);
+    expect(hex.log().at(-1)).toBe(
+      "error: hex: Intake unreadable@shop.example: its failed run could not be counted (Intake ledger: database is locked); failed run 2 of 5, held back 10 min in memory",
+    );
     expect(hex.mailbox.messageIds()).toEqual(["unreadable@shop.example"]);
   });
 
@@ -1196,6 +1199,7 @@ describe("watchMailbox", () => {
       }),
     });
     hex.mailbox.deliver(emlOf("late@shop.example"));
+    // The run's own move fails: the mail stays for the look that finds the Intake processed.
     hex.mailbox.refuse("moving mail to hex/processed");
     hex.start();
     await hex.scanned();

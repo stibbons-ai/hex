@@ -285,9 +285,9 @@ export function watchMailbox({
     }).pipe(Effect.catchTag("LedgerError", ({ message }) => holdBack(messageId, message)));
 
   /**
-   * The Intake `messageId`, whose failed run the ledger couldn't count (`message`), or after a
-   * rejected start couldn't tell from one processed nonetheless, counted in memory and held back
-   * for {@link retryDelayMs} of its effective failed runs. At
+   * The Intake `messageId`, whose failed run the ledger couldn't count (`message`) or, after a
+   * rejected start, couldn't say whether the Intake was processed nonetheless, counted in memory
+   * and held back for {@link retryDelayMs} of its effective failed runs. At
    * {@link MAX_FAILED_RUNS} it runs no more until hex restarts: the ledger can't fail it
    * permanently. A ledger that did count it to the limit (only ending the count failed) holds
    * nothing back: the next look fails it permanently. A ledger count that can't be read counts
