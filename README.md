@@ -74,7 +74,8 @@ The keys are `ANTHROPIC_API_KEY` (the default Intake and eval model,
 `google/` models, is derived from `GEMINI_API_KEY` and never stored. `HEX_SMTP_USER` and
 `HEX_SMTP_PASSWORD` are the SMTP login Forwarding sends with (see [Intake](#intake-dev-command)),
 `HEX_IMAP_USER` and `HEX_IMAP_PASSWORD` the IMAP login hex reads the intake mailbox with (see
-[Mailbox](#mailbox)).
+[Mailbox](#mailbox)), `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` the tokens of the Slack chat
+channel (see [Slack app for socket mode](#slack-app-for-socket-mode)).
 All are optional, and a missing or rejected service token only warns: the shell still opens, and
 a model call without its key fails.
 
@@ -741,10 +742,12 @@ Secrets live only in the environment, never in the file:
 4. Your Slack user ID for the allowlist and `mainChannel.user`: in Slack, open your profile → **⋮**
    → **Copy member ID** (`U…`). `im:write` lets hex open the DM it posts Intake reports to.
 
-Run it, then DM the app in Slack (App Home → **Messages**):
+Store both tokens as keys (see
+[Development shell and model keys](#development-shell-and-model-keys)) so the shell exports them,
+or export them yourself. Run it, then DM the app in Slack (App Home → **Messages**):
 
 ```sh
-export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…
+export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…   # unless the shell did
 HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
 ```
 
