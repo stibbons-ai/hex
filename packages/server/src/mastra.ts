@@ -61,8 +61,8 @@ export interface HexMastraOptions {
   /**
    * Mastra's logger; omitted, a copy of Mastra's default (see {@link mastraDefaultLogger}), passed
    * as hex's own, so a file-system routed `logger.ts` would not replace it. Either way without the
-   * line Mastra logs for the expected error of a failed Intake run the mailbox watcher follows
-   * (see {@link withoutFailedRunErrors}). A logger at ERROR level hides hex's failed-run warning
+   * line Mastra logs for the expected error of a failed Intake run (see
+   * {@link withoutFailedRunErrors}). A logger at ERROR level hides hex's failed-run warning
    * while that line stays dropped, so such a failed run then logs nothing.
    * `false` silences it (tests only).
    */
@@ -119,16 +119,16 @@ function failedRunLine(exception: Error): string | undefined {
 
 /**
  * `logger`, less what Mastra logs for a failed Intake run's {@link FailedRunError}: an error line
- * with its stack, which reads like a crash, for an outcome the mailbox watcher, which follows the
- * run, logs itself ("the run failed" warning). Mastra tracks a failing step's error, as the cause
- * of the exception, right before it logs that line: that exception is kept from `logger`, and
- * the next error line dropped if it is exactly the one Mastra logs for it. Both are kept from the
- * observability log records too (the error line's export, the tracked exception); the step's
- * span keeps its error. Everything else goes to `logger` as is, its children too (Mastra's
- * components log through `child()`). An adaptable `logger` (as `ConsoleLogger`) keeps its trace
- * correlation and observability export, which Mastra attaches through the wrapper; any other
- * Mastra wraps in its DualLogger, which still exports what the wrapper drops, so there the
- * suppression is console-only.
+ * with its stack, which reads like a crash, for an outcome the Intake workflow warned of itself
+ * ("the run failed"). Mastra tracks a failing step's error, as the cause of the exception, right
+ * before it logs that line: that exception is kept from `logger`, and the next error line dropped
+ * if it is exactly the one Mastra logs for it. Both are kept from the observability log records
+ * too (the error line's export, the tracked exception); the step's span keeps its error.
+ * Everything else goes to `logger` as is, its children too (Mastra's components log through
+ * `child()`). An adaptable `logger` (as `ConsoleLogger`) keeps its trace correlation and
+ * observability export, which Mastra attaches through the wrapper; any other Mastra wraps in its
+ * DualLogger, which still exports what the wrapper drops, so there the suppression is
+ * console-only.
  */
 function withoutFailedRunErrors(logger: IMastraLogger): IMastraLogger {
   /** The error line to drop next, for the failed run's exception just tracked. */

@@ -1,6 +1,6 @@
-// What the server's log shows of a failed Intake run: for a run the mailbox watcher follows, hex's
-// own line, not the error and stack Mastra logs for the step error that ends the run on purpose.
-// Any other run of it, and any other step error, still logs both.
+// What the server's log shows of a failed Intake run, however it was started: hex's own line, not
+// the error and stack Mastra logs for the step error that ends the run on purpose. Any other step
+// error still logs both.
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,14 +12,15 @@ import type { IMastraLogger } from "@mastra/core/logger";
 import { Effect } from "effect";
 import { startServer } from "../src";
 import type { RunningServer, ServerOptions } from "../src";
-import { FollowedRuns } from "../src/followed-runs";
 import {
   FailedRunError,
   INTAKE_WORKFLOW_ID,
   createIntakeRuntime,
   createIntakeWorkflow,
+  isFailedRunError,
 } from "../src/intake-workflow";
 import { mailFateOf } from "../src/mail-fate";
+import { reportFateOf } from "../src/report-fate";
 import { buildEml, pdfMail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
 import { recordingMailer } from "./recording-mailer";
@@ -69,14 +70,17 @@ async function withServer(
       tracked.push(exception);
     }),
   ];
-  const resolved = serverOptions(directory, `hex-${instances++}`, options);
-  if (logger === "default") delete resolved.logger;
-  else resolved.logger = logger;
-  const server = await startServer(resolved);
   try {
-    await check(server, tracked);
+    const resolved = serverOptions(directory, `hex-${instances++}`, options);
+    if (logger === "default") delete resolved.logger;
+    else resolved.logger = logger;
+    const server = await startServer(resolved);
+    try {
+      await check(server, tracked);
+    } finally {
+      await server.stop();
+    }
   } finally {
-    await server.stop();
     for (const spy of spies) spy.mockRestore();
   }
 }
@@ -85,13 +89,16 @@ async function withServer(
 const trackedCauses = (tracked: unknown[]) =>
   tracked.flatMap((exception) => (exception instanceof MastraBaseError ? [exception.cause] : []));
 
+/** The lines hex printed for a failed run of the Intake of Message-ID `messageId`. */
+const failedRunLines = (messageId: string) =>
+  printed.filter((line) => line.includes(`hex: Intake ${messageId}: the run failed:`));
+
 /**
  * An Intake workflow whose Forwarding to sevdesk is refused, on a mailbox holding the mail of
- * Message-ID `messageId`. `followedWhileRunning` holds how many runs the runtime's
- * {@link FollowedRuns} held each time a run reached its date extraction. `dispose()` the runtime
- * when done.
+ * Message-ID `messageId`. Its date extraction waits for `extracting` when given. `dispose()` the
+ * runtime when done.
  */
-function refusedForwarding(messageId: string) {
+function refusedForwarding(messageId: string, extracting?: Promise<void>) {
   const root = join(directory, `intake-${instances++}`);
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
   const mailbox = memoryMailbox();
@@ -99,10 +106,9 @@ function refusedForwarding(messageId: string) {
   mailbox.deliver(eml);
   const mailer = recordingMailer();
   mailer.failNext("autobox@sevdesk.example");
-  const followedWhileRunning: number[] = [];
   const runtime = createIntakeRuntime(paths, {
     dateExtractor: scriptedDateExtractor(async () => {
-      followedWhileRunning.push(await runtime.runPromise(followedCount));
+      await extracting;
       return { year: 2026, month: 10, day: 1 };
     }).layer,
     mailer: mailer.layer,
@@ -116,7 +122,6 @@ function refusedForwarding(messageId: string) {
     mailbox,
     eml,
     runtime,
-    followedWhileRunning,
     /** Registers the workflow, without the mailbox watcher. */
     options: {
       databasePath: paths.databasePath,
@@ -127,12 +132,8 @@ function refusedForwarding(messageId: string) {
   };
 }
 
-/** How many runs the Intake runtime's {@link FollowedRuns} holds. */
-const followedCount = FollowedRuns.useSync((runs) => runs.size);
-
-test("a failed Intake run the watcher follows logs hex's line and no step error or stack from Mastra", async () => {
-  const { mailbox, runtime, followedWhileRunning, options } =
-    refusedForwarding("refused@shop.example");
+test("a failed Intake run the watcher started logs hex's line once and no step error or stack from Mastra", async () => {
+  const { mailbox, runtime, options } = refusedForwarding("refused@shop.example");
   try {
     await withServer(
       { ...options, mailbox: { runtime, pollMs: 60_000 } },
@@ -142,14 +143,11 @@ test("a failed Intake run the watcher follows logs hex's line and no step error 
         await within(mailbox.waiting(), "the watcher's first look");
         // Kept for the next run to try again.
         expect(mailbox.messageIds()).toEqual(["refused@shop.example"]);
-        // Followed while it ran, and no longer once it ended.
-        expect(followedWhileRunning).toEqual([1]);
-        expect(await runtime.runPromise(followedCount)).toBe(0);
-        expect(printed).toContainEqual(
+        expect(failedRunLines("refused@shop.example")).toEqual([
           expect.stringMatching(
             /^warn: hex: Intake refused@shop\.example: the run failed: forwarding to sevdesk.*failed run 1 of 5/,
           ),
-        );
+        ]);
         expect(printed.filter((line) => line.includes("Error executing step"))).toEqual([]);
         expect(printed.filter((line) => line.startsWith("error: "))).toEqual([]);
         expect(trackedCauses(tracked).filter((cause) => cause instanceof FailedRunError)).toEqual(
@@ -162,18 +160,18 @@ test("a failed Intake run the watcher follows logs hex's line and no step error 
   }
 });
 
-test("a failed Intake run the watcher follows logs no step error on Mastra's default logger either", async () => {
+test("a failed Intake run the watcher started logs no step error on Mastra's default logger either", async () => {
   const { mailbox, runtime, options } = refusedForwarding("default-logger@shop.example");
   try {
     await withServer(
       { ...options, mailbox: { runtime, pollMs: 60_000 }, logger: "default" },
       async () => {
         await within(mailbox.waiting(), "the watcher's first look");
-        expect(printed).toContainEqual(
+        expect(failedRunLines("default-logger@shop.example")).toEqual([
           expect.stringMatching(
             /^warn: hex: Intake default-logger@shop\.example: the run failed: forwarding to sevdesk/,
           ),
-        );
+        ]);
         expect(printed.filter((line) => line.includes("Error executing step"))).toEqual([]);
       },
     );
@@ -182,23 +180,66 @@ test("a failed Intake run the watcher follows logs no step error on Mastra's def
   }
 });
 
-test("a failed Intake run no watcher follows keeps Mastra's step error and stack", async () => {
-  const { eml, runtime, options } = refusedForwarding("unfollowed@shop.example");
+test("a failed Intake run started on the workflow directly logs hex's line and no step error or stack", async () => {
+  const { eml, runtime, options } = refusedForwarding("direct@shop.example");
   try {
-    await withServer(options, async (server) => {
-      const intake = await Effect.runPromise(readEml(eml, "unfollowed.eml"));
+    await withServer(options, async (server, tracked) => {
+      const intake = await Effect.runPromise(readEml(eml, "direct.eml"));
       const run = await server.mastra.getWorkflow(INTAKE_WORKFLOW_ID).createRun();
       const result = await run.start({ inputData: intake });
       expect(result.status).toBe("failed");
-      // The run's error carries what became of its mail, as a followed run's does.
-      expect(mailFateOf("error" in result ? result.error : undefined)).toEqual({
-        status: "kept-for-retry",
-      });
-      expect(printed.filter((line) => line.includes("Error executing step"))).toEqual([
+      const error = "error" in result ? result.error : undefined;
+      expect(isFailedRunError(error)).toBe(true);
+      // The run's error carries what became of its mail and its Intake report.
+      expect(mailFateOf(error)).toEqual({ status: "kept-for-retry" });
+      expect(reportFateOf(error)).toBeDefined();
+      expect(failedRunLines("direct@shop.example")).toEqual([
         expect.stringMatching(
-          /^error: \[WORKFLOW\] Error executing step workflow\.intake\.step\.move-mail: Error: forwarding to sevdesk.*failed run 1 of 5.*\n\s+at /s,
+          /^warn: hex: Intake direct@shop\.example: the run failed: forwarding to sevdesk.*failed run 1 of 5/,
         ),
       ]);
+      expect(printed.filter((line) => line.includes("Error executing step"))).toEqual([]);
+      expect(printed.filter((line) => line.startsWith("error: "))).toEqual([]);
+      expect(trackedCauses(tracked).filter((cause) => cause instanceof FailedRunError)).toEqual([]);
+    });
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test("a failed Intake run whose end Mastra fails to store still logs why it failed", async () => {
+  let extract!: () => void;
+  const extracting = new Promise<void>((resolve) => {
+    extract = resolve;
+  });
+  const { mailbox, runtime, options } = refusedForwarding("storage-loss@shop.example", extracting);
+  try {
+    await withServer({ ...options, mailbox: { runtime, pollMs: 60_000 } }, async (server) => {
+      const workflows = await server.mastra.getStorage()!.getStore("workflows");
+      const persist = workflows!.persistWorkflowSnapshot.bind(workflows);
+      let failOnce = true;
+      spyOn(workflows!, "persistWorkflowSnapshot").mockImplementation(async (args) => {
+        if (failOnce && args.snapshot.status === "failed") {
+          failOnce = false;
+          throw new Error("the final snapshot write broke");
+        }
+        return persist(args);
+      });
+      // The run started before the store failed; it goes on now.
+      extract();
+      await within(mailbox.waiting(), "the watcher's first look");
+      expect(failOnce).toBe(false);
+      expect(failedRunLines("storage-loss@shop.example")).toEqual([
+        expect.stringMatching(
+          /^warn: hex: Intake storage-loss@shop\.example: the run failed: forwarding to sevdesk.*failed run 1 of 5/,
+        ),
+      ]);
+      expect(printed).toContainEqual(
+        expect.stringMatching(
+          /^warn: hex: Intake storage-loss@shop\.example: its run failed: .*the final snapshot write broke/,
+        ),
+      );
+      expect(printed.filter((line) => line.includes("Error executing step"))).toEqual([]);
     });
   } finally {
     await runtime.dispose();
