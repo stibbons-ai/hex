@@ -228,7 +228,11 @@ export interface IntakeWorkflowOptions {
   category: Category;
   /** Absent or without targets: Forwarding is off. */
   forwarding?: IntakeForwarding | undefined;
-  /** The logger of the Mastra running the workflow when absent, the mailbox watcher's too. */
+  /**
+   * Where the move step warns of a failed run; absent, the logger of the Mastra running the
+   * workflow. On a server with a mailbox watcher, leave it absent or pass Mastra's logger, which
+   * the watcher logs on: any other `log` gets the failed-run line alone.
+   */
   log?: IntakeLog | undefined;
 }
 
@@ -363,7 +367,7 @@ const reportedFilings = (filings: readonly Filing[]): ReportFiling[] =>
  * failed (`hex: Intake <id>: the run failed: <reason>`) and ends with a {@link FailedRunError}.
  * No copy in the folder moves nothing; a move that fails is reported in the result, the outcome
  * standing. So is a report that can't be posted: in the result's `report`, or for a failed run in
- * its {@link IntakeRunError}'s `report`, and warned of on `log`; an Intake already processed gets
+ * its {@link FailedRunError}'s `report`, and warned of on `log`; an Intake already processed gets
  * none. A failed run's report counts its failed runs as the mailbox watcher does: the ledger's
  * plus those the watcher held back in memory ({@link HeldBack}).
  *
