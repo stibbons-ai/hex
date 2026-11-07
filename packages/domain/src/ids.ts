@@ -24,22 +24,33 @@ export function normalizeMessageId(messageId: string): string {
 /**
  * A Message-ID header value without its RFC 5322 comments (`<a@b> (a comment)` → `a@b` once
  * normalised), each replaced by a space, for `normalizeMessageId` to trim. Comments nest, and
- * `\x` inside one is a quoted pair (`(a \) b)` is one comment). Parens inside angle brackets are
- * part of the id and stay. An unclosed comment runs to the end of the value; a stray `)` is plain
- * text. For a raw header value only, never a normalised key: without its brackets, parens inside
- * an id would count as a comment (`<a(b)c@d>` → `a(b)c@d` → `a c@d`).
+ * `\x` inside one is a quoted pair (`(a \) b)` is one comment). Everything inside angle brackets
+ * is part of the id and stays, parens included; there a quoted string (`"…"`) or a domain literal
+ * (`[…]`) runs to its unescaped closing `"` or `]`, `\x` inside it being a quoted pair, and a `>`
+ * in it doesn't close the brackets (`<a@[x>(y)]>` → `a@[x>(y)]`). An unclosed quoted string or
+ * domain literal keeps the rest of the value as it is. An unclosed comment runs to the end of the
+ * value; a stray `)` is plain text. For a raw header value only, never a normalised key: without
+ * its brackets, parens inside an id would count as a comment (`<a(b)c@d>` → `a(b)c@d` → `a c@d`).
  */
 export function withoutMessageIdComments(value: string): string {
   // One pass with no backtracking: a sender controls the input.
   let result = "";
   let kept = 0;
   let inBrackets = false;
+  // The `"` or `]` that ends the quoted string or domain literal being read inside the brackets.
+  let closer = "";
   let i = 0;
   while (i < value.length) {
     const char = value[i++];
-    if (char === "<") inBrackets = true;
-    else if (char === ">") inBrackets = false;
-    else if (char === "(" && !inBrackets) {
+    if (closer) {
+      if (char === "\\") i++;
+      else if (char === closer) closer = "";
+    } else if (char === "<") inBrackets = true;
+    else if (inBrackets) {
+      if (char === ">") inBrackets = false;
+      else if (char === '"') closer = '"';
+      else if (char === "[") closer = "]";
+    } else if (char === "(") {
       result += `${value.slice(kept, i - 1)} `;
       let depth = 1;
       while (depth > 0 && i < value.length) {

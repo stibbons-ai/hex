@@ -54,6 +54,17 @@ describe("withoutMessageIdComments", () => {
     ["<a@b> (x > y)", "a@b"],
     ["<a(b)c@d>", "a(b)c@d"],
     ["<<a(b)c@d>> (comment)", "a(b)c@d"],
+    // A `>` or parens in a domain literal or quoted string are part of the id.
+    ["<a@[x>(one)]>", "a@[x>(one)]"],
+    ["<a@[x>(one)]> (c)", "a@[x>(one)]"],
+    ['<"a>(b)"@c> (d)', '"a>(b)"@c'],
+    ['<"a\\">(b)"@c> (d)', '"a\\">(b)"@c'],
+    ["<a@[x\\]>(y)]> (d)", "a@[x\\]>(y)]"],
+    // Unclosed: the rest of the value stays as it is.
+    ["<a@[x> (c)", "<a@[x> (c)"],
+    ['<"a> (c)', '<"a> (c)'],
+    // Outside the brackets, `"` and `[` are plain text.
+    ['"x" [y] (c) <a@b>', '"x" [y]   <a@b>'],
     // One unmatched `<` doesn't stop stripping after the next `>`.
     ["<<a@b> (c)", "<a@b"],
     // Nor does a stray `>` before a comment.
@@ -82,6 +93,17 @@ describe("withoutMessageIdComments", () => {
   ])("%s, as any sender can write, take linear time", (_case, raw) => {
     const started = performance.now();
     expect(normalizeMessageId(withoutMessageIdComments(raw))).toBe("deep@x");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  test.each([
+    ["100,000 quoted pairs in a quoted string", `"${'\\">('.repeat(100_000)}"@x`],
+    ["100,000 quoted pairs in a domain literal", `a@[${"\\]>(".repeat(100_000)}]`],
+    ["100,000 quoted strings in a row", `${'">("'.repeat(100_000)}@x`],
+    ["100,000 domain literals in a row", `a@${"[>(]".repeat(100_000)}`],
+  ])("%s in the brackets, as any sender can write, take linear time", (_case, id) => {
+    const started = performance.now();
+    expect(normalizeMessageId(withoutMessageIdComments(`<${id}> (c)`))).toBe(id);
     expect(performance.now() - started).toBeLessThan(50);
   });
 });
