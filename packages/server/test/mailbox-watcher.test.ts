@@ -644,6 +644,7 @@ describe("watchMailbox", () => {
     await hex.scanned();
     expect(hex.mailbox.messageIds("hex/failed")).toEqual(["limit@shop.example"]);
     expect(hex.asked).toEqual([]);
+    // The move by UID that follows finds nothing at the UID: no line of its own.
     expect(hex.log().filter((line) => line.includes("limit@shop.example"))).toEqual([
       "warn: hex: Intake limit@shop.example: failed permanently; its mail was moved to hex/failed",
     ]);
@@ -887,9 +888,89 @@ describe("watchMailbox", () => {
       "two-views@shop.example",
       "server-view@shop.example",
     ]);
+    // The run's line told the move by Message-ID; the copy moved by UID gets one of its own.
+    expect(hex.log().filter((line) => line.includes("UID 1"))).toEqual([
+      "warn: hex: Intake two-views@shop.example: its mail at UID 1, a copy the server reads with another Message-ID, was moved to hex/failed too",
+    ]);
     hex.mailbox.tick();
     await hex.scanned();
     expect(hex.asked).toHaveLength(5);
+  });
+
+  describe("an Intake at its failed-run limit with a copy the server reads differently", () => {
+    /**
+     * A watcher whose first look finds `limit-copy@shop.example` at its failed-run limit: first
+     * the copy only hex reads as the Intake (UID 1, looked at), then one the server reads alike.
+     * `atFollowUp` is done to the mailbox just before the move by UID that follows the move by
+     * Message-ID.
+     */
+    async function atLimitWithCopy(
+      atFollowUp?: (mailbox: ReturnType<typeof memoryMailbox>) => void,
+    ) {
+      const hex = await freshWatcher();
+      await hex.ledger((ledger) =>
+        Effect.forEach(["r1", "r2", "r3", "r4", "r5"], (run) =>
+          ledger.recordFailedRun("limit-copy@shop.example", run),
+        ),
+      );
+      hex.mailbox.deliver(emlOf("limit-copy@shop.example"), {
+        serverMessageId: "server-view@shop.example",
+      });
+      hex.mailbox.deliver(emlOf("limit-copy@shop.example"));
+      if (atFollowUp)
+        hex.mailbox.before("moving mail to hex/failed", 1, () => atFollowUp(hex.mailbox));
+      hex.start();
+      await hex.scanned();
+      return hex;
+    }
+    const MAIN =
+      "warn: hex: Intake limit-copy@shop.example: failed permanently; its mail was moved to hex/failed";
+
+    test("the copy moved by UID too gets a line of its own", async () => {
+      const hex = await atLimitWithCopy();
+      expect(hex.mailbox.messageIds()).toEqual([]);
+      expect(hex.log().filter((line) => line.includes("limit-copy@shop.example"))).toEqual([
+        MAIN,
+        "warn: hex: Intake limit-copy@shop.example: its mail at UID 1, a copy the server reads with another Message-ID, was moved to hex/failed too",
+      ]);
+      expect(hex.asked).toEqual([]);
+    });
+
+    test("a refused move by UID is a warning: the copy stays and runs afresh at the next look", async () => {
+      const hex = await atLimitWithCopy((mailbox) => mailbox.refuse("moving mail to hex/failed"));
+      expect(hex.mailbox.messageIds()).toEqual(["server-view@shop.example"]);
+      expect(hex.log().filter((line) => line.includes("limit-copy@shop.example"))).toEqual([
+        MAIN,
+        expect.stringMatching(
+          /^warn: hex: Intake limit-copy@shop\.example: its mail at UID 1, a copy the server reads with another Message-ID, couldn't be moved to hex\/failed \(.*NOPERM.*\); the mailbox watcher runs it afresh \(a new series of 5 runs\) at its next look$/,
+        ),
+      ]);
+      expect(hex.asked).toEqual([]);
+      hex.mailbox.tick();
+      await hex.scanned();
+      expect(hex.asked).toHaveLength(1);
+    });
+
+    test("a move by UID the lost connection fails is a warning before the look ends; the next look runs the copy afresh", async () => {
+      const hex = await atLimitWithCopy((mailbox) => mailbox.disconnect(1));
+      const log = hex.log();
+      const warning = log.findIndex((line) =>
+        /^warn: hex: Intake limit-copy@shop\.example: its mail at UID 1, a copy the server reads with another Message-ID, couldn't be moved to hex\/failed \(.*connection lost\); the mailbox watcher runs it afresh \(a new series of 5 runs\) at its next look$/.test(
+          line,
+        ),
+      );
+      const ended = log.findIndex((line) =>
+        /^warn: hex: mailbox: UID 1 \(server-view@shop\.example as the server reads it\): .*moving mail to hex\/failed failed: connection lost; trying again in 0 s \(attempt 1\)$/.test(
+          line,
+        ),
+      );
+      expect(log).toContain(MAIN);
+      expect(warning).toBeGreaterThanOrEqual(0);
+      expect(ended).toBeGreaterThan(warning);
+      // The look after the failure ran the copy afresh.
+      expect(hex.asked).toHaveLength(1);
+      expect(hex.mailbox.messageIds("hex/processed")).toEqual(["server-view@shop.example"]);
+    });
   });
 
   test("failed runs the ledger can't count back off 5, 10, 20, 40 min in memory; the 5th stops the Intake until a restart", async () => {

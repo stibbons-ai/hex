@@ -572,6 +572,8 @@ warned of by the run that posted it, also one resumed at boot (`hex: Intake <id>
 was not posted: <reason>`). For a run of the watcher's own, a move to `hex/failed` that fails is
 tried once more, by Message-ID and then by UID, and after one that went through, the mail the
 watcher looked at goes too if still there (a copy whose Message-ID the server reads differently).
+That copy gets a warning of its own, naming its UID, whether it went or not; one it couldn't move
+stays in the folder, and the next look runs it afresh, a new series of 5 runs.
 When the retries fail too (or the run was one resumed at boot, which the watcher doesn't follow),
 the Intake's count is ended already, so the next look runs it afresh, a new series of 5 runs, as the
 warning says. When the watcher's retry finds the mail gone, the first move's answer was likely lost
