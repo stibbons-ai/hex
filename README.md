@@ -546,12 +546,14 @@ one line per attempt, for as long as it runs; `/health` stays `ok` meanwhile. A 
 is a warning; a mail of a processed Intake stays and a later look moves it. A failed run is logged
 as its warning (`hex: Intake <id>: the run failed: <reason>`) by its last step, once that step has
 done what it can for the failed run (counted it, reported it), however the run was started (by the
-watcher, resumed at boot, with `workflows.start` or in Studio); the error with a stack Mastra logs
-for a failing step (`[WORKFLOW] Error executing step …`) is left out for the error that step then
-ends the run with on purpose. Any other step error (a defect) still logs its error and stack, and
-the watcher logs the warning itself for a run of its own that ended failed otherwise. The step's
-line comes before Mastra stores the run's end: if that fails, the watcher's warning names the
-storage error as well (`hex: Intake <id>: its run failed: <reason>`). The ledger counts the run and
+watcher, resumed at boot, with `workflows.start` or in Studio); logged from within the step, the
+line carries the step's trace fields after it on Mastra's console logger (`{ trace_id, span_id }`).
+The error with a stack Mastra logs for a failing step (`[WORKFLOW] Error executing step …`) is left
+out for the error that step then ends the run with on purpose. Any other step error (a defect)
+still logs its error and stack, and the watcher logs the warning itself for a run of its own that
+ended failed otherwise. The step's line comes before Mastra stores the run's end: if that fails,
+then for a run of the watcher's own, its warning names the storage error as well
+(`hex: Intake <id>: its run failed: <reason>`). The ledger counts the run and
 the Intake report (if on) carries the reason. Every failed-run consequence (a mail moved to
 `hex/failed`, or kept for a retry) is a warning too. An Intake report that couldn't be posted is
 warned of by the run that posted it, also one resumed at boot (`hex: Intake <id>: its Intake report
