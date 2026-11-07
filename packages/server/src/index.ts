@@ -8,6 +8,7 @@ import { createChatAgent } from "./chat";
 import type { ChatAgent, ChatOptions } from "./chat";
 import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
+import { isCyclic } from "./cyclic";
 import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
 import { DEFAULT_HOST } from "./listen-address";
@@ -230,7 +231,10 @@ export async function startServer({
     const handler = new RPCHandler(router, {
       clientInterceptors: [
         onError(logFault),
-        onSuccess((_output, { context }) => {
+        // A cyclic output fails like the procedure itself, logged once above, and never reaches
+        // oRPC's encoder, which would find the cycle only by overflowing the stack.
+        onSuccess((output, { context }) => {
+          if (isCyclic(output)) throw new Error("hex: the procedure output is cyclic");
           procedureReturned.add(context);
         }),
       ],
