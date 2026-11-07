@@ -221,6 +221,17 @@ describe("DateExtractor (live layer on a mock model)", () => {
       expect(String(exit)).toContain("failed (HTTP 503): 503 Service Unavailable");
       expect(calls).toHaveLength(3);
     });
+
+    test("waiting to retry counts against the call's time: it fails once that is up", async () => {
+      const { model, calls } = scriptedModel(overloaded(), '{"year":2026,"month":10,"day":5}');
+      const started = performance.now();
+      const exit = await extract(model, pdfDocument, { timeoutMs: 100, retryDelayMs: 1000 });
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(String(exit)).toContain(
+        'DateExtractionError: reading the Document date of "Rechnung.pdf" with mock-provider/mock-model-id timed out after 100 ms',
+      );
+      expect(calls).toHaveLength(1);
+    }, 2000);
   });
 
   describe("a failed model call", () => {
