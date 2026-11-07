@@ -7,28 +7,34 @@ import {
 
 export const REPLY = "hello from hex";
 
-/** The one method the wrapper replaces; `createMockModel`'s type is a V1/V2 union. */
-interface Streaming {
+/** The methods the wrapper replaces; `createMockModel`'s type is a V1/V2 union. */
+interface Answering {
   doStream(options: unknown): Promise<unknown>;
+  doGenerate(options: unknown): Promise<unknown>;
 }
 
-/** Runs with a model call's options before its answer streams. */
+/** Runs with a model call's options before it answers. */
 type Before = (options: unknown) => Promise<void>;
 
-/** Runs `before` with each model call's options before its answer streams. */
+/**
+ * Runs `before` with each model call's options before it answers: streamed (`agent.stream`) or
+ * whole (`agent.generate`).
+ */
 function withBefore(model: object, before?: Before) {
   if (!before) return;
-  const streaming = model as Streaming;
-  const doStream = streaming.doStream.bind(model);
-  streaming.doStream = async (options) => {
-    await before(options);
-    return doStream(options);
-  };
+  const answering = model as Answering;
+  for (const method of ["doStream", "doGenerate"] as const) {
+    const answer = answering[method].bind(model);
+    answering[method] = async (options) => {
+      await before(options);
+      return answer(options);
+    };
+  }
 }
 
 /**
- * A model that answers {@link REPLY}. `before` runs before each answer streams, with the call's
- * options: await something to hold the run open, or throw to fail it.
+ * A model that answers {@link REPLY}. `before` runs before each answer, with the call's options:
+ * await something to hold the run open, or throw to fail it.
  */
 export function mockModel({ before }: { before?: Before } = {}): MastraModelConfig {
   const model = createMockModel({ mockText: REPLY, version: "v2" });

@@ -6,10 +6,11 @@ import {
   IntakeLedger,
   LedgerError,
   createLocalStore,
+  dateExtractorLayer,
   intakeLedgerLayer,
   readEml,
 } from "@hex/adapters";
-import type { Intake } from "@hex/adapters";
+import type { DateExtractor, Intake } from "@hex/adapters";
 import { Mastra } from "@mastra/core/mastra";
 import { Clock, Effect, Layer } from "effect";
 import { closeInOrder } from "../src/close";
@@ -23,6 +24,7 @@ import { LONG_RUN_MS, watchMailbox } from "../src/mailbox-watcher";
 import type { IntakeWorkflow, MailboxWatcher } from "../src/mailbox-watcher";
 import { buildEml, pdfMail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
+import { mockModel } from "./mock-model";
 import { recordingMailer } from "./recording-mailer";
 import { recordingMainChannel } from "./recording-main-channel";
 import { scriptedDateExtractor } from "./scripted-extractor";
@@ -83,25 +85,29 @@ async function flush() {
  * A fresh data directory with the real Intake workflow registered on a Mastra persisting runs
  * there, a recording Mailer forwarding to `forwarding`, an in-memory Mailbox (`idle: false`: the
  * server has no IMAP IDLE), and a watcher on them, not started yet. `workflow` wraps the
- * registered workflow (a run whose start rejects, say). The watcher's clock is the real one moved
+ * registered workflow (a run whose start rejects, say). `dateExtractor` replaces the scripted
+ * one (`asked` then stays empty). The watcher's clock is the real one moved
  * forward by `clock.advance` (or set by `clock.offset`), and the ledger stamps failed runs on it;
  * it tries again at once after a failure.
  * Setting `failing.line` makes the next log line containing it throw, as a broken logger would.
  */
 async function freshWatcher({
   script = () => DATED,
+  dateExtractor: liveExtractor,
   forwarding,
   idle = true,
   workflow: wrap = (registered) => registered,
 }: {
   script?: Script;
+  dateExtractor?: Layer.Layer<DateExtractor>;
   forwarding?: IntakeForwarding;
   idle?: boolean;
   workflow?: (registered: IntakeWorkflow) => IntakeWorkflow;
 } = {}) {
   const root = join(directory, `hex-${instances++}`);
   const paths = { databasePath: join(root, "mastra.db"), outboxDirectory: join(root, "outbox") };
-  const { layer: dateExtractor, asked } = scriptedDateExtractor(script);
+  const { layer: scriptedExtractor, asked } = scriptedDateExtractor(script);
+  const dateExtractor = liveExtractor ?? scriptedExtractor;
   const mailer = recordingMailer();
   const mainChannel = recordingMainChannel();
   const mailbox = memoryMailbox({ idle });
@@ -1062,6 +1068,37 @@ describe("watchMailbox", () => {
     expect(hex.log().at(-1)).toMatch(
       /^warn: hex: Intake rejected@shop\.example: failed run 1 of 5/,
     );
+  });
+
+  test("a model call that never answers fails its run, counted; the next mail is processed", async () => {
+    let calls = 0;
+    // The first call holds until it is aborted, as a provider that never answers would; later
+    // calls answer.
+    const model = mockModel({
+      before: async (options) => {
+        if (++calls > 1) return;
+        const { abortSignal } = options as { abortSignal: AbortSignal };
+        const aborted = Promise.withResolvers<never>();
+        abortSignal.addEventListener("abort", () => aborted.reject(abortSignal.reason));
+        await aborted.promise;
+      },
+    });
+    const hex = await freshWatcher({
+      dateExtractor: dateExtractorLayer(model, { retryDelayMs: 0, timeoutMs: 500 }),
+    });
+    hex.mailbox.deliver(emlOf("hung@shop.example", "hung.pdf"));
+    hex.mailbox.deliver(emlOf("next@shop.example", "next.pdf"));
+    hex.start();
+    await hex.scanned();
+    expect(await hex.ledger((ledger) => ledger.failedRuns("hung@shop.example"))).toMatchObject({
+      count: 1,
+    });
+    expect(hex.log()).toContain(
+      'warn: hex: Intake hung@shop.example: the run failed: filing: reading the Document date of "hung.pdf" with mock-provider/mock-model-id timed out after 500 ms; failed run 1 of 5: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now',
+    );
+    expect(hex.mailbox.messageIds()).toEqual(["hung@shop.example"]);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["next@shop.example"]);
+    expect((await hex.runs()).sort()).toEqual(["failed", "success"]);
   });
 
   test("a run whose start rejects after it processed the Intake is not counted", async () => {
