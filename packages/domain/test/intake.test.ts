@@ -43,11 +43,15 @@ describe("withoutMessageIdComments", () => {
     ["(pre) <a@b>", "a@b"],
     ["(pre)<a@b>(post)", "a@b"],
     ["<a@b>\r\n\t(folded\r\n comment)", "a@b"],
+    ["<a@b>\r\n(c)", "a@b"],
     ["<a@b> (x (nested (deeper)) y)", "a@b"],
     ["<a@b> (escaped \\) paren)", "a@b"],
     ["<a@b> (escaped \\( paren)", "a@b"],
     ["<a@b> (backslash \\\\) (second)", "a@b"],
     ["(backslash \\\\) <a@b>", "a@b"],
+    // `<` and `>` inside a comment don't open or close the brackets.
+    ["(a < b) <a@b>", "a@b"],
+    ["<a@b> (x > y)", "a@b"],
     ["<a(b)c@d>", "a(b)c@d"],
     ["<<a(b)c@d>> (comment)", "a(b)c@d"],
     // One unmatched `<` doesn't stop stripping after the next `>`.
@@ -60,6 +64,8 @@ describe("withoutMessageIdComments", () => {
     ["(open <a@b>", ""],
     // A stray `)` outside any comment and the brackets is plain text.
     ["<a@b> )", "<a@b> )"],
+    // A `\` outside any comment is plain text, not a quoted pair.
+    ["\\(c) <a@b>", "\\  <a@b>"],
     ["a@b", "a@b"],
     ["", ""],
   ])("%j → %j as a key; stripping again changes nothing", (raw, expected) => {

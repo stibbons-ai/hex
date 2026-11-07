@@ -358,9 +358,10 @@ The workflow, in order:
    failure is counted in step 8, so it says what comes next. A run resumed in step 8 after a
    restart posts its report again, as it repeats its move.
 8. **Mail**: every copy of the Intake's mail in the watched folder, found by its Message-ID
-   (as read from the mail, without comments; compared trimmed and without any layers of `<>`, as
-   the ledger does, so a re-delivered mail moves too), goes
-   to `hex/processed`. A failed run counts the failure instead (see [Mailbox](#mailbox)); on its
+   (for a mail hex read, without comments; compared trimmed and without any layers of `<>`, as
+   the ledger does, so a re-delivered mail moves too, as long as the server's ENVELOPE drops the
+   comments too, as Dovecot's does), goes to `hex/processed`. A failed run counts the failure
+   instead (see [Mailbox](#mailbox)); on its
    5th failed run, the Intake failed permanently and its mail goes to `hex/failed`. No copy in
    the folder (an Intake from the dev command or `workflows.start`, or moved already) moves
    nothing. A move to `hex/processed` that fails (the IMAP server unreachable) is reported, the
