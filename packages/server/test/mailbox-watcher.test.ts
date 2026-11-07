@@ -21,7 +21,7 @@ import {
 } from "../src/intake-workflow";
 import type { IntakeForwarding } from "../src/intake-workflow";
 import { LONG_RUN_MS, watchMailbox } from "../src/mailbox-watcher";
-import type { IntakeWorkflow, MailboxWatcher } from "../src/mailbox-watcher";
+import type { IntakeRun, IntakeWorkflow, MailboxWatcher } from "../src/mailbox-watcher";
 import { buildEml, pdfMail } from "./eml";
 import { memoryMailbox } from "./memory-mailbox";
 import { mockModel } from "./mock-model";
@@ -81,6 +81,22 @@ async function flush() {
   for (let turn = 0; turn < 20; turn++) await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** A `workflow` wrap for {@link freshWatcher}: each run of the registered one started by `start`. */
+const startingWith =
+  (
+    start: (
+      run: IntakeRun,
+      args: Parameters<IntakeRun["start"]>[0],
+    ) => ReturnType<IntakeRun["start"]>,
+  ) =>
+  (registered: IntakeWorkflow): IntakeWorkflow => ({
+    listActiveWorkflowRuns: () => registered.listActiveWorkflowRuns(),
+    createRun: async () => {
+      const run = await registered.createRun();
+      return { runId: run.runId, start: (args) => start(run, args) };
+    },
+  });
+
 /**
  * A fresh data directory with the real Intake workflow registered on a Mastra persisting runs
  * there, a recording Mailer forwarding to `forwarding`, an in-memory Mailbox (`idle: false`: the
@@ -125,6 +141,8 @@ async function freshWatcher({
           ? Effect.fail(new LedgerError({ message: "Intake ledger: disk full" }))
           : write(...args),
       );
+  /** Set `failNext` to fail the next ledger `find`, as a lock held too long would. */
+  const ledgerReads = { failNext: false };
   /** The ledger stamps failed runs on the watcher's clock, so retry windows line up with it. */
   const onWatcherClock = <A, E>(effect: Effect.Effect<A, E>) =>
     Effect.clockWith((real) =>
@@ -142,6 +160,12 @@ async function freshWatcher({
     IntakeLedger,
     Effect.map(IntakeLedger, (real) => ({
       ...real,
+      find: (messageId: string) =>
+        Effect.suspend(() => {
+          if (!ledgerReads.failNext) return real.find(messageId);
+          ledgerReads.failNext = false;
+          return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
+        }),
       record: failingWhen("record", real.record),
       recordForwarding: failingWhen("recordForwarding", real.recordForwarding),
       recordFiling: failingWhen("recordFiling", real.recordFiling),
@@ -215,6 +239,7 @@ async function freshWatcher({
     clock,
     failing,
     ledgerWrites,
+    ledgerReads,
     starts,
     timers,
     workflow: registered,
@@ -1047,16 +1072,7 @@ describe("watchMailbox", () => {
 
   test("a run whose start rejects counts as a failed run", async () => {
     const hex = await freshWatcher({
-      workflow: (registered) => ({
-        listActiveWorkflowRuns: () => registered.listActiveWorkflowRuns(),
-        createRun: async () => {
-          const run = await registered.createRun();
-          return {
-            runId: run.runId,
-            start: () => Promise.reject(new Error("storage write failed")),
-          };
-        },
-      }),
+      workflow: startingWith(() => Promise.reject(new Error("storage write failed"))),
     });
     hex.mailbox.deliver(emlOf("rejected@shop.example"));
     hex.start();
@@ -1123,19 +1139,10 @@ describe("watchMailbox", () => {
 
   test("a run whose start rejects after it processed the Intake is not counted", async () => {
     const hex = await freshWatcher({
-      workflow: (registered) => ({
-        listActiveWorkflowRuns: () => registered.listActiveWorkflowRuns(),
-        createRun: async () => {
-          const run = await registered.createRun();
-          return {
-            runId: run.runId,
-            // Every step ran; storing the run's end failed.
-            start: async (args) => {
-              await run.start(args);
-              throw new Error("storing the run's end failed");
-            },
-          };
-        },
+      // Every step ran; storing the run's end failed.
+      workflow: startingWith(async (run, args) => {
+        await run.start(args);
+        throw new Error("storing the run's end failed");
       }),
     });
     hex.mailbox.deliver(emlOf("late@shop.example"));
@@ -1147,6 +1154,58 @@ describe("watchMailbox", () => {
     expect(hex.mailbox.messageIds("hex/processed")).toEqual(["late@shop.example"]);
     expect(hex.log()).toContainEqual(
       expect.stringContaining("hex: Intake late@shop.example: processed nonetheless"),
+    );
+  });
+
+  test("a run whose start rejects, its ledger unreadable then, is held back in memory", async () => {
+    let started = 0;
+    const hex = await freshWatcher({
+      workflow: startingWith(() => {
+        started++;
+        // The ledger can't tell whether it was processed nonetheless.
+        hex.ledgerReads.failNext = true;
+        return Promise.reject(new Error("storage write failed"));
+      }),
+    });
+    hex.mailbox.deliver(emlOf("unreadable@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(started).toBe(1);
+    expect(hex.log().at(-1)).toBe(
+      "error: hex: Intake unreadable@shop.example: its failed run could not be counted (Intake ledger: database is locked); failed run 1 of 5, held back 5 min in memory",
+    );
+    expect(hex.log().some((line) => line.includes("going on with the next mail"))).toBe(false);
+    expect(
+      await hex.ledger((ledger) => ledger.failedRuns("unreadable@shop.example")),
+    ).toBeUndefined();
+    // The ledger reads again: held back 5 min all the same, then run again.
+    await hex.lookAfter(4 * 60_000);
+    expect(started).toBe(1);
+    await hex.lookAfter(60_000);
+    expect(started).toBe(2);
+    expect(hex.mailbox.messageIds()).toEqual(["unreadable@shop.example"]);
+  });
+
+  test("a run whose start rejects after it processed the Intake, its ledger unreadable then, is settled once it reads", async () => {
+    const hex = await freshWatcher({
+      // Every step ran; storing the run's end failed, and the ledger can't tell then.
+      workflow: startingWith(async (run, args) => {
+        await run.start(args);
+        hex.ledgerReads.failNext = true;
+        throw new Error("storing the run's end failed");
+      }),
+    });
+    hex.mailbox.deliver(emlOf("late@shop.example"));
+    hex.mailbox.refuse("moving mail to hex/processed");
+    hex.start();
+    await hex.scanned();
+    expect(hex.log().at(-1)).toMatch(/^error: hex: Intake late@shop\.example: .*held back 5 min/);
+    expect(hex.mailbox.messageIds()).toEqual(["late@shop.example"]);
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.asked).toHaveLength(1);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["late@shop.example"]);
+    expect(hex.log()).toContainEqual(
+      expect.stringContaining("hex: Intake late@shop.example: already processed"),
     );
   });
 
