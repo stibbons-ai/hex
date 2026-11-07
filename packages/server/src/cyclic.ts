@@ -3,7 +3,8 @@ const LEFT = Symbol("left");
 
 /**
  * The deepest path walked before giving up. oRPC's recursive serializer overflows the stack long
- * before this (around 19k levels), so no output it could encode today is rejected.
+ * before this (about 19k plain objects deep on Bun's default stack, fewer for arrays and Maps), so
+ * no output it could encode today is rejected.
  */
 const MAX_DEPTH = 100_000;
 

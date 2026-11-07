@@ -20,6 +20,12 @@ test("treats a class instance as a leaf, as oRPC's serializer does", () => {
   expect(isCyclicOrTooDeep({ box: new Box() })).toBe(false);
 });
 
+test("accepts an acyclic chain deeper than oRPC's serializer can encode", () => {
+  let value: unknown = 1;
+  for (let i = 0; i < 25_000; i++) value = { n: value };
+  expect(isCyclicOrTooDeep(value)).toBe(false);
+});
+
 test("walks into objects without a prototype, or whose prototype has no constructor", () => {
   const bare = Object.create(null) as Record<string, unknown>;
   bare.self = bare;
