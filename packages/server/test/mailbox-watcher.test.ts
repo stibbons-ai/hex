@@ -598,6 +598,29 @@ describe("watchMailbox", () => {
       expect(hex.asked).toHaveLength(1);
     });
 
+    test("a second copy the server reads as the first is passed over unread", async () => {
+      const hex = await freshWatcher();
+      hex.mailbox.deliver(emlOf("diverging-unread@shop.example"), SERVER_VIEW);
+      hex.mailbox.deliver(emlOf("diverging-unread@shop.example"), SERVER_VIEW);
+      hex.start();
+      await hex.scanned();
+      expect(hex.mailbox.operations.filter((what) => what === "fetching a mail")).toHaveLength(1);
+    });
+
+    test("a second copy the server reads differently from the first is passed over once hex reads it", async () => {
+      const hex = await freshWatcher();
+      hex.mailbox.deliver(emlOf("diverging-views@shop.example"), SERVER_VIEW);
+      hex.mailbox.deliver(emlOf("diverging-views@shop.example"), {
+        serverMessageId: "other-view@shop.example",
+      });
+      hex.start();
+      await hex.scanned();
+      expect(hex.asked).toHaveLength(1);
+      // The run moved its own copy by UID; the second waits for the next look.
+      expect(hex.mailbox.messageIds()).toEqual(["other-view@shop.example"]);
+      expect(hex.log()).not.toContainEqual(expect.stringContaining("already processed"));
+    });
+
     test("a move by UID a stale listing fails is a warning and ends the look; the next look moves the mail, no second run", async () => {
       const model = blockingModel();
       const hex = await freshWatcher({ script: model.script });
