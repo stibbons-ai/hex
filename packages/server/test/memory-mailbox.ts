@@ -220,9 +220,12 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
     /**
      * Puts a raw mail into the watched folder; with IDLE, a waiting watcher hears of it.
      * `serverMessageId`: the Message-ID the server reports, when it reads the header differently
-     * from hex (a comment in it, an encoded word, two Message-ID headers).
+     * from hex (a comment in it, an encoded word, two Message-ID headers); given as `undefined`,
+     * the server reports none.
      */
-    deliver(source: Uint8Array, { serverMessageId = messageIdOf(source) } = {}) {
+    deliver(source: Uint8Array, options: { readonly serverMessageId?: string | undefined } = {}) {
+      const serverMessageId =
+        "serverMessageId" in options ? options.serverMessageId : messageIdOf(source);
       watched().push({ uid: nextUid++, source, serverMessageId });
       if (idle) {
         changed = true;

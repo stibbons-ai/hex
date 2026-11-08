@@ -1282,9 +1282,40 @@ describe("watchMailbox", () => {
     expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
   });
 
+  test("a gone mail's hold-back ends with a look whose other mail, listed without a Message-ID, fails after hex read it", async () => {
+    const hex = await freshWatcher({ idle: false, script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(1);
+    // Gone; at the next look, the other mail, listed without a Message-ID, is read by hex, then
+    // its ledger count, read to pass it over, is unreadable.
+    hex.mailbox.discard(1);
+    hex.mailbox.deliver(emlOf("other@shop.example", "other.pdf"), { serverMessageId: undefined });
+    hex.ledgerReads.failingFailedRuns = true;
+    await hex.lookAfter(60_000);
+    hex.ledgerReads.failingFailedRuns = false;
+    expect(hex.asked).toHaveLength(1);
+    expect(hex.log().at(-1)).toMatch(
+      /^warn: hex: mailbox: UID 2 \(no Message-ID as the server reads it\): .*database is locked.*; going on with the next mail$/,
+    );
+    // Delivered again within its 5 min: its hold-back ended with that look, so it runs afresh.
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(3);
+    const firstFailure =
+      "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
   describe("a gone mail's hold-back outlasts a look failing at another mail before hex read it; the next clean look ends it", () => {
-    /** The gone mail held back; `failingLook` runs a look that fails at a new mail before hex reads it. */
+    /**
+     * The gone mail held back; `failingLook` runs a look that fails at a new mail before hex
+     * reads it, for a reason matching `reason`.
+     */
     async function goneThenFailing(
+      reason: RegExp,
       failingLook: (hex: {
         ledgerReads: { failingFailedRuns: boolean };
         mailbox: { refuse(prefix: string): void };
@@ -1305,9 +1336,11 @@ describe("watchMailbox", () => {
       hex.mailbox.deliver(emlOf("fetched@shop.example", "fetched.pdf"));
       await failingLook(hex);
       expect(hex.asked).toHaveLength(1);
-      expect(hex.log().at(-1)).toMatch(
+      const failure = hex.log().at(-1);
+      expect(failure).toMatch(
         /^warn: hex: mailbox: UID 2 \(fetched@shop\.example as the server reads it\): .*; going on with the next mail$/,
       );
+      expect(failure).toMatch(reason);
       // Delivered again within its 5 min: still held back, passed over; only the new mail runs.
       hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
       await hex.lookAfter(60_000);
@@ -1324,14 +1357,17 @@ describe("watchMailbox", () => {
     }
 
     test("its fetch refused", async () => {
-      await goneThenFailing(async (hex) => {
-        hex.mailbox.refuse("fetching a mail");
-        await hex.lookAfter(60_000);
-      });
+      await goneThenFailing(
+        /fetching a mail failed: the server refused it: \[NOPERM\]/,
+        async (hex) => {
+          hex.mailbox.refuse("fetching a mail");
+          await hex.lookAfter(60_000);
+        },
+      );
     });
 
     test("the ledger's count, read to pass it over, unreadable", async () => {
-      await goneThenFailing(async (hex) => {
+      await goneThenFailing(/database is locked/, async (hex) => {
         hex.ledgerReads.failingFailedRuns = true;
         await hex.lookAfter(60_000);
         hex.ledgerReads.failingFailedRuns = false;
