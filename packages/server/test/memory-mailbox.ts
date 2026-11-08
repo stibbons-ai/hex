@@ -60,6 +60,8 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
   let waitingListeners: (() => void)[] = [];
   /** Who waits for the next operation, attempted or failed. */
   let operationListeners: ((what: string) => void)[] = [];
+  /** What to do just before an operation meets the server, by name prefix, after how many more. */
+  const hooks: { prefix: string; after: number; act: () => void }[] = [];
 
   const failure = (what: string, detail: string, reason: MailboxError["reason"]) =>
     new MailboxError({
@@ -75,6 +77,9 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
       operations.push(what);
       for (const listener of operationListeners) listener(what);
       operationListeners = [];
+      for (const hook of hooks) {
+        if (what.startsWith(hook.prefix) && hook.after-- === 0) hook.act();
+      }
       if (closed) {
         return Effect.fail(
           new MailboxError({ message: "the mailbox is closed", reason: "connection-lost" }),
@@ -257,6 +262,13 @@ export function memoryMailbox({ folder = "INBOX", idle = true } = {}) {
      */
     loseReply(prefix: string) {
       lostReplies.set(prefix, 1);
+    },
+    /**
+     * Runs `act` just before the operation whose name starts with `prefix` after the next
+     * `after` such operations meets the server: a refusal or disconnect set there hits it.
+     */
+    before(prefix: string, after: number, act: () => void) {
+      hooks.push({ prefix, after, act });
     },
     /** The poll interval passed: a waiting watcher looks again. */
     tick() {

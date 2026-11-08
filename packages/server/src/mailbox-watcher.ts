@@ -179,19 +179,30 @@ export function watchMailbox({
    * `uid` by its UID when the move found no copy by Message-ID (the server reads the Message-ID
    * differently from hex, say). For `hex/failed`, whose Intake's count is ended already (a copy
    * left behind would be run afresh): a failed move is tried again by Message-ID, then by UID, and
-   * after a move by Message-ID the mail at `uid` goes too if still there. No mail at that UID makes
-   * a failed move `not-in-mailbox` (it went through after all, say); a move by UID that fails
-   * makes it `not-moved`, with the error when that ends the look.
+   * after a move by Message-ID the mail at `uid` goes too if still there, that follow-up's own
+   * fate returned as the third element (the fate counts one copy more when it moved, otherwise
+   * stays as it was). No mail at that UID makes a failed move `not-in-mailbox` (it went through
+   * after all, say); a move by UID in its place that fails makes it `not-moved`. Either move by
+   * UID that fails comes with its error when that ends the look.
    */
   const settle = <To extends MailOutcome>(
     messageId: string,
     uid: number,
     fate: MoveFate<To>,
-  ): Effect.Effect<readonly [MoveFate<To>, MailboxError | undefined], never, Mailbox> =>
+  ): Effect.Effect<
+    readonly [
+      settled: MoveFate<To>,
+      ending: MailboxError | undefined,
+      followUp?: MoveFate<"failed">,
+    ],
+    never,
+    Mailbox
+  > =>
     Effect.gen(function* () {
       if (fate.to === "failed" && fate.status === "moved") {
-        const [byUid, ending] = yield* moveByUid(uid, fate.to);
-        return [byUid.status === "moved" ? moved(fate.to, fate.copies + 1) : fate, ending] as const;
+        const [followUp, ending] = yield* moveByUid(uid, "failed");
+        const settled = followUp.status === "moved" ? moved(fate.to, fate.copies + 1) : fate;
+        return [settled, ending, followUp] as const;
       }
       if (fate.to === "failed" && fate.status === "not-moved") {
         const again = yield* moveMail(messageId, fate.to);
@@ -203,9 +214,26 @@ export function watchMailbox({
     });
 
   /**
-   * `fate` settled ({@link settle}) and logged as `describe` puts it (`undefined`: not logged);
-   * then a settling error that ends the look ends it. Called once the Intake is processed or
-   * failed permanently, so its hold-back in memory, if any, ends.
+   * What came of the follow-up move by UID ({@link settle}) of a copy at `uid`, if worth a line.
+   * A failed one doesn't show a copy is there: the move can fail before it looks, or its answer
+   * be lost after it went through.
+   */
+  const describeFollowUp = (uid: number, followUp: MoveFate<"failed">) => {
+    switch (followUp.status) {
+      case "moved":
+        return `its mail at UID ${uid}, a copy the server reads with another Message-ID, was moved to hex/failed too`;
+      case "not-moved":
+        return `any mail still at UID ${uid} (a copy the server reads with another Message-ID) couldn't be moved to hex/failed (${followUp.reason}); if one is there, the mailbox watcher runs it afresh (a new series of ${MAX_FAILED_RUNS} runs) at its next look`;
+      case "not-in-mailbox":
+        return undefined;
+    }
+  };
+
+  /**
+   * `fate` settled ({@link settle}) and logged as `describe` puts it (`undefined`: not logged),
+   * a follow-up move by UID that moved a copy, or failed to, with a line of its own; then a
+   * settling error that ends the look ends it. Called once the Intake is processed or failed
+   * permanently, so its hold-back in memory, if any, ends.
    */
   const settleLogged = <To extends MailOutcome>(
     messageId: string,
@@ -215,10 +243,16 @@ export function watchMailbox({
   ) =>
     Effect.gen(function* () {
       (yield* HeldBack).delete(messageId);
-      const [settled, ending] = yield* settle(messageId, uid, fate);
+      const [settled, ending, followUp] = yield* settle(messageId, uid, fate);
       const afterFailedMove = fate.status === "not-moved" && settled.status === "not-in-mailbox";
       const line = describe(settled, { afterFailedMove });
       if (line !== undefined) logBy(settled, line);
+      if (followUp !== undefined) {
+        const followUpLine = describeFollowUp(uid, followUp);
+        if (followUpLine !== undefined) {
+          logBy(followUp, `hex: Intake ${messageId}: ${followUpLine}`);
+        }
+      }
       if (ending) return yield* Effect.fail(ending);
     });
 
@@ -416,8 +450,9 @@ export function watchMailbox({
           }
           return;
         }
-        // The run's own line told the fate; a fate the watcher changed, or a failed move that
-        // failed again, gets a line of its own.
+        // The run's own line told the fate; a fate whose status the watcher changed, or a failed
+        // move that failed again, gets a line of its own; a follow-up move by UID gets one from
+        // `settleLogged`.
         yield* settleLogged(messageId, uid, fate, (settled, options) =>
           settled.status === fate.status && settled.status !== "not-moved"
             ? undefined
