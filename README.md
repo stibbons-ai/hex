@@ -90,13 +90,19 @@ devenv then refuses to open the shell unless a reason is set too, for example
 `SECRETSPEC_PROVIDER=keyring SECRETSPEC_REASON="devenv shell: hex model keys" devenv shell`.
 
 The service account's reads are cached in the macOS Keychain for 30 days (`cache` on
-`onepassword_service` in `secretspec.toml`, stored under `secretspec/cache/hex/default/<KEY>`), so
-entering a shell normally doesn't contact 1Password and many shells, worktrees or agents don't run
-into its rate limit. A fresh entry is used as is; an expired or missing one is read from 1Password
-again. Only values are cached: a declared key that isn't in the vault is looked up in 1Password on
-every entry, and while 1Password is unreachable or rate-limited that lookup fails the whole export,
-cached keys included, so keep every key in the vault. After rotating a key in 1Password, run
-`secretspec cache clear` (all keys) or `secretspec cache clear <KEY>`, then reload the shell.
+`onepassword_service` in `secretspec.toml`; Keychain service name `secretspec/cache/hex/default/<KEY>`),
+so entering a shell normally doesn't contact 1Password and many shells, worktrees or agents don't
+run into its rate limit. A fresh entry is used as is; an expired or missing one is read from
+1Password again. Only values are cached: a declared key that isn't in the vault is looked up in
+1Password on every entry, and while 1Password is unreachable or rate-limited that lookup fails the
+whole export, cached keys included, so keep every key in the vault. The cache keeps serving a key
+for up to 30 days after it changes at the source, so after rotating, revoking or removing a key in
+1Password (or when a provider rejects one), run `secretspec cache clear` (all keys) or
+`secretspec cache clear <KEY>` (a stored key, not a composed one), then reload the shell; in an AI
+agent session add `--reason "…"` or set `SECRETSPEC_REASON`. Each cached entry trusts only the
+`secretspec` binary that wrote it, so after a devenv or secretspec update macOS asks once per cached
+key on the next entry: enter the shell interactively once and choose Always Allow before agents
+start shells, or an unattended shell can hang on the dialogs.
 
 ## Run
 
