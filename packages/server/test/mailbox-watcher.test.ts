@@ -147,6 +147,8 @@ async function freshWatcher({
    * `script` or a run's start, it fails only the reads after that point.
    */
   const ledgerReads = { failNext: false, failedRuns: false };
+  const locked = () =>
+    Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
   /** The ledger stamps failed runs on the watcher's clock, so retry windows line up with it. */
   const onWatcherClock = <A, E>(effect: Effect.Effect<A, E>) =>
     Effect.clockWith((real) =>
@@ -168,14 +170,10 @@ async function freshWatcher({
         Effect.suspend(() => {
           if (!ledgerReads.failNext) return real.find(messageId);
           ledgerReads.failNext = false;
-          return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
+          return locked();
         }),
       failedRuns: (messageId: string) =>
-        Effect.suspend(() =>
-          ledgerReads.failedRuns
-            ? Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }))
-            : real.failedRuns(messageId),
-        ),
+        Effect.suspend(() => (ledgerReads.failedRuns ? locked() : real.failedRuns(messageId))),
       record: failingWhen("record", real.record),
       recordForwarding: failingWhen("recordForwarding", real.recordForwarding),
       recordFiling: failingWhen("recordFiling", real.recordFiling),
@@ -1343,7 +1341,10 @@ describe("watchMailbox", () => {
      * later, which fails at that mail; the look after it runs it again as failed run 3.
      */
     async function heldBackThenFailing(
-      fail: (hex: { ledgerReads: { failNext: boolean }; mailbox: { refuse(prefix: string): void } }) => void,
+      fail: (hex: {
+        ledgerReads: { failNext: boolean };
+        mailbox: { refuse(prefix: string): void };
+      }) => void,
     ) {
       const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
       hex.ledgerWrites.failing = true;
@@ -1414,7 +1415,6 @@ describe("watchMailbox", () => {
     hex.ledgerWrites.failing = false;
     reads = true;
     await hex.lookAfter(5 * 60_000);
-    hex.ledgerReads.failedRuns = false;
     expect(hex.asked).toHaveLength(2);
     expect(hex.log().at(-1)).toBe(
       "warn: hex: Intake unread@shop.example: counting the failed runs in memory too, failed run 1 of 5, 1 of them counted in memory (ledger count unreadable: Intake ledger: database is locked): any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now",
