@@ -93,8 +93,10 @@ The service account's reads are cached in the macOS Keychain for 30 days (`cache
 `onepassword_service` in `secretspec.toml`, stored under `secretspec/cache/hex/default/<KEY>`), so
 entering a shell normally doesn't contact 1Password and many shells, worktrees or agents don't run
 into its rate limit. A fresh entry is used as is; an expired or missing one is read from 1Password
-again. After rotating a key in 1Password, run `secretspec cache clear` (all keys) or
-`secretspec cache clear <KEY>`, then reload the shell.
+again. Only values are cached: a declared key that isn't in the vault is looked up in 1Password on
+every entry, and while 1Password is unreachable or rate-limited that lookup fails the whole export,
+cached keys included, so keep every key in the vault. After rotating a key in 1Password, run
+`secretspec cache clear` (all keys) or `secretspec cache clear <KEY>`, then reload the shell.
 
 ## Run
 
