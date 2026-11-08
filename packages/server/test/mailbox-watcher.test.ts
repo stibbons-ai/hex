@@ -1282,35 +1282,61 @@ describe("watchMailbox", () => {
     expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
   });
 
-  test("a gone mail's hold-back outlasts a look whose fetch is refused; the next clean look ends it", async () => {
-    const hex = await freshWatcher({ idle: false, script: () => new Error("rate limited (429)") });
-    hex.ledgerWrites.failing = true;
-    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
-    hex.start();
-    await hex.scanned();
-    expect(hex.asked).toHaveLength(1);
-    // Gone; a new mail's fetch refused: that mail could be the hold-back's, so it stays.
-    hex.mailbox.discard(1);
-    hex.mailbox.deliver(emlOf("fetched@shop.example", "fetched.pdf"));
-    hex.mailbox.refuse("fetching a mail");
-    await hex.lookAfter(60_000);
-    expect(hex.asked).toHaveLength(1);
-    expect(hex.log().at(-1)).toMatch(
-      /^warn: hex: mailbox: UID 2 \(fetched@shop\.example as the server reads it\): .*; going on with the next mail$/,
-    );
-    // Delivered again within its 5 min: still held back, passed over; only the new mail runs.
-    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
-    await hex.lookAfter(60_000);
-    expect(hex.asked).toHaveLength(2);
-    // Gone again; a clean look ends its hold-back, and delivered again it starts afresh.
-    hex.mailbox.discard(3);
-    await hex.lookAfter(60_000);
-    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
-    await hex.lookAfter(60_000);
-    expect(hex.asked).toHaveLength(3);
-    const firstFailure =
-      "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
-    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  describe("a gone mail's hold-back outlasts a look failing at another mail before hex read it; the next clean look ends it", () => {
+    /** The gone mail held back; `failingLook` runs a look that fails at a new mail before hex reads it. */
+    async function goneThenFailing(
+      failingLook: (hex: {
+        ledgerReads: { failingFailedRuns: boolean };
+        mailbox: { refuse(prefix: string): void };
+        lookAfter(ms: number): Promise<void>;
+      }) => Promise<void>,
+    ) {
+      const hex = await freshWatcher({
+        idle: false,
+        script: () => new Error("rate limited (429)"),
+      });
+      hex.ledgerWrites.failing = true;
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      hex.start();
+      await hex.scanned();
+      expect(hex.asked).toHaveLength(1);
+      // Gone; the new mail's look fails: that mail could be the hold-back's, so it stays.
+      hex.mailbox.discard(1);
+      hex.mailbox.deliver(emlOf("fetched@shop.example", "fetched.pdf"));
+      await failingLook(hex);
+      expect(hex.asked).toHaveLength(1);
+      expect(hex.log().at(-1)).toMatch(
+        /^warn: hex: mailbox: UID 2 \(fetched@shop\.example as the server reads it\): .*; going on with the next mail$/,
+      );
+      // Delivered again within its 5 min: still held back, passed over; only the new mail runs.
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(2);
+      // Gone again; a clean look ends its hold-back, and delivered again it starts afresh.
+      hex.mailbox.discard(3);
+      await hex.lookAfter(60_000);
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(3);
+      const firstFailure =
+        "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+      expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+    }
+
+    test("its fetch refused", async () => {
+      await goneThenFailing(async (hex) => {
+        hex.mailbox.refuse("fetching a mail");
+        await hex.lookAfter(60_000);
+      });
+    });
+
+    test("the ledger's count, read to pass it over, unreadable", async () => {
+      await goneThenFailing(async (hex) => {
+        hex.ledgerReads.failingFailedRuns = true;
+        await hex.lookAfter(60_000);
+        hex.ledgerReads.failingFailedRuns = false;
+      });
+    });
   });
 
   test("a later copy of an Intake whose look failed after hex read it is passed over in that look", async () => {
