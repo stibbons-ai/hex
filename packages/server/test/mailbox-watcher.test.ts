@@ -141,8 +141,15 @@ async function freshWatcher({
           ? Effect.fail(new LedgerError({ message: "Intake ledger: disk full" }))
           : write(...args),
       );
-  /** Set `failNext` to fail the next ledger `find`, as a lock held too long would. */
-  const ledgerReads = { failNext: false };
+  /**
+   * Set `failNext` to fail the next ledger `find`, as a lock held too long would; the ledger
+   * clears it. Set `failingFailedRuns` to fail every `failedRuns` read until the test clears it
+   * (the ledger never does): set from a workflow `script` or a run's start, it fails only the
+   * reads after that point.
+   */
+  const ledgerReads = { failNext: false, failingFailedRuns: false };
+  const locked = () =>
+    Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
   /** The ledger stamps failed runs on the watcher's clock, so retry windows line up with it. */
   const onWatcherClock = <A, E>(effect: Effect.Effect<A, E>) =>
     Effect.clockWith((real) =>
@@ -164,8 +171,12 @@ async function freshWatcher({
         Effect.suspend(() => {
           if (!ledgerReads.failNext) return real.find(messageId);
           ledgerReads.failNext = false;
-          return Effect.fail(new LedgerError({ message: "Intake ledger: database is locked" }));
+          return locked();
         }),
+      failedRuns: (messageId: string) =>
+        Effect.suspend(() =>
+          ledgerReads.failingFailedRuns ? locked() : real.failedRuns(messageId),
+        ),
       record: failingWhen("record", real.record),
       recordForwarding: failingWhen("recordForwarding", real.recordForwarding),
       recordFiling: failingWhen("recordFiling", real.recordFiling),
@@ -586,6 +597,29 @@ describe("watchMailbox", () => {
         "info: hex: Intake diverging-copies@shop.example: already processed; its mail was moved to hex/processed",
       );
       expect(hex.asked).toHaveLength(1);
+    });
+
+    test("a second copy the server reads as the first is passed over unread", async () => {
+      const hex = await freshWatcher();
+      hex.mailbox.deliver(emlOf("diverging-unread@shop.example"), SERVER_VIEW);
+      hex.mailbox.deliver(emlOf("diverging-unread@shop.example"), SERVER_VIEW);
+      hex.start();
+      await hex.scanned();
+      expect(hex.mailbox.operations.filter((what) => what === "fetching a mail")).toHaveLength(1);
+    });
+
+    test("a second copy the server reads differently from the first is passed over once hex reads it", async () => {
+      const hex = await freshWatcher();
+      hex.mailbox.deliver(emlOf("diverging-views@shop.example"), SERVER_VIEW);
+      hex.mailbox.deliver(emlOf("diverging-views@shop.example"), {
+        serverMessageId: "other-view@shop.example",
+      });
+      hex.start();
+      await hex.scanned();
+      expect(hex.asked).toHaveLength(1);
+      // The run moved its own copy by UID; the second waits for the next look.
+      expect(hex.mailbox.messageIds()).toEqual(["other-view@shop.example"]);
+      expect(hex.log()).not.toContainEqual(expect.stringContaining("already processed"));
     });
 
     test("a move by UID a stale listing fails is a warning and ends the look; the next look moves the mail, no second run", async () => {
@@ -1172,10 +1206,10 @@ describe("watchMailbox", () => {
       expect(hex.asked).toHaveLength(failedRuns + 1);
     }
     expect(hex.log()).toContain(
-      "warn: hex: Intake flapping@shop.example: failed run 4 of 5, 2 of them counted in memory: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 40 min from now",
+      "warn: hex: Intake flapping@shop.example: counting the failed runs in memory too, failed run 4 of 5, 2 of them counted in memory: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 40 min from now",
     );
     expect(hex.log()).toContain(
-      "warn: hex: Intake flapping@shop.example: failed run 5 of 5, 2 of them counted in memory: the mailbox watcher fails it permanently at its next look",
+      "warn: hex: Intake flapping@shop.example: counting the failed runs in memory too, failed run 5 of 5, 2 of them counted in memory: the mailbox watcher fails it permanently at its next look",
     );
     await hex.lookAfter(60_000);
     expect(hex.asked).toHaveLength(5);
@@ -1215,6 +1249,145 @@ describe("watchMailbox", () => {
     const firstFailure =
       "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
     expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
+  test("a gone mail's hold-back ends with a look whose other mails fail after hex read them, or can't be moved to hex/failed", async () => {
+    const hex = await freshWatcher({ idle: false, script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    hex.mailbox.deliver(emlOf("other@shop.example", "other.pdf"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(2);
+    // Gone; at the look 5 min later, the other's look-up fails after hex read it, and an
+    // unreadable mail's move to hex/failed is refused.
+    hex.mailbox.discard(1);
+    hex.mailbox.deliver(new TextEncoder().encode("not a mail"));
+    hex.ledgerReads.failNext = true;
+    hex.mailbox.refuse("moving mail to hex/failed");
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.asked).toHaveLength(2);
+    const failures = hex.log().filter((line) => line.includes("going on with the next mail"));
+    expect(failures).toEqual([
+      expect.stringMatching(
+        /^warn: hex: mailbox: UID 2 \(other@shop\.example .*database is locked/,
+      ),
+      expect.stringMatching(/^warn: hex: mailbox: UID 3 \(no Message-ID .*\[NOPERM\]/),
+    ]);
+    // Delivered again: its hold-back ended with that look, so a fresh series starts.
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    await hex.lookAfter(60_000);
+    const firstFailure =
+      "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
+  test("a gone mail's hold-back ends with a look whose other mail, listed without a Message-ID, fails after hex read it", async () => {
+    const hex = await freshWatcher({ idle: false, script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(1);
+    // Gone; at the next look, the other mail, listed without a Message-ID, is read by hex, then
+    // its ledger count, read to pass it over, is unreadable.
+    hex.mailbox.discard(1);
+    hex.mailbox.deliver(emlOf("other@shop.example", "other.pdf"), { serverMessageId: undefined });
+    hex.ledgerReads.failingFailedRuns = true;
+    await hex.lookAfter(60_000);
+    hex.ledgerReads.failingFailedRuns = false;
+    expect(hex.asked).toHaveLength(1);
+    expect(hex.log().at(-1)).toMatch(
+      /^warn: hex: mailbox: UID 2 \(no Message-ID as the server reads it\): .*database is locked.*; going on with the next mail$/,
+    );
+    // Delivered again within its 5 min: its hold-back ended with that look, so it runs afresh.
+    hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(3);
+    const firstFailure =
+      "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+    expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
+  describe("a gone mail's hold-back outlasts a look failing at another mail before hex read it; the next clean look ends it", () => {
+    /**
+     * The gone mail held back; `failingLook` runs a look that fails at a new mail before hex
+     * reads it, for a reason matching `reason`.
+     */
+    async function goneThenFailing(
+      reason: RegExp,
+      failingLook: (hex: {
+        ledgerReads: { failingFailedRuns: boolean };
+        mailbox: { refuse(prefix: string): void };
+        lookAfter(ms: number): Promise<void>;
+      }) => Promise<void>,
+    ) {
+      const hex = await freshWatcher({
+        idle: false,
+        script: () => new Error("rate limited (429)"),
+      });
+      hex.ledgerWrites.failing = true;
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      hex.start();
+      await hex.scanned();
+      expect(hex.asked).toHaveLength(1);
+      // Gone; the new mail's look fails: that mail could be the hold-back's, so it stays.
+      hex.mailbox.discard(1);
+      hex.mailbox.deliver(emlOf("fetched@shop.example", "fetched.pdf"));
+      await failingLook(hex);
+      expect(hex.asked).toHaveLength(1);
+      const failure = hex.log().at(-1);
+      expect(failure).toMatch(
+        /^warn: hex: mailbox: UID 2 \(fetched@shop\.example as the server reads it\): .*; going on with the next mail$/,
+      );
+      expect(failure).toMatch(reason);
+      // Delivered again within its 5 min: still held back, passed over; only the new mail runs.
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(2);
+      // Gone again; a clean look ends its hold-back, and delivered again it starts afresh.
+      hex.mailbox.discard(3);
+      await hex.lookAfter(60_000);
+      hex.mailbox.deliver(emlOf("gone@shop.example", "gone.pdf"));
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(3);
+      const firstFailure =
+        "error: hex: Intake gone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
+      expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+    }
+
+    test("its fetch refused", async () => {
+      await goneThenFailing(
+        /fetching a mail failed: the server refused it: \[NOPERM\]/,
+        async (hex) => {
+          hex.mailbox.refuse("fetching a mail");
+          await hex.lookAfter(60_000);
+        },
+      );
+    });
+
+    test("the ledger's count, read to pass it over, unreadable", async () => {
+      await goneThenFailing(/database is locked/, async (hex) => {
+        hex.ledgerReads.failingFailedRuns = true;
+        await hex.lookAfter(60_000);
+        hex.ledgerReads.failingFailedRuns = false;
+      });
+    });
+  });
+
+  test("a later copy of an Intake whose look failed after hex read it is passed over in that look", async () => {
+    const hex = await freshWatcher({ idle: false });
+    hex.mailbox.deliver(emlOf("twin@shop.example", "first.pdf"));
+    hex.mailbox.deliver(emlOf("twin@shop.example", "second.pdf"));
+    hex.ledgerReads.failNext = true;
+    hex.start();
+    await hex.scanned();
+    expect(hex.asked).toHaveLength(0);
+    expect(hex.log().filter((line) => line.includes("going on with the next mail"))).toEqual([
+      expect.stringMatching(/^warn: hex: mailbox: UID 1 \(twin@shop\.example .*database is locked/),
+    ]);
+    await hex.lookAfter(60_000);
+    expect(hex.asked).toHaveLength(1);
   });
 
   test("a 5th failed run the ledger counted but couldn't end isn't stopped: the next look fails it permanently", async () => {
@@ -1264,7 +1437,7 @@ describe("watchMailbox", () => {
     hex.ledgerWrites.failing = true;
     await hex.lookAfter(60_000);
     expect(hex.log().at(-1)).toBe(
-      "error: hex: Intake stuck@shop.example: failing it permanently failed (Intake ledger: disk full); failed run 5 of 5, 2 of them counted in memory, but the ledger can't record failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it",
+      "error: hex: Intake stuck@shop.example: failing it permanently failed (Intake ledger: disk full); failed run 5 of 5, 2 of them counted in memory, but the ledger can't end its failed runs to fail it permanently, so hex runs it no more until it restarts; its mail stays in the watched folder, and a restart retries it",
     );
     const lines = hex.log().length;
     for (let hour = 0; hour < 2; hour++) await hex.lookAfter(60 * 60_000);
@@ -1302,6 +1475,128 @@ describe("watchMailbox", () => {
     const firstFailure =
       "error: hex: Intake alone@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5, held back 5 min in memory";
     expect(hex.log().filter((line) => line === firstFailure)).toHaveLength(2);
+  });
+
+  describe("a hold-back of a mail the server reads with another Message-ID, its next look failing at that mail", () => {
+    /**
+     * Two failed runs of it held back in memory (10 min), then `fail` set up for the look 10 min
+     * later, which fails at that mail; the look after it runs it again as failed run 3.
+     */
+    async function heldBackThenFailing(
+      fail: (hex: {
+        ledgerReads: { failNext: boolean };
+        mailbox: { refuse(prefix: string): void };
+      }) => void,
+    ) {
+      const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+      hex.ledgerWrites.failing = true;
+      hex.mailbox.deliver(emlOf("hex-reading@shop.example"), {
+        serverMessageId: "server-reading@shop.example",
+      });
+      hex.start();
+      await hex.scanned();
+      await hex.lookAfter(5 * 60_000);
+      expect(hex.asked).toHaveLength(2);
+      fail(hex);
+      await hex.lookAfter(10 * 60_000);
+      expect(hex.asked).toHaveLength(2);
+      expect(hex.log().at(-1)).toMatch(
+        /^warn: hex: mailbox: UID 1 \(server-reading@shop\.example as the server reads it\): .*; going on with the next mail$/,
+      );
+      // The hold-back survived the failed look: run 3 by its count, not a fresh run 1.
+      await hex.lookAfter(60_000);
+      expect(hex.asked).toHaveLength(3);
+      expect(hex.log()).toContain(
+        "error: hex: Intake hex-reading@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 3 of 5, held back 20 min in memory",
+      );
+      expect(hex.log().filter((line) => line.includes("failed run 1 of 5"))).toHaveLength(1);
+    }
+
+    test("after hex read its Message-ID: the ledger's look-up failing", async () => {
+      await heldBackThenFailing((hex) => {
+        hex.ledgerReads.failNext = true;
+      });
+    });
+
+    test("before hex read its Message-ID: fetching it refused", async () => {
+      await heldBackThenFailing((hex) => hex.mailbox.refuse("fetching a mail"));
+    });
+  });
+
+  test("a run its move step counted, with failed runs in memory too: the watcher's line corrects the run's count", async () => {
+    const hex = await freshWatcher({ script: () => new Error("rate limited (429)") });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("corrected@shop.example"));
+    hex.start();
+    await hex.scanned();
+    // Run 1 counted in memory; run 2, 5 min later, by the ledger: its 1st there.
+    hex.ledgerWrites.failing = false;
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.asked).toHaveLength(2);
+    expect(hex.log().slice(-2)).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake corrected@shop\.example: the run failed: .*failed run 1 of 5.*5 min/,
+      ),
+      "warn: hex: Intake corrected@shop.example: counting the failed runs in memory too, failed run 2 of 5, 1 of them counted in memory: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 10 min from now",
+    ]);
+  });
+
+  test("a ledger count unreadable after a run its move step counted: the watcher's line counts the memory's alone, saying so", async () => {
+    let reads = false;
+    const hex = await freshWatcher({
+      script: () => {
+        // Only the ledger's `failedRuns` reads fail from this run on: the watcher's after it.
+        if (reads) hex.ledgerReads.failingFailedRuns = true;
+        return new Error("rate limited (429)");
+      },
+    });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("unread@shop.example"));
+    hex.start();
+    await hex.scanned();
+    hex.ledgerWrites.failing = false;
+    reads = true;
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.asked).toHaveLength(2);
+    expect(hex.log().slice(-2)).toEqual([
+      expect.stringMatching(
+        /^warn: hex: Intake unread@shop\.example: the run failed: .*failed run 1 of 5.*5 min/,
+      ),
+      "warn: hex: Intake unread@shop.example: counting the failed runs in memory too, failed run 1 of 5, 1 of them counted in memory (ledger count unreadable: Intake ledger: database is locked): any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 5 min from now",
+    ]);
+  });
+
+  test("a failed run the ledger can't count, its count unreadable too: the hold-back's line says so", async () => {
+    const hex = await freshWatcher({
+      workflow: startingWith(() => {
+        hex.ledgerReads.failingFailedRuns = true;
+        return Promise.reject(new Error("storage write failed"));
+      }),
+    });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("countless@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.log().at(-1)).toBe(
+      "error: hex: Intake countless@shop.example: its failed run could not be counted (Intake ledger: disk full); failed run 1 of 5 (its ledger count unreadable: Intake ledger: database is locked), held back 5 min in memory",
+    );
+  });
+
+  test("a rejected start the ledger counted, with failed runs in memory too: the watcher's line has the effective count", async () => {
+    const hex = await freshWatcher({
+      workflow: startingWith(() => Promise.reject(new Error("storage write failed"))),
+    });
+    hex.ledgerWrites.failing = true;
+    hex.mailbox.deliver(emlOf("rejected-held@shop.example"));
+    hex.start();
+    await hex.scanned();
+    // Run 1 counted in memory; run 2, 5 min later, by the ledger.
+    hex.ledgerWrites.failing = false;
+    await hex.lookAfter(5 * 60_000);
+    expect(hex.log().slice(-2)).toEqual([
+      "warn: hex: Intake rejected-held@shop.example: its run failed: storage write failed",
+      "warn: hex: Intake rejected-held@shop.example: failed run 2 of 5, 1 of them counted in memory: any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than 10 min from now",
+    ]);
   });
 
   test("one mail failing doesn't hold up the others; it is named", async () => {
