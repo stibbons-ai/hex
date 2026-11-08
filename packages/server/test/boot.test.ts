@@ -53,7 +53,8 @@ function startHex(data: string, eml: string, leaseMs: number) {
       // Mastra derives the workflow runs' ownership lease from it (15 s by default).
       MASTRA_AGENT_THREAD_LEASE_TTL_MS: String(leaseMs),
       OPENAI_BASE_URL: model.baseUrl,
-      OPENAI_API_KEY: "sk-hex-boot-test",
+      HEX_OPENAI_API_KEY: "sk-hex-boot-test",
+      OPENAI_API_KEY: "",
       HEX_SMTP_PORT: String(smtp.port),
     },
     stdout: "pipe",

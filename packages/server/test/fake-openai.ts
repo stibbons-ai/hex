@@ -1,11 +1,12 @@
 // A fake OpenAI Responses API on loopback, for the model router's `openai/…` models: point
-// `OPENAI_BASE_URL` at `baseUrl` and set any `OPENAI_API_KEY`.
+// `OPENAI_BASE_URL` at `baseUrl` and set any `HEX_OPENAI_API_KEY`.
 import type { Server } from "bun";
 
-/** One `POST /v1/responses` as the fake received it. */
+/** One `POST /v1/responses` as the fake received it: its body and Authorization header. */
 export interface ResponsesRequest {
   model: string;
   input: { role: string; content: string | Record<string, unknown>[] }[];
+  authorization: string | null;
 }
 
 /** How the fake answers: the model's text, or an HTTP error with OpenAI's error body. */
@@ -47,9 +48,12 @@ export function fakeOpenAI(
       if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/responses") {
         return new Response("not found", { status: 404 });
       }
-      const body = (await request.json()) as ResponsesRequest;
-      requests.push(body);
-      const reply = await answer(body);
+      const received: ResponsesRequest = {
+        ...((await request.json()) as Omit<ResponsesRequest, "authorization">),
+        authorization: request.headers.get("authorization"),
+      };
+      requests.push(received);
+      const reply = await answer(received);
       if (typeof reply !== "string") {
         return Response.json(
           { error: { message: reply.message, type: "invalid_request_error", code: null } },
@@ -60,7 +64,7 @@ export function fakeOpenAI(
         id: `resp_${requests.length}`,
         object: "response",
         created_at: 1_793_882_952,
-        model: body.model,
+        model: received.model,
         status: "completed",
         output: [
           {

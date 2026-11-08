@@ -5,6 +5,7 @@ export {
   documentDateOf,
 } from "./date-extractor";
 export type { DateExtraction, DocumentFile, TokenUsage } from "./date-extractor";
+export { withHexApiKey } from "./model-key";
 export { isErrno, messageOf } from "./errors";
 export { Intake, IntakeAttachment, IntakeReadError, readEml } from "./intake";
 export { Filing, IntakeLedger, LedgerError, intakeLedgerLayer } from "./ledger";

@@ -251,8 +251,8 @@ function smtpSettings(path: string, env: Env): SmtpSettings {
  * The Intake settings from the hex config file at `path`, or the defaults (Category ER,
  * {@link DEFAULT_INTAKE_MODEL}) without a file. Fails like {@link readConfigFile} on a file it
  * can't use, e.g. a Category other than ER or a model that is no `provider/model` id. The
- * model's API key comes from the provider's usual variable (e.g. `ANTHROPIC_API_KEY`), never from
- * this file.
+ * model's API key comes from `HEX_` and the provider's usual variable (e.g. `HEX_ANTHROPIC_API_KEY`,
+ * see `withHexApiKey` in `@hex/adapters`), never from this file.
  */
 export async function loadIntakeConfig(path: string | undefined): Promise<IntakeConfig> {
   const intake = path === undefined ? undefined : (await readConfigFile(path)).intake;

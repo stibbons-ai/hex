@@ -53,10 +53,10 @@ setup:
    `value` field holds the key (fish; `read -s` keeps it off the screen and out of history):
 
    ```fish
-   read -s -P "ANTHROPIC_API_KEY: " value
+   read -s -P "HEX_ANTHROPIC_API_KEY: " value
    op item create --account my.1password.com --vault Hex --category "Secure Note" \
-       --title "secretspec/hex/default/ANTHROPIC_API_KEY" --tags automated,hex \
-       "project[text]=hex" "key[text]=ANTHROPIC_API_KEY" "value[concealed]=$value"
+       --title "secretspec/hex/default/HEX_ANTHROPIC_API_KEY" --tags automated,hex \
+       "project[text]=hex" "key[text]=HEX_ANTHROPIC_API_KEY" "value[concealed]=$value"
    set -e value
    ```
 
@@ -67,12 +67,15 @@ setup:
    secretspec check --explain
    ```
 
-The keys are `ANTHROPIC_API_KEY` (the default Intake and eval model,
+The keys are `HEX_ANTHROPIC_API_KEY` (the default Intake and eval model,
 `anthropic/claude-haiku-5-5`, or another `anthropic/` `intake.model` or chat model),
-`OPENAI_API_KEY` (an `openai/` one) and `GEMINI_API_KEY` (a
-`google/` one). `GOOGLE_GENERATIVE_AI_API_KEY`, the variable Mastra's model router reads for
-`google/` models, is derived from `GEMINI_API_KEY` and never stored. `HEX_SMTP_USER` and
-`HEX_SMTP_PASSWORD` are the SMTP login Forwarding sends with (see [Intake](#intake-dev-command)),
+`HEX_OPENAI_API_KEY` (an `openai/` one) and `HEX_GOOGLE_API_KEY` (a `google/` one). hex hands a
+`provider/model` the key in `HEX_` plus a variable Mastra's model router reads for that provider
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, …); unset, the
+router reads the provider's own variable. The prefix keeps the keys away from coding agents
+started in this shell, which can bill API usage instead of a subscription when they find
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. `HEX_SMTP_HOST`, `HEX_SMTP_PORT`, `HEX_SMTP_USER` and
+`HEX_SMTP_PASSWORD` are the SMTP server and login Forwarding sends with (see [Intake](#intake-dev-command)),
 `HEX_IMAP_USER` and `HEX_IMAP_PASSWORD` the IMAP login hex reads the intake mailbox with (see
 [Mailbox](#mailbox)), `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` the tokens of the Slack chat
 channel (see [Slack app for socket mode](#slack-app-for-socket-mode)).
@@ -187,8 +190,8 @@ docker compose down             # stops it; the data volume stays
 - **Secrets** stay in `.env`, which is git-ignored; `.env.example` lists every variable with
   empty values. hex reads its own secrets (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`,
   `HEX_IMAP_USER`, `HEX_IMAP_PASSWORD`, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`) as Effect
-  `Config.Redacted`; Mastra's model router reads the model keys (`OPENAI_API_KEY`, …) straight
-  from the environment.
+  `Config.Redacted`; the model keys (`HEX_ANTHROPIC_API_KEY`, …) go to Mastra's model router
+  with the model (see [Development shell and model keys](#development-shell-and-model-keys)).
 - **Pinned settings**: `compose.yaml` sets `HEX_HOST=0.0.0.0`, `HEX_PORT=4111`,
   `HEX_DATA_DIR=/data`, `HEX_OUTBOX_DIR=/outbox`, `MASTRA_TELEMETRY_DISABLED=1` and
   `DO_NOT_TRACK=1` under `environment:`, which a `.env` line can't override. No config file is
@@ -392,7 +395,7 @@ watcher) is unsupported and may duplicate Forwardings and Filings.
 | `HEX_CONFIG` `intake.category` | Category to file under; only `"ER"`, the default without the file, `intake` or `category`                                                                           |
 | `HEX_CONFIG` `intake.model`    | Mastra model-router id (`provider/model`) that reads Document dates; default `anthropic/claude-haiku-5-5` (chosen by the eval on 2026-11-05, see [Evals](#evals))   |
 | `HEX_CONFIG` `eval.models`     | The models `bun run eval` compares, `provider/model` each (see [Evals](#evals)); checked, but not used, by the server and the Intake                                |
-| `ANTHROPIC_API_KEY`            | API key for the default model; another provider takes its own variable (e.g. `OPENAI_API_KEY`), never the config                                                    |
+| `HEX_ANTHROPIC_API_KEY`        | API key for the default model; another provider takes its own (e.g. `HEX_OPENAI_API_KEY`), never the config; unset, the provider's own variable                     |
 | `HEX_CONFIG` `forwarding`      | Forwarding: `from` (the sender address) and `targets`, each name → `{ "to": address, "enabled": true/false }`; off when absent                                      |
 | `HEX_SMTP_HOST`                | SMTP server to forward through; required (as are user and password) once a target is enabled                                                                        |
 | `HEX_SMTP_PORT`                | SMTP port; default 465                                                                                                                                              |
@@ -428,9 +431,10 @@ unencrypted. Names, `localhost` included, are refused: the SMTP client resolves 
 through DNS, before `/etc/hosts`, so it could reach another machine; use `127.0.0.1`. The SMTP
 Mailer
 itself refuses it too, without connecting. The SMTP settings are
-read as Effect `Config` from the environment: the login (`HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) is
-declared in `secretspec.toml`, so the development shell exports it like the model keys; set
-`HEX_SMTP_HOST`, `HEX_SMTP_PORT` and `HEX_SMTP_SECURITY` yourself.
+read as Effect `Config` from the environment: the server and login (`HEX_SMTP_HOST`,
+`HEX_SMTP_PORT`, `HEX_SMTP_USER`, `HEX_SMTP_PASSWORD`) are declared in `secretspec.toml`, so the
+development shell exports them like the model keys; set `HEX_SMTP_SECURITY` yourself if the
+port's default doesn't fit.
 
 The development shell exports the API keys (see
 [Development shell and model keys](#development-shell-and-model-keys)). hex doesn't check at
@@ -671,9 +675,10 @@ deadline goes no further, and closes any event stream it opened late. A Signal s
 }
 ```
 
-- `model`: a Mastra model-router id, `provider/model`. Its API key comes from the provider's usual
-  environment variable (for example `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), which the development
-  shell exports (see [Development shell and model keys](#development-shell-and-model-keys)).
+- `model`: a Mastra model-router id, `provider/model`. Its API key comes from `HEX_` plus the
+  provider's usual environment variable (for example `HEX_ANTHROPIC_API_KEY`,
+  `HEX_OPENAI_API_KEY`), which the development shell exports (see
+  [Development shell and model keys](#development-shell-and-model-keys)).
 - `providerOptions` (optional): passed unchanged to every model call, keyed by provider, as the
   provider defines them; here Anthropic's `effort` (`low` to `max`), which trades depth for speed
   and cost. Omitted, the provider's defaults apply. They are not checked at startup: a wrong value
@@ -773,7 +778,7 @@ Store both tokens as keys (see
 or export them yourself. Run it, then DM the app in Slack (App Home → **Messages**):
 
 ```sh
-export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… ANTHROPIC_API_KEY=…   # unless the shell did
+export SLACK_APP_TOKEN=xapp-… SLACK_BOT_TOKEN=xoxb-… HEX_ANTHROPIC_API_KEY=…   # unless the shell did
 HEX_CONFIG=hex.json bun run start   # logs "Slack socket mode connected", then "hex listening on …"
 ```
 
@@ -853,7 +858,7 @@ it.
 Run it against a daemon on loopback:
 
 ```sh
-export SIGNAL_ACCOUNT=+15555550100 SIGNAL_CLI_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=…
+export SIGNAL_ACCOUNT=+15555550100 SIGNAL_CLI_URL=http://127.0.0.1:8080 HEX_ANTHROPIC_API_KEY=…
 HEX_CONFIG=hex.json bun run start   # "Chat instance initialized", then "hex listening on …"
 ```
 
@@ -943,7 +948,7 @@ set to a non-empty value.
 ```sh
 bun run eval                                   # the committed synthetic set
 HEX_EVAL_FIXTURES=~/hex-fixtures bun run eval  # your own folder
-ANTHROPIC_API_KEY=… bun run eval               # outside the development shell
+HEX_ANTHROPIC_API_KEY=… bun run eval           # outside the development shell
 ```
 
 - `HEX_EVAL_FIXTURES`: the fixture folder (`expected.json` and its `.eml` Intakes); default
@@ -952,8 +957,8 @@ ANTHROPIC_API_KEY=… bun run eval               # outside the development shell
   It must not lie inside the fixture folder.
 - `HEX_CONFIG`: the path of hex's config file. The models are its `eval.models`; without that
   section, the one model the Intake uses (`intake.model`, or `anthropic/claude-haiku-5-5` when
-  the variable is unset or the file names none). Each model's API key comes from its provider's
-  usual variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`).
+  the variable is unset or the file names none). Each model's API key comes from `HEX_` plus its
+  provider's usual variable (`HEX_ANTHROPIC_API_KEY`, `HEX_OPENAI_API_KEY`, `HEX_GOOGLE_API_KEY`).
 - `HEX_EVAL_PRICES_URL`: where LiteLLM's price data comes from; default
   `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`.
 

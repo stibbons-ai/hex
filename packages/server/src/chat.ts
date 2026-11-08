@@ -1,3 +1,4 @@
+import { withHexApiKey } from "@hex/adapters";
 import { decideSender } from "@hex/domain";
 import { Agent } from "@mastra/core/agent";
 import type { AgentConfig, AgentExecutionOptions } from "@mastra/core/agent";
@@ -47,7 +48,10 @@ type AgentProviderOptions = NonNullable<AgentExecutionOptions["providerOptions"]
 type StepContent = Parameters<NonNullable<AgentExecutionOptions["onStepFinish"]>>[0]["content"];
 
 export interface ChatOptions {
-  /** A Mastra model-router string such as `anthropic/claude-opus-5-5`; tests pass a mock model. */
+  /**
+   * A Mastra model-router string such as `anthropic/claude-opus-5-5`, its API key from
+   * `HEX_<provider variable>` (see `withHexApiKey`); tests pass a mock model.
+   */
   model: MastraModelConfig;
   /** Passed to every model call of the chat agent; omitted uses the provider's defaults. */
   providerOptions?: ProviderOptions;
@@ -117,7 +121,7 @@ function chatAgentConfig(
     id: CHAT_AGENT_ID,
     name: CHAT_AGENT_ID,
     instructions: INSTRUCTIONS,
-    model,
+    model: withHexApiKey(model),
     // Every run, the Channels-triggered ones included, merges these defaults into its options.
     defaultOptions: {
       onStepFinish: ({ content }) =>

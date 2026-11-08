@@ -77,10 +77,13 @@ async function intake(args: string[], env: Record<string, string>, openai: FakeO
       HEX_SMTP_USER: "",
       HEX_SMTP_PASSWORD: "",
       OPENAI_BASE_URL: openai.baseUrl,
-      OPENAI_API_KEY: API_KEY,
+      HEX_OPENAI_API_KEY: API_KEY,
+      OPENAI_API_KEY: "",
+      HEX_ANTHROPIC_API_KEY: "",
       ANTHROPIC_API_KEY: "",
+      HEX_GOOGLE_API_KEY: "",
+      GOOGLE_API_KEY: "",
       GOOGLE_GENERATIVE_AI_API_KEY: "",
-      GEMINI_API_KEY: "",
       MASTRA_AUTO_REFRESH_PROVIDERS: "",
       MASTRA_DEV: "",
       ...env,
@@ -158,10 +161,15 @@ describe("bun run intake", () => {
         "",
       ].join("\n"),
     );
-    // Each Document went to the configured model natively, as a PDF file part with its bytes.
+    // Each Document went to the configured model natively, as a PDF file part with its bytes,
+    // authorized with HEX_OPENAI_API_KEY (OPENAI_API_KEY is empty).
     const requests = model.requests.slice(asked);
     expect(requests.map(({ model: id }) => id)).toEqual(["gpt-5.4-mini", "gpt-5.4-mini"]);
     expect(requests.map(inputFiles)).toEqual([[dataUrl(DATED_PDF)], [dataUrl(UNDATED_PDF)]]);
+    expect(requests.map(({ authorization }) => authorization)).toEqual([
+      `Bearer ${API_KEY}`,
+      `Bearer ${API_KEY}`,
+    ]);
 
     expect(await readFile(join(outbox, "2026-09/ER/Rechnung 4711.pdf"))).toEqual(
       Buffer.from(DATED_PDF),
@@ -327,7 +335,7 @@ describe("bun run intake", () => {
       );
       expect(run).toMatchObject({ code: 1, stdout: "" });
       expect(run.stderr).toContain(
-        'hex intake: the Intake workflow did not finish: filing: reading the Document date of "a.pdf" with openai/gpt-5-mini failed (HTTP 401): Incorrect API key provided: OPENAI_API_KEY.',
+        'hex intake: the Intake workflow did not finish: filing: reading the Document date of "a.pdf" with openai/gpt-5-mini failed (HTTP 401): Incorrect API key provided: HEX_OPENAI_API_KEY.',
       );
       expect(run.stderr).not.toContain(API_KEY);
       // Exactly one model call: a refused key is never retried.
@@ -337,7 +345,7 @@ describe("bun run intake", () => {
       // Mastra persists the failed run: its error, but never the key or the provider's request
       // (an error cause would carry both).
       const persisted = await persistedText(dataDirectory);
-      expect(persisted.includes("Incorrect API key provided: OPENAI_API_KEY")).toBe(true);
+      expect(persisted.includes("Incorrect API key provided: HEX_OPENAI_API_KEY")).toBe(true);
       expect(persisted.includes(API_KEY)).toBe(false);
       expect(persisted.includes("requestBodyValues")).toBe(false);
     } finally {

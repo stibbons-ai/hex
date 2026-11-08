@@ -6,6 +6,7 @@ import { noopLogger } from "@mastra/core/logger";
 import { StreamErrorRetryProcessor } from "@mastra/core/processors";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { excerpt, messageOf, redact } from "./errors";
+import { withHexApiKey } from "./model-key";
 import { toMastraSchema } from "./schema";
 
 /**
@@ -196,8 +197,8 @@ export interface DateExtractorOptions {
 }
 
 /**
- * The DateExtractor on `model`: a Mastra model-router id (`provider/model`, its API key from the
- * provider's usual variable, e.g. `OPENAI_API_KEY`) or a model instance (tests pass a mock). Each
+ * The DateExtractor on `model`: a Mastra model-router id (`provider/model`, its API key from
+ * `HEX_<provider variable>`, see {@link withHexApiKey}) or a model instance (tests pass a mock). Each
  * Document goes to the model natively as a file part with its media type; the answer comes back
  * as structured output. A reply that yields no object matching the schema (see `extract`) is
  * undefined (Mastra's `warn` strategy), not an error. A call taking longer than `timeoutMs` is
@@ -213,7 +214,7 @@ export function dateExtractorLayer(
     id: "hex-date-extractor",
     name: "hex-date-extractor",
     instructions: INSTRUCTIONS,
-    model,
+    model: withHexApiKey(model),
     // Mastra's default error processors include one that, when a provider refuses the file,
     // replaces it with a placeholder text and asks again: the model would answer without the
     // Document. Transient errors the provider marks retryable (rate limit, overload, a dropped or
