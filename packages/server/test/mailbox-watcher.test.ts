@@ -385,6 +385,57 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("a mail that can't become an Intake, its move to hex/failed refused, is a warning; the next look moves it", async () => {
+    const hex = await freshWatcher();
+    hex.mailbox.refuse("moving mail to hex/failed");
+    hex.mailbox.deliver(new TextEncoder().encode("not a mail"));
+    hex.mailbox.deliver(emlOf("next@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds()).toEqual([undefined]);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["next@shop.example"]);
+    expect(hex.log()).toContain(
+      "warn: hex: mailbox: INBOX UID 1: not an email (no headers); moving it to hex/failed",
+    );
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^warn: hex: mailbox: UID 1 \(no Message-ID as the server reads it\): .*moving mail to hex\/failed failed: .*\[NOPERM\].*; going on with the next mail$/,
+      ),
+    );
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([undefined]);
+    expect(hex.asked).toHaveLength(1);
+  });
+
+  test("a mail that can't become an Intake, its move to hex/failed failed by a lost connection, ends the look; the next look moves it", async () => {
+    const hex = await freshWatcher();
+    hex.mailbox.before("moving mail to hex/failed", 0, () => hex.mailbox.disconnect(1));
+    hex.mailbox.deliver(new TextEncoder().encode("not a mail"));
+    hex.mailbox.deliver(emlOf("next@shop.example"));
+    hex.start();
+    await hex.scanned();
+    const log = hex.log();
+    const ended = log.findIndex((line) =>
+      /^warn: hex: mailbox: UID 1 \(no Message-ID as the server reads it\): .*moving mail to hex\/failed failed: connection lost; trying again in 0 s \(attempt 1\)$/.test(
+        line,
+      ),
+    );
+    expect(ended).toBeGreaterThanOrEqual(0);
+    expect(log).not.toContainEqual(expect.stringContaining("going on with the next mail"));
+    // The look ended at the failed move: the readable mail after it waited for the next look.
+    const operations = hex.mailbox.operations;
+    const failedMove = operations.indexOf("moving mail to hex/failed");
+    expect(operations.slice(0, failedMove)).not.toContain("moving mail to hex/processed");
+    expect(operations.slice(failedMove + 1, operations.indexOf("listing", failedMove))).toEqual([]);
+    // The next look moved the unreadable mail and processed the readable one.
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([undefined]);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["next@shop.example"]);
+    expect(hex.asked).toHaveLength(1);
+  });
+
   test("a failed Intake is retried only once its delay passed, the delay doubling", async () => {
     let failures = 2;
     const hex = await freshWatcher({

@@ -558,6 +558,12 @@ export function watchMailbox({
         const read = yield* Effect.result(readEml(source, `${mailbox.folder} UID ${uid}`));
         if (read._tag === "Failure") {
           log.warn(`hex: mailbox: ${read.failure.message}; moving it to hex/failed`);
+          // Not `moveByUid`: this mail has no Intake, no ledger state, nothing to settle, so a
+          // failed move fails this mail. The per-mail catch below logs a refused move ("going on
+          // with the next mail") and the mail stays for the next look to try again; a lost
+          // connection or stale UIDs end the look as everywhere else. `moveByUid` would return
+          // any failed move as a `not-moved` fate (with the error only when it ends the look),
+          // which this path would then have to log and re-fail itself.
           yield* mailbox.moveUid(uid, "failed");
           return;
         }
