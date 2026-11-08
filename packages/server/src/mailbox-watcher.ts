@@ -91,7 +91,10 @@ const decodeActiveInput = Schema.decodeUnknownOption(
 const endsLook = (error: unknown): error is MailboxError =>
   error instanceof MailboxError && error.reason !== "refused";
 
-/** The ledger's count of an Intake's failed runs: 0 with the error's message when unreadable. */
+/**
+ * The ledger's count of an Intake's failed runs: `counted` 0 and `unreadable` the error's message
+ * when it can't be read.
+ */
 interface LedgerCount {
   readonly counted: number;
   readonly unreadable: string | undefined;
@@ -331,10 +334,14 @@ export function watchMailbox({
    * The warning after a failed run the ledger counted (`ledger` its count now) and kept for a
    * retry, for an Intake with failed runs counted in memory too: by its effective count, at the
    * limit failed permanently by the next look. `undefined` without any in memory. `correcting`
-   * when the run's own line gave the ledger's count already: the line then corrects it, saying
-   * when the ledger's count couldn't be read.
+   * when the run's own line gave the ledger's count already: the line then corrects it, and only
+   * that line says when the ledger's count couldn't be read.
    */
-  const heldLine = (messageId: string, ledger: LedgerCount, correcting = false) =>
+  const heldLine = (
+    messageId: string,
+    ledger: LedgerCount,
+    { correcting = false }: { readonly correcting?: boolean } = {},
+  ) =>
     HeldBack.useSync((heldBack) => {
       const held = heldBack.get(messageId);
       if (held === undefined) return undefined;
@@ -344,9 +351,9 @@ export function watchMailbox({
           ? "the mailbox watcher fails it permanently at its next look"
           : `any mail of it in the watched folder stays there; the mailbox watcher runs it again no sooner than ${retryDelayMs(failedRuns) / 60_000} min from now`;
       const count = `failed run ${failedRuns} of ${MAX_FAILED_RUNS}, ${held.count} of them counted in memory`;
+      if (!correcting) return `hex: Intake ${messageId}: ${count}: ${next}`;
       const unreadable =
         ledger.unreadable === undefined ? "" : ` (ledger count unreadable: ${ledger.unreadable})`;
-      if (!correcting) return `hex: Intake ${messageId}: ${count}${unreadable}: ${next}`;
       return `hex: Intake ${messageId}: counting the failed runs in memory too, ${count}${unreadable}: ${next}`;
     });
 
@@ -473,10 +480,12 @@ export function watchMailbox({
       if (fate) {
         if (fate.status === "kept-for-retry") {
           // The run's line counted the ledger's failed runs only; with some in memory too, a
-          // line of the watcher's corrects it by the effective count. A ledger that can't be read
-          // now leaves the memory's count alone, said in that line.
+          // line of the watcher's corrects it by the effective count. When the ledger can't be
+          // read now, the line then gives the memory's count alone, saying why.
           if ((yield* HeldBack).has(messageId)) {
-            const line = yield* heldLine(messageId, yield* ledgerCount(messageId), true);
+            const line = yield* heldLine(messageId, yield* ledgerCount(messageId), {
+              correcting: true,
+            });
             if (line !== undefined) log.warn(line);
           }
           return;
@@ -514,12 +523,12 @@ export function watchMailbox({
      */
     const seen = new Set<string>();
     /**
-     * Whether a mail's look failed before hex read its Message-ID: that mail may be a hold-back's,
-     * so no hold-back ends with this look.
+     * Whether passing a mail over by the server's reading of its Message-ID, or fetching it,
+     * failed: that mail may be a hold-back's, so no hold-back ends with this look.
      */
-    let unreadFailed = false;
-    const markUnread = Effect.sync(() => {
-      unreadFailed = true;
+    let readFailed = false;
+    const noteReadFailed = Effect.sync(() => {
+      readFailed = true;
     });
 
     /**
@@ -590,19 +599,20 @@ export function watchMailbox({
      * The Intake in the mail at `uid`, listed with the server's reading of its Message-ID;
      * `undefined` when that reading is passed over, the mail is gone, or hex can't read it (moved
      * to `hex/failed`; a refused move fails this mail). Both readings come normalised: the
-     * listing's by the Mailbox, hex's by `readEml`. A failure before hex read the mail is noted
-     * in `unreadFailed`.
+     * listing's by the Mailbox, hex's by `readEml`. Failing to pass the mail over by the server's
+     * reading or to fetch it is noted in `readFailed`.
      */
     const intakeAt = (uid: number, listed: string | undefined) =>
       Effect.gen(function* () {
         if (
           listed !== undefined &&
-          (seen.has(listed) || (yield* passOver(listed).pipe(Effect.tapError(() => markUnread))))
+          (seen.has(listed) ||
+            (yield* passOver(listed).pipe(Effect.tapError(() => noteReadFailed))))
         ) {
           seen.add(listed);
           return undefined;
         }
-        const source = yield* mailbox.source(uid).pipe(Effect.tapError(() => markUnread));
+        const source = yield* mailbox.source(uid).pipe(Effect.tapError(() => noteReadFailed));
         if (!source) return undefined;
         const read = yield* Effect.result(readEml(source, `${mailbox.folder} UID ${uid}`));
         if (read._tag === "Success") return read.success;
@@ -613,7 +623,7 @@ export function watchMailbox({
         // connection or stale UIDs end the look as everywhere else. `moveByUid` would return
         // any failed move as a `not-moved` fate (with the error only when it ends the look),
         // which this path would then have to log and re-fail itself. No hold-back is this
-        // mail's, so its failure leaves `unreadFailed` be.
+        // mail's, so its failure leaves `readFailed` be.
         yield* mailbox.moveUid(uid, "failed");
         return undefined;
       });
@@ -652,8 +662,9 @@ export function watchMailbox({
       );
     }
     // A hold-back whose Message-ID this full look didn't see: its mail is gone. None ends after a
-    // mail whose look failed before hex read it: that mail may be the hold-back's.
-    if (unreadFailed) return;
+    // look that failed to pass a mail over by the server's reading or to fetch it: that mail may
+    // be the hold-back's.
+    if (readFailed) return;
     for (const messageId of heldBack.keys()) {
       if (!seen.has(messageId)) heldBack.delete(messageId);
     }
