@@ -385,6 +385,27 @@ describe("watchMailbox", () => {
     );
   });
 
+  test("a mail that can't become an Intake, its move to hex/failed refused, is a warning; the next look moves it", async () => {
+    const hex = await freshWatcher();
+    hex.mailbox.refuse("moving mail to hex/failed");
+    hex.mailbox.deliver(new TextEncoder().encode("not a mail"));
+    hex.mailbox.deliver(emlOf("next@shop.example"));
+    hex.start();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds()).toEqual([undefined]);
+    expect(hex.mailbox.messageIds("hex/processed")).toEqual(["next@shop.example"]);
+    expect(hex.log()).toContainEqual(
+      expect.stringMatching(
+        /^warn: hex: mailbox: UID 1 \(no Message-ID as the server reads it\): .*moving mail to hex\/failed failed: .*\[NOPERM\].*; going on with the next mail$/,
+      ),
+    );
+    hex.mailbox.tick();
+    await hex.scanned();
+    expect(hex.mailbox.messageIds()).toEqual([]);
+    expect(hex.mailbox.messageIds("hex/failed")).toEqual([undefined]);
+    expect(hex.asked).toHaveLength(1);
+  });
+
   test("a failed Intake is retried only once its delay passed, the delay doubling", async () => {
     let failures = 2;
     const hex = await freshWatcher({
