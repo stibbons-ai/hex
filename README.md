@@ -89,6 +89,13 @@ devenv resolve the keys itself, a second fetch on top of `enterShell`'s; in an A
 devenv then refuses to open the shell unless a reason is set too, for example
 `SECRETSPEC_PROVIDER=keyring SECRETSPEC_REASON="devenv shell: hex model keys" devenv shell`.
 
+The service account's reads are cached in the macOS Keychain for 30 days (`cache` on
+`onepassword_service` in `secretspec.toml`, stored under `secretspec/cache/hex/default/<KEY>`), so
+entering a shell normally doesn't contact 1Password and many shells, worktrees or agents don't run
+into its rate limit. A fresh entry is used as is; an expired or missing one is read from 1Password
+again. After rotating a key in 1Password, run `secretspec cache clear` (all keys) or
+`secretspec cache clear <KEY>`, then reload the shell.
+
 ## Run
 
 ```sh
