@@ -76,7 +76,7 @@ router reads the provider's own variable. The prefix keeps the keys away from co
 started in this shell, which can bill API usage instead of a subscription when they find
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. `HEX_SMTP_HOST`, `HEX_SMTP_PORT`, `HEX_SMTP_USER` and
 `HEX_SMTP_PASSWORD` are the SMTP server and login Forwarding sends with (see [Intake](#intake-dev-command)),
-`HEX_IMAP_USER` and `HEX_IMAP_PASSWORD` the IMAP login hex reads the intake mailbox with (see
+`HEX_IMAP_HOST`, `HEX_IMAP_PORT`, `HEX_IMAP_USER` and `HEX_IMAP_PASSWORD` the IMAP server and login hex reads the intake mailbox with (see
 [Mailbox](#mailbox)), `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` the tokens of the Slack chat
 channel (see [Slack app for socket mode](#slack-app-for-socket-mode)).
 All are optional, and a missing or rejected service token only warns: the shell still opens, and
@@ -530,8 +530,10 @@ in it, an Intake being one incoming mail:
 | `HEX_IMAP_USER`                    | IMAP login, read as a redacted secret                                                                                                                      |
 | `HEX_IMAP_PASSWORD`                | IMAP password, read as a redacted secret: never in the config, an error, a log or a result                                                                 |
 
-A setting missing or unusable fails startup, naming the variable (never its value), as for SMTP;
-plaintext IMAP is refused for anything but a loopback IP address, for the same reason. The folder
+A setting missing or unusable fails startup, naming the variable (never its value), as for SMTP.
+As for SMTP, the server and login are declared in `secretspec.toml`, so the development shell
+exports them; set `HEX_IMAP_SECURITY` yourself if the port's default doesn't fit. Plaintext IMAP
+is refused for anything but a loopback IP address, for the same reason as SMTP. The folder
 can't be blank or one of hex's outcome folders (in any letter case, with either delimiter, under
 `INBOX` or not). The server connects, logs in and opens the folder
 at startup and fails to start when it can't within 60 s (an unreachable server, wrong
