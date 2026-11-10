@@ -336,29 +336,135 @@ test("answers a response that fails to encode with a plain, logged 500", async (
   }
 });
 
-// oRPC's serializer finds the cycle only by recursing until the stack overflows: ~0.5 s on a
-// fast Mac, 1.5 s on CI Linux and 4-6.5 s on CI macOS runners, past bun's 5 s default.
-test("logs an output oRPC's encoder rejects, once", async () => {
+describe("a cyclic output", () => {
+  /** A one-step workflow whose step returns `output`; Mastra doesn't check step output. */
+  function returning(id: string, output: unknown) {
+    return oneStep(id, async () => output as typeof Message.Type);
+  }
+  /** `wrap(holder)`, where `holder.value` is that same result. */
+  function cyclic<T extends object>(wrap: (self: unknown) => T): T {
+    const holder: { value?: unknown } = {};
+    const value = wrap(holder);
+    holder.value = value;
+    return value;
+  }
+  const shared = { message: "shared" };
   const circular: Record<string, unknown> = {};
   circular.self = circular;
-  // Mastra doesn't check step output, so the circular value reaches oRPC's encoder.
-  const loop = oneStep("loop", async () => circular as unknown as typeof Message.Type);
-  const server = await start({
-    databasePath: join(directory, "circular", "mastra.db"),
-    workflows: { loop },
+  // A leaf to the cycle check, but oRPC's serializer calls its getTime, so it fails only in the
+  // encoder, after the procedure returned. Mastra hands the step output back by identity, and its
+  // snapshot store dates it through toJSON, which doesn't call getTime.
+  const unencodableDate = Object.assign(new Date(0), {
+    getTime(): number {
+      throw new TypeError("no time");
+    },
   });
-  const logged = spyOn(server.mastra.getLogger(), "error");
-  try {
-    const { error } = await safe(
-      client(server).workflows.start({ workflowId: "loop", inputData: { message: "x" } }),
-    );
-    expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
-    expect(logged).toHaveBeenCalledTimes(1);
-    expect(logged).toHaveBeenCalledWith("hex: oRPC call failed", expect.any(Error));
-  } finally {
-    logged.mockRestore();
-  }
-}, 20_000);
+  // Arrays whose Symbol.iterator disagrees with their indices: oRPC's serializer reads indices.
+  const hiddenCycle: unknown[] = [];
+  hiddenCycle.push(hiddenCycle);
+  Object.defineProperty(hiddenCycle, Symbol.iterator, { value: function* () {} });
+  const iteratesItself: unknown[] = [1, 2];
+  Object.defineProperty(iteratesItself, Symbol.iterator, {
+    *value() {
+      yield iteratesItself;
+    },
+  });
+  let server: RunningServer;
+  beforeAll(async () => {
+    server = await start({
+      databasePath: join(directory, "cyclic", "mastra.db"),
+      workflows: {
+        self: returning("self", circular),
+        array: returning(
+          "array",
+          cyclic((self) => ({ list: [1, self] })),
+        ),
+        map: returning(
+          "map",
+          cyclic((self) => ({ map: new Map([["key", self]]) })),
+        ),
+        set: returning(
+          "set",
+          cyclic((self) => ({ set: new Set([self]) })),
+        ),
+        dag: returning("dag", { message: "x", first: shared, second: [shared] }),
+        hiddenCycle: returning("hiddenCycle", hiddenCycle),
+        iteratesItself: returning("iteratesItself", iteratesItself),
+        encoder: returning("encoder", { date: unencodableDate }),
+      },
+    });
+    // Warm up, so the timed calls below don't pay for the first Mastra run.
+    await client(server).workflows.start({ workflowId: "dag", inputData: { message: "x" } });
+  });
+
+  // The bound stands in for a concurrent GET /health: oRPC's serializer found the cycle only by
+  // recursing until the stack overflowed, blocking the server for 0.5 s to 6.5 s. Locally the
+  // message and logged-once assertions are what pin the check; on a slow CI runner the bound is
+  // what tells the fix from the stall.
+  test.each(["self", "array", "map", "set", "hiddenCycle"])(
+    "is rejected fast as a 500, logged once (%s)",
+    async (workflowId) => {
+      const logged = spyOn(server.mastra.getLogger(), "error");
+      try {
+        const started = performance.now();
+        const { error } = await safe(
+          client(server).workflows.start({ workflowId, inputData: { message: "x" } }),
+        );
+        expect(performance.now() - started).toBeLessThan(200);
+        expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+        expect(logged).toHaveBeenCalledTimes(1);
+        const [message, fault] = logged.mock.calls[0]!;
+        expect(message).toBe("hex: oRPC call failed");
+        expect(fault).toBeInstanceOf(Error);
+        expect((fault as Error).message).toBe(
+          "hex: the output of workflows.start is cyclic or too deep",
+        );
+      } finally {
+        logged.mockRestore();
+      }
+    },
+  );
+
+  test("is told apart from a value shared by two parents, which is returned as is", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "dag",
+      inputData: { message: "x" },
+    });
+    expect(started).toEqual({
+      runId: expect.any(String),
+      status: "success",
+      result: { message: "x", first: shared, second: [shared] } as typeof Message.Type,
+    });
+  });
+
+  test("walks an array by index, as oRPC does, not by its own iterator", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "iteratesItself",
+      inputData: { message: "x" },
+    });
+    expect(started).toEqual({
+      runId: expect.any(String),
+      status: "success",
+      result: [1, 2] as unknown as typeof Message.Type,
+    });
+  });
+
+  test("is told apart from an output the encoder rejects after the check, logged once", async () => {
+    const logged = spyOn(server.mastra.getLogger(), "error");
+    try {
+      const { error } = await safe(
+        client(server).workflows.start({ workflowId: "encoder", inputData: { message: "x" } }),
+      );
+      expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const [message, fault] = logged.mock.calls[0]!;
+      expect(message).toBe("hex: oRPC call failed");
+      expect(fault).toEqual(new TypeError("no time"));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
 
 test("keeps Mastra's default logger unless told otherwise", async () => {
   // Mastra's default logger writes errors with console.error; the noop logger writes nothing.
