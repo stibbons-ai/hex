@@ -22,15 +22,21 @@ interface Walk {
 
 const tooDeep = (walk: Walk) => new Error(`hex: the output of ${walk.name} is cyclic or too deep`);
 
-/** The indices a copied Array subclass hands the encoder's callback, keyed by the copy. */
+/** The indices a copied array hands the encoder's callback, keyed by the copy, until it does. */
 const replays = new WeakMap<object, number[]>();
 
-/** The `map` of a copied Array subclass: calls `encode` on its walked indices, in place. */
+/**
+ * The `map` of a copied array, for the encoder's one call: removes itself, so a `toJSON` JSON then
+ * calls sees the array's inherited `map`, and calls `encode` on the walked indices, in place.
+ */
 function replayMap(
   this: unknown[],
   encode: (item: unknown, index: number, array: unknown[]) => unknown,
 ): unknown[] {
-  for (const i of replays.get(this) ?? []) this[i] = encode(this[i], i, this);
+  const indices = replays.get(this) ?? [];
+  replays.delete(this);
+  Reflect.deleteProperty(this, "map");
+  for (const i of indices) this[i] = encode(this[i], i, this);
   return this;
 }
 
@@ -98,13 +104,16 @@ function isWalked(value: unknown): boolean {
  *   way, and so does a repeated key, except a leaf object key repeated by an overridden `entries`:
  *   like a Set's, it collapses into one entry here, where oRPC's client keeps both.
  * - Array, with the native `map`: called once with a callback that returns each item, as oRPC
- *   calls it with one that encodes each. Its result (an Array subclass's species instance, built
- *   once) is the copy: the visited indices get their items' copies in place, holes and any slots
- *   the species constructor added stay as they are. A subclass copy keeps its prototype, so its
- *   `toJSON` still runs, and gets an own `map` handing the encoder's callback only the visited
- *   indices, so the species constructor never runs again. All items are read before any is walked
- *   into, where oRPC walks each as `map` reaches it: an index getter whose answer depends on what
- *   was read before it can decode differently. Only recursion could keep that order.
+ *   calls it with one that encodes each. Its result (an Array subclass's species instance, or
+ *   whatever a species constructor returns, built once) is the copy: the visited indices get their
+ *   items' copies in place, holes and any slots or own properties the species constructor added
+ *   stay as they are. A copy with another prototype or a `toJSON` (so one JSON would call) gets an
+ *   own `map` for the encoder's one call: it removes itself, then hands the encoder's callback only
+ *   the visited indices and returns the copy, so the species constructor never runs again and the
+ *   `toJSON` sees the copy with its inherited `map`. Other arrays get no such `map`. All items are
+ *   read before any is walked into, where oRPC walks each as `map` reaches it: an index getter
+ *   whose answer depends on what was read before it can decode differently. Only recursion could
+ *   keep that order.
  * - Array, with an overridden `map`: called once, with a callback returning the checked, detached
  *   copy of each walked item, as oRPC's returns a fresh encoding, so an override that changes it
  *   leaves the output alone. That callback walks inside the override's call, so a cycle it meets
@@ -176,12 +185,12 @@ function* copyOf(value: object, walk: Walk): Generator<unknown, unknown, unknown
       copy[i] = isWalked(item) ? yield item : item;
     }
     const prototype: unknown = Object.getPrototypeOf(mapped);
-    if (prototype !== Array.prototype) {
-      // Keeps an Array subclass's toJSON, which runs on what oRPC's map returns, without running
-      // its species constructor again in the encoder's map or calling an overridden one again.
+    if (prototype !== Array.prototype || "toJSON" in copy) {
+      // Keeps a `toJSON` on what oRPC's map returns (an Array subclass's, or one a species gave an
+      // ordinary array) without running a species constructor again or an overridden map again.
       if (!visited) Object.setPrototypeOf(copy, prototype as object | null);
       replays.set(copy, walked);
-      Object.defineProperty(copy, "map", { value: replayMap });
+      Object.defineProperty(copy, "map", { value: replayMap, configurable: true });
     }
     return copy;
   }

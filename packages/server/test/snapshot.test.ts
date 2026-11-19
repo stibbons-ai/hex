@@ -218,18 +218,54 @@ test("returns an async iterator output as is, which oRPC streams instead of enco
   expect(snapshot(iterator)).toBe(iterator);
 });
 
-test.each([
-  ["no next", { [Symbol.asyncIterator]: (): undefined => undefined }],
-  ["a next that isn't a function", { next: 1, [Symbol.asyncIterator]: (): undefined => undefined }],
-  ["no Symbol.asyncIterator", { next: async (): Promise<undefined> => undefined }],
+/** Root shapes oRPC's codec encodes whole, each with what a caller decodes beside `data`. */
+const incompleteIterators: [string, Record<PropertyKey, unknown>, object][] = [
+  ["no next", { [Symbol.asyncIterator]: (): undefined => undefined }, {}],
+  [
+    "a next that isn't a function",
+    { next: 1, [Symbol.asyncIterator]: (): undefined => undefined },
+    { next: 1 },
+  ],
+  ["no Symbol.asyncIterator", { next: async (): Promise<undefined> => undefined }, {}],
   [
     "a Symbol.asyncIterator that isn't a function",
     { next: async (): Promise<undefined> => undefined, [Symbol.asyncIterator]: 1 },
+    {},
   ],
-])("walks an incomplete async iterator with %s, which oRPC encodes", (_, members) => {
-  const half: Record<PropertyKey, unknown> = { ...members };
-  half.self = half;
-  rejects(half);
+];
+
+test.each(incompleteIterators)(
+  "walks an incomplete async iterator with %s, which oRPC encodes",
+  (_, members) => {
+    const half: Record<PropertyKey, unknown> = { ...members };
+    half.self = half;
+    rejects(half);
+  },
+);
+
+test.each(incompleteIterators)(
+  "leaves oRPC's codec to encode an incomplete async iterator with %s whole",
+  (_, members, decoded) => {
+    const half = { ...members, data: "whole" };
+    const wire = JSON.parse(encode(snapshot(half))) as Parameters<typeof serializer.deserialize>[0];
+    expect(serializer.deserialize(wire)).toEqual({ ...decoded, data: "whole" });
+  },
+);
+
+test("leaves oRPC's codec to stream a complete async iterator output", async () => {
+  // A plain object, which the walk would descend into: an async generator is a leaf either way.
+  const events = [{ event: 1 }];
+  const stream = {
+    next: async () => ({ done: events.length === 0, value: events.shift() }),
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+  const decoded: unknown[] = [];
+  // Iterating needs the stream itself: an encoded copy keeps `next` but loses the iterator symbol.
+  const streamed = serializer.deserialize(serializer.serialize(snapshot(stream)));
+  for await (const event of streamed as AsyncIterable<unknown>) decoded.push(event);
+  expect(decoded).toEqual([{ event: 1 }]);
 });
 
 test("hands an array's own map a detached copy, as oRPC does, and checks what it returns", () => {

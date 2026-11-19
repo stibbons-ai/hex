@@ -388,6 +388,25 @@ describe("a cyclic output", () => {
       return `custom:${this.length}`;
     }
   }
+  // An Array subclass whose toJSON maps itself with the inherited map and reads itself again.
+  class Scaled extends Array {
+    toJSON(): object {
+      const scaled = Array.from(this.map((n: number) => n * 2));
+      return { original: Array.from(this), scaled };
+    }
+  }
+  // An Array subclass whose species builds an ordinary array with its own toJSON.
+  class Speciated extends Array {
+    static override get [Symbol.species](): ArrayConstructor {
+      return function (length: number) {
+        return Object.assign(Array.from({ length }), {
+          toJSON(this: unknown[]): string {
+            return `custom:${this.length}`;
+          },
+        });
+      } as unknown as ArrayConstructor;
+    }
+  }
   // An Array subclass whose constructor adds an item: oRPC's map constructs it once, so its
   // caller sees one extra item, not two.
   class Tailed extends Array {
@@ -427,6 +446,8 @@ describe("a cyclic output", () => {
         dag: returning("dag", { message: "x", first: shared, second: [shared] }),
         hiddenCycle: returning("hiddenCycle", hiddenCycle),
         iteratesItself: returning("iteratesItself", iteratesItself),
+        scaled: returning("scaled", { list: Scaled.from([1, 2]) }),
+        speciated: returning("speciated", { list: Speciated.from([1, 2]) }),
         mapsItself: returning("mapsItself", mapsItself),
         mapsSafely: returning("mapsSafely", mapsSafely),
         subclass: returning("subclass", { list: Tagged.from([1, 2]) }),
@@ -483,6 +504,24 @@ describe("a cyclic output", () => {
   test("keeps an Array subclass's toJSON, as oRPC does", async () => {
     const started = await client(server).workflows.start({
       workflowId: "subclass",
+      inputData: { message: "x" },
+    });
+    expect(started.result).toEqual({ list: "custom:2" } as unknown as typeof Message.Type);
+  });
+
+  test("leaves an Array subclass's toJSON the inherited map, as oRPC does", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "scaled",
+      inputData: { message: "x" },
+    });
+    expect(started.result).toEqual({
+      list: { original: [1, 2], scaled: [2, 4] },
+    } as unknown as typeof Message.Type);
+  });
+
+  test("keeps the toJSON of an ordinary array a species builds, as oRPC does", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "speciated",
       inputData: { message: "x" },
     });
     expect(started.result).toEqual({ list: "custom:2" } as unknown as typeof Message.Type);
