@@ -57,13 +57,16 @@ function isWalked(value: unknown): boolean {
  *   way, and so does a repeated key, except a leaf object key repeated by an overridden `entries`:
  *   like a Set's, it collapses into one entry here, where oRPC's client keeps both.
  * - Array: the array's own `map`, called with a callback that returns each item, as oRPC calls it
- *   with one that encodes each. What `map` returns stands for oRPC's raw JSON for the array, and is
- *   walked like any output, so the copy has the returned shape (holes stay holes). Where the
- *   override returns raw values, moves callback results or passes its own index, the copy differs:
- *   the snapshot encodes each value at its real slot, where oRPC records meta at the override's
- *   path and index and passes raw values on unwalked; and a raw value referring back to the array
- *   counts as a cycle. All items are read before any is walked into, where oRPC walks each as `map`
- *   reaches it; only recursion could keep that order.
+ *   with one that encodes each. What `map` returns stands for oRPC's raw JSON for the array: if it
+ *   is an array, its items are read by index and walked (holes stay holes), otherwise it is walked
+ *   itself. The copy keeps that array's prototype, so an Array subclass's `toJSON` still runs, with
+ *   the native `map` as an own property, so the encoder never calls an override again; a subclass's
+ *   species constructor runs once more there. Where the override returns raw values, moves
+ *   callback results or passes its own index, the copy differs: the snapshot encodes each value at
+ *   its real slot, where oRPC records meta at the override's path and index and passes raw values
+ *   on unwalked; and a raw value referring back to the array counts as a cycle. All items are read
+ *   before any is walked into, where oRPC walks each as `map` reaches it; only recursion could keep
+ *   that order.
  * - Anything else: the values of its for...in keys, each read right before it is walked into, as
  *   oRPC does: once, but a `toJSON` key twice. A `toJSON` function is skipped. The copy has no
  *   prototype, so a `__proto__` key stays a key and oRPC re-encodes it as it would the original.
@@ -83,7 +86,7 @@ function* copyOf(value: object, name: string): Generator<unknown, unknown, unkno
       copies.push(isWalked(item) ? yield item : item);
     }
     try {
-      // Not always pairs: an overridden `entries` can yield anything, and new Map rejects that.
+      // Not always pairs: an overridden `entries` can yield a primitive, which new Map rejects.
       return new Map(copies as [unknown, unknown][]);
     } catch (cause) {
       throw new Error(`hex: the output of ${name} has a Map entry that isn't a [key, value] pair`, {
@@ -101,6 +104,13 @@ function* copyOf(value: object, name: string): Generator<unknown, unknown, unkno
       const item: unknown = mapped[i];
       copy[i] = isWalked(item) ? yield item : item;
     }
+    const prototype: unknown = Object.getPrototypeOf(mapped);
+    if (prototype !== Array.prototype) {
+      // Keeps an Array subclass's toJSON, which runs on what oRPC's map returns; the native map
+      // keeps the encoder from calling an overridden map again and encoding its unwalked result.
+      Object.setPrototypeOf(copy, prototype as object | null);
+      Object.defineProperty(copy, "map", { value: Array.prototype.map });
+    }
     return copy;
   }
   const copy = Object.create(null) as Record<string, unknown>;
@@ -116,12 +126,17 @@ function* copyOf(value: object, name: string): Generator<unknown, unknown, unkno
 }
 
 /**
- * A detached copy of a procedure's output, for oRPC to encode instead of the output: it encodes to
- * what the output would have, except as copyOf notes and for a `toJSON` getter that changes type
- * between its two reads. Having read the output once, as oRPC's serializer would, it keeps
- * getters, overridden `map`s and iterators from being read twice; only a leaf's prototype
- * `constructor` is read again when oRPC encodes the leaf. Leaves are kept by reference, and so is
- * an output oRPC streams as an event iterator.
+ * A detached copy of a procedure's output, for oRPC to encode instead of the output: a caller
+ * decodes it as it would the output, except as copyOf notes and for a `toJSON` getter that changes
+ * type between its two reads. Having read the output once, as oRPC's serializer would, it keeps
+ * getters, overridden `map`s and iterators from being read twice. Leaves are kept by reference, and
+ * so is an output oRPC streams as an event iterator: the values it yields are not checked.
+ *
+ * Not a byte-for-byte guarantee against exotic hooks: a leaf's prototype `constructor` is read
+ * again when oRPC encodes the leaf, an Array subclass's species constructor runs again, a Proxy's
+ * `getPrototypeOf` trap fires more often, an object reached again below itself is rejected even if
+ * its getters would answer differently the second time, and meta entries can come in another order
+ * (inherited integer keys, a Proxy's `ownKeys`), which decodes the same.
  *
  * Throws if the output contains itself, or nests deeper than oRPC's serializer could ever encode,
  * where that serializer would look. oRPC finds a cycle only by recursing until the stack

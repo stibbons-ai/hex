@@ -382,6 +382,12 @@ describe("a cyclic output", () => {
   Object.defineProperty(mapsSafely, "map", { value: () => ["safe"] });
   // A Map whose entries, which oRPC's serializer reads, yields an item that is no entry.
   const badEntry = Object.defineProperty(new Map(), "entries", { value: () => [5].values() });
+  // An Array subclass whose toJSON JSON.stringify calls on the species instance oRPC's map returns.
+  class Tagged extends Array {
+    toJSON(): string {
+      return `custom:${this.length}`;
+    }
+  }
   // Who reads the getter, by the caller's stack frame; the result is the last read.
   const readers: string[] = [];
   const counted = {
@@ -413,6 +419,7 @@ describe("a cyclic output", () => {
         iteratesItself: returning("iteratesItself", iteratesItself),
         mapsItself: returning("mapsItself", mapsItself),
         mapsSafely: returning("mapsSafely", mapsSafely),
+        subclass: returning("subclass", { list: Tagged.from([1, 2]) }),
         counted: returning("counted", counted),
         badEntry: returning("badEntry", badEntry),
         encoder: returning("encoder", { date: unencodableDate }),
@@ -460,6 +467,14 @@ describe("a cyclic output", () => {
       status: "success",
       result: { message: "x", first: shared, second: [shared] } as typeof Message.Type,
     });
+  });
+
+  test("keeps an Array subclass's toJSON, as oRPC does", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "subclass",
+      inputData: { message: "x" },
+    });
+    expect(started.result).toEqual({ list: "custom:2" } as unknown as typeof Message.Type);
   });
 
   test("ignores an array's own iterator, as oRPC does", async () => {

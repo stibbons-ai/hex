@@ -88,13 +88,21 @@ test("keeps a class instance as a leaf, as oRPC's serializer does", () => {
   expect((snapshot({ box }) as { box: Box }).box).toBe(box);
 });
 
-test("keeps a Date as a leaf even when its prototype has no constructor, as oRPC does", () => {
-  const prototype = Object.create(Date.prototype, { constructor: { value: undefined } }) as Date;
-  const date = Object.setPrototypeOf(new Date(0), prototype) as Date;
-  const output = { date };
-  const encoded = encode(output);
-  expect(encoded).toContain("1970-01-01T00:00:00.000Z");
-  expect(encode(snapshot(output))).toBe(encoded);
+test.each([
+  ["Date", () => new Date(0)],
+  ["URL", () => new URL("https://example.com/x")],
+  ["RegExp", () => /re/g],
+  ["Blob", () => new Blob(["x"])],
+])("keeps a %s as a leaf even when its prototype has no constructor, as oRPC does", (_, make) => {
+  const value = make();
+  // Shadows `constructor` between the value and its own prototype, which stays in the chain.
+  const prototype = Object.create(Object.getPrototypeOf(value) as object, {
+    constructor: { value: undefined },
+  }) as object;
+  Object.setPrototypeOf(value, prototype);
+  const output = { list: [value] };
+  expect(encode(snapshot(output))).toBe(encode(output));
+  expect((snapshot(output) as typeof output).list[0]).toBe(value);
 });
 
 test("accepts an acyclic chain deeper than oRPC's serializer can encode", () => {
@@ -208,4 +216,18 @@ test("returns an async iterator output as is, which oRPC streams instead of enco
     },
   };
   expect(snapshot(iterator)).toBe(iterator);
+});
+
+test.each([
+  ["no next", { [Symbol.asyncIterator]: (): undefined => undefined }],
+  ["a next that isn't a function", { next: 1, [Symbol.asyncIterator]: (): undefined => undefined }],
+  ["no Symbol.asyncIterator", { next: async (): Promise<undefined> => undefined }],
+  [
+    "a Symbol.asyncIterator that isn't a function",
+    { next: async (): Promise<undefined> => undefined, [Symbol.asyncIterator]: 1 },
+  ],
+])("walks an incomplete async iterator with %s, which oRPC encodes", (_, members) => {
+  const half: Record<PropertyKey, unknown> = { ...members };
+  half.self = half;
+  rejects(half);
 });
