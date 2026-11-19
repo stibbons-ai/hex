@@ -172,6 +172,20 @@ const hex = createORPCClient<ContractRouterClient<typeof contract>>(
 await hex.workflows.list();
 ```
 
+`workflows.start` rejects cycles in supported response values (plain objects, arrays, Maps and
+Sets) before oRPC encodes them. The caller gets HTTP 500 / `INTERNAL_SERVER_ERROR`; the server
+logs the procedure name once with `hex: oRPC call failed`. Sharing an object without forming a
+cycle is allowed. The server encodes a snapshot so oRPC doesn't read ordinary walked getters
+again and potentially see a cycle that wasn't there on the first read
+([#21 decision](https://github.com/stibbons-ai/hex/issues/21#issuecomment-7008328636)).
+
+Only whole responses are checked; a response that oRPC streams as events bypasses the check,
+including all yielded values. Very deep acyclic output may still exceed oRPC's encoder stack.
+Use ordinary containers for predictable decoded values: stateful getters and custom collection
+hooks can behave differently on the snapshot. For example, if a custom Array `Symbol.species`
+returns a plain array without `toJSON` and adds a trailing `Date`, the caller can receive a
+`Date` where stock oRPC would have returned its ISO string.
+
 Mastra's own REST routes (`/api/...`) are not served, so Studio and other clients of those routes
 don't work against this entrypoint; Studio runs as its own dev-only server instead.
 
