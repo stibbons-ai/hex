@@ -415,6 +415,8 @@ describe("a cyclic output", () => {
       this.push("tail");
     }
   }
+  // An ordinary Array subclass holding values oRPC encodes as typed, not as JSON.
+  class Holder extends Array {}
   const tailed = new Tailed(1);
   tailed[0] = "head";
   // Who reads the getter, by the caller's stack frame; each read returns its position.
@@ -453,6 +455,9 @@ describe("a cyclic output", () => {
         subclass: returning("subclass", { list: Tagged.from([1, 2]) }),
         tailed: returning("tailed", tailed),
         counted: returning("counted", counted),
+        typedItems: returning("typedItems", {
+          list: Holder.from([new Map([["k", 1]]), new Set([2])]),
+        }),
         badEntry: returning("badEntry", badEntry),
         encoder: returning("encoder", { date: unencodableDate }),
       },
@@ -563,6 +568,16 @@ describe("a cyclic output", () => {
       inputData: { message: "x" },
     });
     expect(started.result).toEqual(["head", "tail", "tail"] as unknown as typeof Message.Type);
+  });
+
+  test("encodes the typed items of an Array subclass, as oRPC does", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "typedItems",
+      inputData: { message: "x" },
+    });
+    expect(started.result).toEqual({
+      list: [new Map([["k", 1]]), new Set([2])],
+    } as unknown as typeof Message.Type);
   });
 
   test("is read once at the response boundary: oRPC encodes a snapshot, not the output", async () => {
