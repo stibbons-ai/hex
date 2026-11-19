@@ -388,7 +388,17 @@ describe("a cyclic output", () => {
       return `custom:${this.length}`;
     }
   }
-  // Who reads the getter, by the caller's stack frame; the result is the last read.
+  // An Array subclass whose constructor adds an item: oRPC's map constructs it once, so its
+  // caller sees one extra item, not two.
+  class Tailed extends Array {
+    constructor(length: number) {
+      super(length);
+      this.push("tail");
+    }
+  }
+  const tailed = new Tailed(1);
+  tailed[0] = "head";
+  // Who reads the getter, by the caller's stack frame; each read returns its position.
   const readers: string[] = [];
   const counted = {
     get value() {
@@ -420,6 +430,7 @@ describe("a cyclic output", () => {
         mapsItself: returning("mapsItself", mapsItself),
         mapsSafely: returning("mapsSafely", mapsSafely),
         subclass: returning("subclass", { list: Tagged.from([1, 2]) }),
+        tailed: returning("tailed", tailed),
         counted: returning("counted", counted),
         badEntry: returning("badEntry", badEntry),
         encoder: returning("encoder", { date: unencodableDate }),
@@ -507,14 +518,23 @@ describe("a cyclic output", () => {
     }
   });
 
+  test("constructs an Array subclass's species once, as oRPC does", async () => {
+    const started = await client(server).workflows.start({
+      workflowId: "tailed",
+      inputData: { message: "x" },
+    });
+    expect(started.result).toEqual(["head", "tail", "tail"] as unknown as typeof Message.Type);
+  });
+
   test("is read once at the response boundary: oRPC encodes a snapshot, not the output", async () => {
     const started = await client(server).workflows.start({
       workflowId: "counted",
       inputData: { message: "x" },
     });
     expect(readers.filter((reader) => reader.includes("@orpc/"))).toEqual([]);
-    expect(readers.at(-1)).toContain("snapshot.ts");
-    expect(started.result).toEqual({ value: readers.length } as unknown as typeof Message.Type);
+    const bySnapshot = readers.flatMap((reader, i) => (reader.includes("snapshot.ts") ? [i] : []));
+    expect(bySnapshot).toHaveLength(1);
+    expect(started.result).toEqual({ value: bySnapshot[0]! + 1 } as unknown as typeof Message.Type);
   });
 
   test("is told apart from an output the encoder rejects after the check, logged once", async () => {

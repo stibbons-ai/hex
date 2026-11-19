@@ -6,6 +6,46 @@
 const MAX_DEPTH = 100_000;
 
 /**
+ * The most overridden array `map`s nested inside each other's callbacks: each callback walks its
+ * item while the override waits, so each one nests a walk on the stack and walks its copy again.
+ * About 50 ms at the bound; oRPC's serializer encodes several thousand (measured 8,000).
+ */
+const MAX_MAP_NESTING = 1_000;
+
+/** One output's walk: its procedure, the current path from the root, the nested map callbacks. */
+interface Walk {
+  name: string;
+  path: Set<object>;
+  maps: number;
+}
+
+const tooDeep = (walk: Walk) => new Error(`hex: the output of ${walk.name} is cyclic or too deep`);
+
+/** The indices a copied Array subclass hands the encoder's callback, keyed by the copy. */
+const replays = new WeakMap<object, number[]>();
+
+/** The `map` of a copied Array subclass: calls `encode` on its walked indices, in place. */
+function replayMap(
+  this: unknown[],
+  encode: (item: unknown, index: number, array: unknown[]) => unknown,
+): unknown[] {
+  for (const i of replays.get(this) ?? []) this[i] = encode(this[i], i, this);
+  return this;
+}
+
+/** What a custom array `map`'s callback returns for `item`: its checked, detached copy. */
+function detach(item: unknown, walk: Walk): unknown {
+  if (!isWalked(item)) return item;
+  if (walk.maps >= MAX_MAP_NESTING) throw tooDeep(walk);
+  walk.maps++;
+  try {
+    return copyWhole(item as object, walk);
+  } finally {
+    walk.maps--;
+  }
+}
+
+/**
  * Whether oRPC's RPC serializer streams `value` as an event iterator instead of encoding it:
  * `isAsyncIteratorObject` from `@orpc/shared` 1.16.1, inlined because `@orpc/server` doesn't
  * re-export it and `@orpc/shared` isn't a dependency here.
@@ -56,25 +96,34 @@ function isWalked(value: unknown): boolean {
  *   fail decoding it with the same `new Map(json)`. A short or long entry decodes the same either
  *   way, and so does a repeated key, except a leaf object key repeated by an overridden `entries`:
  *   like a Set's, it collapses into one entry here, where oRPC's client keeps both.
- * - Array: the array's own `map`, called with a callback that returns each item, as oRPC calls it
- *   with one that encodes each. What `map` returns stands for oRPC's raw JSON for the array: if it
- *   is an array, its items are read by index and walked (holes stay holes), otherwise it is walked
- *   itself. The copy keeps that array's prototype, so an Array subclass's `toJSON` still runs, with
- *   the native `map` as an own property, so the encoder never calls an override again; a subclass's
- *   species constructor runs once more there. Where the override returns raw values, moves
- *   callback results or passes its own index, the copy differs: the snapshot encodes each value at
- *   its real slot, where oRPC records meta at the override's path and index and passes raw values
- *   on unwalked; and a raw value referring back to the array counts as a cycle. All items are read
- *   before any is walked into, where oRPC walks each as `map` reaches it; only recursion could keep
- *   that order.
+ * - Array, with the native `map`: called once with a callback that returns each item, as oRPC
+ *   calls it with one that encodes each. Its result (an Array subclass's species instance, built
+ *   once) is the copy: the visited indices get their items' copies in place, holes and any slots
+ *   the species constructor added stay as they are. A subclass copy keeps its prototype, so its
+ *   `toJSON` still runs, and gets an own `map` handing the encoder's callback only the visited
+ *   indices, so the species constructor never runs again. All items are read before any is walked
+ *   into, where oRPC walks each as `map` reaches it: an index getter whose answer depends on what
+ *   was read before it can decode differently. Only recursion could keep that order.
+ * - Array, with an overridden `map`: called once, with a callback returning the checked, detached
+ *   copy of each walked item, as oRPC's returns a fresh encoding, so an override that changes it
+ *   leaves the output alone. That callback walks inside the override's call, so a cycle it meets
+ *   throws there: an override that catches that, discards the item and returns safely passes, as
+ *   with oRPC once its stack overflowed. Nested overrides past MAX_MAP_NESTING fail. What the
+ *   override returns stands for oRPC's raw JSON for the array: if it is an array, every item is
+ *   walked again, callback copies and changes to them included, and copied into a plain array (with
+ *   that array's prototype and, for a subclass, the replaying `map` above); otherwise it is walked
+ *   itself. Where the override returns raw values, moves callback results or passes its own index,
+ *   the copy differs: the snapshot encodes each value at its real slot, where oRPC records meta at
+ *   the override's path and index and passes raw values on unwalked; and a raw value referring
+ *   back to the array counts as a cycle.
  * - Anything else: the values of its for...in keys, each read right before it is walked into, as
  *   oRPC does: once, but a `toJSON` key twice. A `toJSON` function is skipped. The copy has no
  *   prototype, so a `__proto__` key stays a key and oRPC re-encodes it as it would the original.
  *
- * The walk, and so the cycle check, reaches only what it descends into: a callback result an
- * override hides inside a leaf (a class instance, say) is kept there by reference, unwalked.
+ * The walk, and so the cycle check, reaches only what it descends into: a callback copy an
+ * override hides inside a leaf (a class instance, say) is kept there by reference, unwalked again.
  */
-function* copyOf(value: object, name: string): Generator<unknown, unknown, unknown> {
+function* copyOf(value: object, walk: Walk): Generator<unknown, unknown, unknown> {
   if (value instanceof Set) {
     const copy = new Set<unknown>();
     for (const item of Array.from(value)) copy.add(isWalked(item) ? yield item : item);
@@ -89,27 +138,49 @@ function* copyOf(value: object, name: string): Generator<unknown, unknown, unkno
       // Not always pairs: an overridden `entries` can yield a primitive, which new Map rejects.
       return new Map(copies as [unknown, unknown][]);
     } catch (cause) {
-      throw new Error(`hex: the output of ${name} has a Map entry that isn't a [key, value] pair`, {
-        cause,
-      });
+      throw new Error(
+        `hex: the output of ${walk.name} has a Map entry that isn't a [key, value] pair`,
+        { cause },
+      );
     }
   }
   if (Array.isArray(value)) {
-    const mapped: unknown = value.map((item: unknown) => item);
+    let mapped: unknown;
+    // The indices native map visited, in mapped: a fresh array, copied in place.
+    let visited = replays.get(value);
+    if (visited) {
+      mapped = value;
+    } else {
+      const map = (value as unknown[]).map;
+      if (map === Array.prototype.map) {
+        const indices: number[] = [];
+        mapped = map.call(value, (item, i) => {
+          indices.push(i);
+          return item;
+        });
+        visited = indices;
+      } else {
+        mapped = map.call(value, (item) => detach(item, walk));
+      }
+    }
     if (!Array.isArray(mapped)) return isWalked(mapped) ? yield mapped : mapped;
-    const copy: unknown[] = [];
-    copy.length = mapped.length;
-    for (let i = 0; i < mapped.length; i++) {
-      if (!(i in mapped)) continue;
+    const copy: unknown[] = visited ? mapped : [];
+    const walked = visited ?? [];
+    if (!visited) {
+      copy.length = mapped.length;
+      for (let i = 0; i < mapped.length; i++) if (i in mapped) walked.push(i);
+    }
+    for (const i of walked) {
       const item: unknown = mapped[i];
       copy[i] = isWalked(item) ? yield item : item;
     }
     const prototype: unknown = Object.getPrototypeOf(mapped);
     if (prototype !== Array.prototype) {
-      // Keeps an Array subclass's toJSON, which runs on what oRPC's map returns; the native map
-      // keeps the encoder from calling an overridden map again and encoding its unwalked result.
-      Object.setPrototypeOf(copy, prototype as object | null);
-      Object.defineProperty(copy, "map", { value: Array.prototype.map });
+      // Keeps an Array subclass's toJSON, which runs on what oRPC's map returns, without running
+      // its species constructor again in the encoder's map or calling an overridden one again.
+      if (!visited) Object.setPrototypeOf(copy, prototype as object | null);
+      replays.set(copy, walked);
+      Object.defineProperty(copy, "map", { value: replayMap });
     }
     return copy;
   }
@@ -133,48 +204,58 @@ function* copyOf(value: object, name: string): Generator<unknown, unknown, unkno
  * so is an output oRPC streams as an event iterator: the values it yields are not checked.
  *
  * Not a byte-for-byte guarantee against exotic hooks: a leaf's prototype `constructor` is read
- * again when oRPC encodes the leaf, an Array subclass's species constructor runs again, a Proxy's
- * `getPrototypeOf` trap fires more often, an object reached again below itself is rejected even if
- * its getters would answer differently the second time, and meta entries can come in another order
- * (inherited integer keys, a Proxy's `ownKeys`), which decodes the same.
+ * again when oRPC encodes the leaf, a Proxy's `getPrototypeOf` trap fires more often, an object
+ * reached again below itself is rejected even if its getters would answer differently the second
+ * time, and meta entries can come in another order (inherited integer keys, a Proxy's `ownKeys`),
+ * which decodes the same.
  *
  * Throws if the output contains itself, or nests deeper than oRPC's serializer could ever encode,
- * where that serializer would look. oRPC finds a cycle only by recursing until the stack
- * overflows, which blocks the event loop for seconds; this answers in time linear in what the
- * serializer would walk anyway. The depth bound also ends a value that hands out a fresh object on
- * every read.
+ * where that serializer would look, or nests more overridden array `map`s than MAX_MAP_NESTING.
+ * oRPC finds a cycle only by recursing until the stack overflows, which blocks the event loop for
+ * seconds; this answers in time linear in what the serializer would walk anyway, times the
+ * overridden `map`s a value sits below. The depth bound also ends a value that hands out a fresh
+ * object on every read.
  *
- * Iterative, so a deep value can't overflow the stack here either. It tracks the current path from
- * the root, not every value seen: a value reached twice through different parents is shared,
- * which serializes fine (as two copies, as here); only one reached again below itself is a cycle.
+ * Iterative, so a deep value can't overflow the stack here either: only overridden `map`s nest,
+ * up to MAX_MAP_NESTING. It tracks the current path from the root, not every value seen: a value
+ * reached twice through different parents is shared, which serializes fine (as two copies, as
+ * here); only one reached again below itself is a cycle.
  *
  * @param name The procedure's path, for the error message.
  */
 export function snapshotOutput(output: unknown, name: string): unknown {
   if (isAsyncIteratorObject(output) || !isWalked(output)) return output;
-  const path = new Set<object>();
+  return copyWhole(output as object, { name, path: new Set(), maps: 0 });
+}
+
+/** The copy of `root`, walked iteratively below `walk.path`, which it leaves as it found it. */
+function copyWhole(root: object, walk: Walk): unknown {
+  const { path } = walk;
   const frames: { value: object; copying: Generator<unknown, unknown, unknown> }[] = [];
-  let next = output as object;
-  for (;;) {
-    if (path.has(next) || path.size >= MAX_DEPTH) {
-      throw new Error(`hex: the output of ${name} is cyclic or too deep`);
-    }
-    path.add(next);
-    frames.push({ value: next, copying: copyOf(next, name) });
-    // The copy to send to the innermost frame; undefined starts a new frame's generator.
-    let copy: unknown;
+  let next = root;
+  try {
     for (;;) {
-      const frame = frames.at(-1)!;
-      const step = frame.copying.next(copy);
-      if (!step.done) {
-        // copyOf yields only values isWalked accepts, all objects.
-        next = step.value as object;
-        break;
+      if (path.has(next) || path.size >= MAX_DEPTH) throw tooDeep(walk);
+      path.add(next);
+      frames.push({ value: next, copying: copyOf(next, walk) });
+      // The copy to send to the innermost frame; undefined starts a new frame's generator.
+      let copy: unknown;
+      for (;;) {
+        const frame = frames.at(-1)!;
+        const step = frame.copying.next(copy);
+        if (!step.done) {
+          // copyOf yields only values isWalked accepts, all objects.
+          next = step.value as object;
+          break;
+        }
+        frames.pop();
+        path.delete(frame.value);
+        if (frames.length === 0) return step.value;
+        copy = step.value;
       }
-      frames.pop();
-      path.delete(frame.value);
-      if (frames.length === 0) return step.value;
-      copy = step.value;
     }
+  } finally {
+    // A throw leaves frames behind; an override's map may catch it and the walk go on.
+    for (const frame of frames) path.delete(frame.value);
   }
 }

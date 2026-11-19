@@ -231,3 +231,50 @@ test.each([
   half.self = half;
   rejects(half);
 });
+
+test("hands an array's own map a detached copy, as oRPC does, and checks what it returns", () => {
+  const record = { v: "original" };
+  let calls = 0;
+  const output = {
+    list: mapping([record], (visit) => {
+      calls++;
+      const mapped = visit(record) as typeof record;
+      mapped.v = "changed";
+      return [mapped];
+    }),
+    sibling: record,
+  };
+  const encoded = encode(output);
+  expect(encoded).toBe(encode({ list: [{ v: "changed" }], sibling: { v: "original" } }));
+  expect(record.v).toBe("original");
+  calls = 0;
+  expect(encode(snapshot(output))).toBe(encoded);
+  expect(record.v).toBe("original");
+  expect(calls).toBe(1);
+
+  const linked = { v: 1 };
+  rejects(
+    mapping([linked], (visit) => {
+      const mapped = visit(linked) as Record<string, unknown>;
+      mapped.self = mapped;
+      return [mapped];
+    }),
+  );
+  const looped: unknown[] = mapping([{ v: 1 }], (visit) => {
+    const mapped = visit({ v: 1 }) as Record<string, unknown>;
+    mapped.back = looped;
+    return [mapped];
+  });
+  rejects(looped);
+});
+
+test("fails fast and by name on custom maps nested deeper than it recurses", () => {
+  let value: unknown = [];
+  for (let i = 0; i < 20_000; i++) {
+    const inner = value;
+    value = mapping([inner], (visit) => [visit(inner)]);
+  }
+  const started = performance.now();
+  rejects(value);
+  expect(performance.now() - started).toBeLessThan(1000);
+});
