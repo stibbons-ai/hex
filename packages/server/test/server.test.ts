@@ -6,9 +6,11 @@ import { toMastraSchema } from "@hex/adapters";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { DuckDBStore } from "@mastra/duckdb";
 import { LibSQLStore } from "@mastra/libsql";
-import { ORPCError, safe } from "@orpc/client";
+import { ORPCError, createORPCClient, safe } from "@orpc/client";
+import { RPCLink } from "@orpc/client/fetch";
+import type { ContractRouterClient } from "@orpc/contract";
 import { Schema } from "effect";
-import { type RunningServer, type ServerOptions, startServer } from "../src";
+import { type RunningServer, type ServerOptions, type contract, startServer } from "../src";
 import { Message, client, echo, oneStep } from "./server-helpers";
 
 const lanAddress = Object.values(networkInterfaces())
@@ -474,13 +476,30 @@ describe("a cyclic output", () => {
     "is rejected fast as a 500, logged once (%s)",
     async (workflowId) => {
       const logged = spyOn(server.mastra.getLogger(), "error");
+      // The client's `status` comes from the RPC body; the Response carries the HTTP one.
+      const statuses: number[] = [];
+      const observed = createORPCClient<ContractRouterClient<typeof contract>>(
+        new RPCLink({
+          url: new URL("/rpc", server.url),
+          fetch: async (request, init) => {
+            const response = await fetch(request, init);
+            statuses.push(response.status);
+            return response;
+          },
+        }),
+      );
       try {
         const started = performance.now();
         const { error } = await safe(
-          client(server).workflows.start({ workflowId, inputData: { message: "x" } }),
+          observed.workflows.start({ workflowId, inputData: { message: "x" } }),
         );
         expect(performance.now() - started).toBeLessThan(200);
-        expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR", status: 500 });
+        expect(statuses).toEqual([500]);
+        expect(error).toBeInstanceOf(ORPCError);
+        expect(error).toMatchObject({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Internal server error",
+        });
         expect(logged).toHaveBeenCalledTimes(1);
         const [message, fault] = logged.mock.calls[0]!;
         expect(message).toBe("hex: oRPC call failed");

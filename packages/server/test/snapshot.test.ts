@@ -218,6 +218,17 @@ test("returns an async iterator output as is, which oRPC streams instead of enco
   expect(snapshot(iterator)).toBe(iterator);
 });
 
+test("walks a complete async iterator below the root, which oRPC encodes as a record", () => {
+  const nested: Record<PropertyKey, unknown> = {
+    next: async () => ({ done: true, value: undefined }),
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+  nested.self = nested;
+  rejects({ result: nested });
+});
+
 /** Root shapes oRPC's codec encodes whole, each with what a caller decodes beside `data`. */
 const incompleteIterators: [string, Record<PropertyKey, unknown>, object][] = [
   ["no next", { [Symbol.asyncIterator]: (): undefined => undefined }, {}],
