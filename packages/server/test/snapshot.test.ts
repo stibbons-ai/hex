@@ -268,6 +268,32 @@ test("hands an array's own map a detached copy, as oRPC does, and checks what it
   rejects(looped);
 });
 
+test("leaves the path as found when an array's own map catches a failed walk", () => {
+  // A getter that throws once fails the walk with `shared` and `inner` still on the path.
+  const make = () => {
+    let thrown = false;
+    const shared = {
+      inner: {
+        get once() {
+          if (thrown) return 1;
+          thrown = true;
+          throw new Error("first read");
+        },
+      },
+    };
+    const list = mapping([shared], (visit) => {
+      try {
+        visit(shared);
+      } catch {}
+      return ["safe"];
+    });
+    return { list, sibling: shared };
+  };
+  const encoded = encode(make());
+  expect(encoded).toBe(encode({ list: ["safe"], sibling: { inner: { once: 1 } } }));
+  expect(encode(snapshot(make()))).toBe(encoded);
+});
+
 test("fails fast and by name on custom maps nested deeper than it recurses", () => {
   let value: unknown = [];
   for (let i = 0; i < 20_000; i++) {

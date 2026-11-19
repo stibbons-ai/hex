@@ -8,7 +8,8 @@ const MAX_DEPTH = 100_000;
 /**
  * The most overridden array `map`s nested inside each other's callbacks: each callback walks its
  * item while the override waits, so each one nests a walk on the stack and walks its copy again.
- * About 50 ms at the bound; oRPC's serializer encodes several thousand (measured 8,000).
+ * About 50 ms at the bound for a bare chain; the work grows with the payload below each override.
+ * oRPC's serializer encodes several thousand (measured 8,000).
  */
 const MAX_MAP_NESTING = 1_000;
 
@@ -146,7 +147,7 @@ function* copyOf(value: object, walk: Walk): Generator<unknown, unknown, unknown
   }
   if (Array.isArray(value)) {
     let mapped: unknown;
-    // The indices native map visited, in mapped: a fresh array, copied in place.
+    // The indices native map visited, in mapped: its result (or a replay copy), copied in place.
     let visited = replays.get(value);
     if (visited) {
       mapped = value;
