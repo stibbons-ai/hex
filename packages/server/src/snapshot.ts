@@ -20,8 +20,6 @@ interface Walk {
   maps: number;
 }
 
-const tooDeep = (walk: Walk) => new Error(`hex: the output of ${walk.name} is cyclic or too deep`);
-
 /** The indices a copied array hands the encoder's callback, keyed by the copy, until it does. */
 const replays = new WeakMap<object, number[]>();
 
@@ -43,7 +41,11 @@ function replayMap(
 /** What a custom array `map`'s callback returns for `item`: its checked, detached copy. */
 function detach(item: unknown, walk: Walk): unknown {
   if (!isWalked(item)) return item;
-  if (walk.maps >= MAX_MAP_NESTING) throw tooDeep(walk);
+  if (walk.maps >= MAX_MAP_NESTING) {
+    throw new Error(
+      `hex: the output of ${walk.name} nests more than ${MAX_MAP_NESTING} custom array maps at depth ${walk.path.size}`,
+    );
+  }
   walk.maps++;
   try {
     return copyWhole(item as object, walk);
@@ -245,7 +247,13 @@ function copyWhole(root: object, walk: Walk): unknown {
   let next = root;
   try {
     for (;;) {
-      if (path.has(next) || path.size >= MAX_DEPTH) throw tooDeep(walk);
+      // Only the procedure and counts: keys or constructor names could disclose data or run hooks.
+      if (path.has(next)) {
+        throw new Error(`hex: the output of ${walk.name} is cyclic at depth ${path.size}`);
+      }
+      if (path.size >= MAX_DEPTH) {
+        throw new Error(`hex: the output of ${walk.name} is deeper than ${MAX_DEPTH} values`);
+      }
       path.add(next);
       frames.push({ value: next, copying: copyOf(next, walk) });
       // The copy to send to the innermost frame; undefined starts a new frame's generator.

@@ -504,8 +504,8 @@ describe("a cyclic output", () => {
         const [message, fault] = logged.mock.calls[0]!;
         expect(message).toBe("hex: oRPC call failed");
         expect(fault).toBeInstanceOf(Error);
-        expect((fault as Error).message).toBe(
-          "hex: the output of workflows.start is cyclic or too deep",
+        expect((fault as Error).message).toMatch(
+          /^hex: the output of workflows\.start is cyclic at depth \d+$/,
         );
       } finally {
         logged.mockRestore();

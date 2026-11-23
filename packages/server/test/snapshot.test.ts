@@ -6,8 +6,12 @@ const serializer = new StandardRPCSerializer(new StandardRPCJsonSerializer());
 /** What hex's RPC handler sends for `value`. */
 const encode = (value: unknown): string => JSON.stringify(serializer.serialize(value));
 const snapshot = (value: unknown): unknown => snapshotOutput(value, "test.procedure");
-const rejects = (value: unknown): void => {
-  expect(() => snapshot(value)).toThrow("hex: the output of test.procedure is cyclic or too deep");
+/** Expects `value` rejected with `reason`, by default a cycle at any depth. */
+const rejects = (
+  value: unknown,
+  reason: string | RegExp = /^hex: the output of test\.procedure is cyclic at depth \d+$/,
+): void => {
+  expect(() => snapshot(value)).toThrow(reason);
 };
 
 test("encodes as the output would, without oRPC touching the output again", () => {
@@ -71,7 +75,7 @@ test("reads a `toJSON` key twice, as oRPC's serializer does", () => {
 test("finds a cycle through a Map key", () => {
   const key: { map?: Map<unknown, unknown> } = {};
   key.map = new Map([[key, "value"]]);
-  rejects(key);
+  rejects(key, "hex: the output of test.procedure is cyclic at depth 3");
 });
 
 test("tracks the path from the root, not every value seen: a shared value is no cycle", () => {
@@ -116,10 +120,10 @@ test("accepts an acyclic chain deeper than oRPC's serializer can encode", () => 
 test("walks into objects without a prototype, or whose prototype has no constructor", () => {
   const bare = Object.create(null) as Record<string, unknown>;
   bare.self = bare;
-  rejects({ bare });
+  rejects({ bare }, "hex: the output of test.procedure is cyclic at depth 2");
   const orphan = Object.create(Object.create(null) as object) as Record<string, unknown>;
   orphan.self = orphan;
-  rejects({ orphan });
+  rejects({ orphan }, "hex: the output of test.procedure is cyclic at depth 2");
 });
 
 test("gives up on a value that hands out a fresh object on every read, fast", () => {
@@ -129,7 +133,7 @@ test("gives up on a value that hands out a fresh object on every read, fast", ()
     },
   });
   const started = performance.now();
-  rejects(fresh());
+  rejects(fresh(), "hex: the output of test.procedure is deeper than 100000 values");
   expect(performance.now() - started).toBeLessThan(1000);
 });
 
@@ -348,6 +352,9 @@ test("fails fast and by name on custom maps nested deeper than it recurses", () 
     value = mapping([inner], (visit) => [visit(inner)]);
   }
   const started = performance.now();
-  rejects(value);
+  rejects(
+    value,
+    /^hex: the output of test\.procedure nests more than 1000 custom array maps at depth \d+$/,
+  );
   expect(performance.now() - started).toBeLessThan(1000);
 });
