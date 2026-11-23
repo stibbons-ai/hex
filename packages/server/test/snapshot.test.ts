@@ -319,6 +319,27 @@ test("hands an array's own map a detached copy, as oRPC does, and checks what it
   rejects(looped);
 });
 
+test("replays a species map's copy as is when an override walks it again", () => {
+  // Native map builds its result through the species, which here appends a tail: encoded, it is
+  // { v: 1 }; left raw, JSON calls its `toJSON`.
+  class Tailed extends Array {
+    constructor(length: number) {
+      super(length);
+      this.push({ v: 1, toJSON: () => "raw" });
+    }
+  }
+  const make = () => {
+    const tailed = new Tailed(1);
+    tailed[0] = "head";
+    return mapping([tailed], (visit) => [visit(tailed)]);
+  };
+  const encoded = encode(make());
+  // oRPC's one species map encodes the two items it visits and leaves the tail it appended raw.
+  // A second map, or one encoding that tail, would differ.
+  expect(encoded).toBe(encode([["head", { v: 1 }, "raw"]]));
+  expect(encode(snapshot(make()))).toBe(encoded);
+});
+
 test("leaves the path as found when an array's own map catches a failed walk", () => {
   // A getter that throws once fails the walk with `shared` and `inner` still on the path.
   const make = () => {
