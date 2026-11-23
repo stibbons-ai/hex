@@ -174,9 +174,13 @@ await hex.workflows.list();
 
 `workflows.start` rejects cycles in supported response values (plain objects, arrays, Maps and
 Sets) before oRPC encodes them. The caller gets HTTP 500 / `INTERNAL_SERVER_ERROR`; the server
-logs the procedure name once with `hex: oRPC call failed`. Sharing an object without forming a
-cycle is allowed. The server encodes a snapshot so oRPC doesn't read ordinary walked getters
-again and potentially see a cycle that wasn't there on the first read
+logs one `hex: oRPC call failed` error with the procedure name. The private diagnostic distinguishes
+a cycle from exceeding 100,000 walked values on one path or nesting more than 1,000 custom Array
+`map` callbacks ([#60 diagnostic request](https://github.com/stibbons-ai/hex/pull/60#discussion_r4663907489)).
+Logged depth counts walked values on the current path, including Map entry arrays, not payload keys.
+Sharing an object without forming a cycle is allowed. The server encodes a snapshot so oRPC
+doesn't read ordinary walked getters again and potentially see a cycle that wasn't there on the
+first read
 ([#21 decision](https://github.com/stibbons-ai/hex/issues/21#issuecomment-7008328636)).
 
 Only whole responses are checked; a response that oRPC streams as events bypasses the check,
