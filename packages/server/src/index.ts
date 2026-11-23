@@ -2,12 +2,13 @@ import { isIP } from "node:net";
 import type { IMastraLogger } from "@mastra/core/logger";
 import type { Mastra } from "@mastra/core/mastra";
 import type { AnyWorkflow } from "@mastra/core/workflows";
-import { ORPCError, onError, onSuccess } from "@orpc/server";
+import { ORPCError, onError } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { createChatAgent } from "./chat";
 import type { ChatAgent, ChatOptions } from "./chat";
 import { chatStores } from "./chat-state";
 import { closeInOrder } from "./close";
+import { snapshotOutput } from "./snapshot";
 import { createHexMastra, createHexStore } from "./mastra";
 import { allowedHosts } from "./hosts";
 import { DEFAULT_HOST } from "./listen-address";
@@ -223,16 +224,21 @@ export async function startServer({
       if (error instanceof ORPCError && error.status < 500) return;
       mastra.getLogger().error("hex: oRPC call failed", error);
     };
-    // Per-request contexts whose procedure returned. The handler-level interceptor also sees a
-    // caller's malformed body failing to decode, before the procedure; after it, a failure is in
-    // encoding our output, so ours.
+    // Per-request contexts whose procedure returned and was snapshotted. The handler-level
+    // interceptor also sees a caller's malformed body failing to decode, before the procedure;
+    // after it, a failure is in encoding our output, so ours.
     const procedureReturned = new WeakSet<object>();
     const handler = new RPCHandler(router, {
       clientInterceptors: [
         onError(logFault),
-        onSuccess((_output, { context }) => {
+        // oRPC encodes a snapshot of any output it encodes whole (see snapshotOutput; an event
+        // iterator's yielded values are not checked): a cyclic output fails like the procedure
+        // itself, logged once above, and never reaches oRPC's encoder.
+        async ({ next, context, path }) => {
+          const snapshot = snapshotOutput(await next(), path.join("."));
           procedureReturned.add(context);
-        }),
+          return snapshot;
+        },
       ],
       interceptors: [
         onError((error, { context }) => {
